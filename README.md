@@ -56,15 +56,35 @@ Current firmware: **v1**.
 
 ## Hardware
 
-| Item | Detail |
-|------|--------|
-| Board | Classic **ESP32** (e.g. ESP32-WROOM-32), 4 MB flash, USB-serial (often CH340) |
-| Buttons | **EN** = reset. **BOOT** = GPIO0 (hold + tap EN → ROM bootloader, only if a flash won't connect) |
-| Power/data | USB to a host for flashing + serial logging |
+Any common **ESP32 dev board** works — a ~$5 ESP32-DevKitC / NodeMCU-32S / WROOM-32 clone is exactly what
+this was built and tested on. No extra components, shields, or wiring are needed; the board on its own
+provides the radio, the config web server, and the NAT router.
 
-Board notes: some CH340 boards do **not** auto-run firmware after flashing (esptool says "Hard resetting"
-but the app doesn't start) — tap **EN**, power-cycle, or reboot from the host with a pyserial RTS toggle
-(see `tools/`). Serial console is **115200**.
+### Minimum requirements
+
+| Spec | Requirement | Notes |
+|------|-------------|-------|
+| **SoC** | ESP32 (Xtensa **dual-core** LX6, e.g. ESP32-D0WD) | Original ESP32 family; **not** required to be S2/S3/C3, but any ESP32 with Wi-Fi works |
+| **Wi-Fi** | 802.11 b/g/n, **2.4 GHz only** | The ESP32 radio is 2.4 GHz only by design — that's the "2.4 GHz-only AP" feature |
+| **Flash** | **≥ 4 MB** | Firmware is ~1.2 MB (~92% of the default 1.3 MB app partition on a 4 MB board) |
+| **RAM** | 520 KB SRAM (on-chip) | Runs comfortably; ~250 KB free heap at idle |
+| **USB-serial** | CH340, CP2102, or native USB | For flashing + optional serial logging; **115200** baud |
+| **Buttons** | **EN** (reset) and **BOOT** (GPIO0) | Standard on dev boards; used only for manual reset / bootloader entry |
+| **Power** | 5 V via USB (or 3.3 V regulated) | ~80–260 mA depending on Wi-Fi activity (AP + STA + NAT) |
+| **Antenna** | PCB or external 2.4 GHz | On-board PCB antenna is fine for bench use |
+
+### Recommended board
+
+- **ESP32-DevKitC v4** or any **ESP32-WROOM-32 / WROOM-32E** dev board, 4 MB flash, USB-C or micro-USB.
+- Confirmed working: generic WROOM-32 clone with a **CH340** USB-serial bridge.
+
+### Board notes
+
+- **RAM/PSRAM:** external PSRAM is **not** required.
+- **Flash size:** 8/16 MB boards also work (more headroom); **2 MB boards are too small.**
+- Some **CH340** boards don't auto-run firmware after flashing (esptool prints "Hard resetting" but the app
+  doesn't start) — tap **EN**, power-cycle, or reboot from the host with the RTS toggle in `tools/reboot.py`.
+- Serial console is **115200** baud, 8N1.
 
 ---
 
