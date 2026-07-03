@@ -1,0 +1,17 @@
+# build artifacts
+build/
+*.bin
+*.elf
+*.map
+# host logs
+*serial*.log
+*.log
+# os / editor
+.DS_Store
+*.swp
+
+# never publish proprietary/vendor reference material
+FOMAX/
+*FOMAX*
+*.pdf
+*.xlsx

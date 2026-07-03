@@ -1,0 +1,11 @@
+{
+  "latitude":  { "value": "1.359" },
+  "longitude": { "value": "103.99" },
+  "altitude":  { "value": "37000" },
+  "groundSpeed": { "value": "0" },
+  "flightNumber": { "value": "TEST01" },
+  "tail_number":  { "value": "TEST01" },
+  "originCode":      { "value": "WSSS" },
+  "destinationCode": { "value": "WMKK" },
+  "current_time": { "value": "2026-01-01T00:00:00Z" }
+}
