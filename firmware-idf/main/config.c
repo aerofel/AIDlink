@@ -57,10 +57,10 @@ void cfg_load(aidlink_cfg_t *c) {
     strcpy(c->dev_name, "aidlink");
     c->adbp_port = 24000; c->ds_port = 51000;
     c->frame_len = 1; c->frame_delim = 0; c->frame_prolog_each = true;
-    strcpy(c->api_ver, "3.1"); strcpy(c->ac_tail, "TEST01");
+    strcpy(c->api_ver, "3.1"); strcpy(c->ac_tail, "F-XXXX"); strcpy(c->ac_type, "A320");
     c->src_type = 0;
     strcpy(c->vs_url, "http://192.168.4.2:8080/flight/info");
-    c->poll_ms = 10000; c->stale_ms = 15000;
+    c->poll_ms = 1000; c->stale_ms = 15000;   // default 1 s poll
     c->auth_enable = true; strcpy(c->auth_user, "admin");
 
     nvs_handle_t h;

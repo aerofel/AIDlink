@@ -13,10 +13,12 @@
 
 #include <string.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_netif.h"
 #include "esp_netif_defaults.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "dhcpserver/dhcpserver.h"
 #include "tinyusb.h"
@@ -27,6 +29,9 @@
 static const char *TAG = "usbncm";
 static esp_netif_t *s_usb_netif;
 static esp_netif_ip_info_t s_ip;
+static uint32_t s_last_rx_ms;      // last time the host sent us a frame
+static uint8_t  s_host_mac[6];     // MAC assigned to the host-side NCM interface
+static char     s_client_ip[16];   // DHCP address handed to the host
 
 typedef struct { esp_netif_driver_base_t base; } usb_driver_t;
 
@@ -46,11 +51,23 @@ static void usb_free_rx(void *h, void *buffer) { free(buffer); }
 // esp_netif_receive hands the frame to the async tcpip thread, so we must copy.
 static esp_err_t usb_recv_cb(void *buffer, uint16_t len, void *ctx) {
     if (!s_usb_netif || len == 0) return ESP_OK;
+    s_last_rx_ms = (uint32_t)(esp_timer_get_time() / 1000);   // host is alive
     void *copy = malloc(len);
     if (!copy) return ESP_ERR_NO_MEM;
     memcpy(copy, buffer, len);
     if (esp_netif_receive(s_usb_netif, copy, len, copy) != ESP_OK) free(copy);
     return ESP_OK;
+}
+
+// A host is "connected" if it sent us a frame in the last 30 s (NCM hosts emit
+// periodic ARP/traffic). Reports the host NCM MAC and its DHCP address.
+bool usb_ncm_client(char *mac_str, char *ip_str) {
+    if (s_last_rx_ms == 0) return false;
+    if ((uint32_t)(esp_timer_get_time() / 1000) - s_last_rx_ms > 30000) return false;
+    snprintf(mac_str, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
+             s_host_mac[0], s_host_mac[1], s_host_mac[2], s_host_mac[3], s_host_mac[4], s_host_mac[5]);
+    strlcpy(ip_str, s_client_ip, 16);
+    return true;
 }
 
 static void usb_free_tx(void *buffer, void *ctx) { (void)buffer; (void)ctx; }
@@ -135,6 +152,9 @@ void usb_ncm_start(const aidlink_cfg_t *c) {
         .user_context = NULL,
     };
     esp_read_mac(net_cfg.mac_addr, ESP_MAC_ETH);   // host-side NCM MAC (distinct from nmac)
+    memcpy(s_host_mac, net_cfg.mac_addr, 6);        // remember it for the clients list
+    snprintf(s_client_ip, sizeof s_client_ip, "%d.%d.%d.%d",
+             c->usb_ip[0], c->usb_ip[1], c->usb_ip[2], c->usb_ip[3] + 1);   // DHCP pool start
     ESP_ERROR_CHECK(tinyusb_net_init(&net_cfg));
 
     // The DNS forwarder already binds 0.0.0.0:53, so it serves the USB gateway too.
@@ -144,4 +164,5 @@ void usb_ncm_start(const aidlink_cfg_t *c) {
 
 #else  // no native USB (e.g. classic ESP32)
 void usb_ncm_start(const aidlink_cfg_t *c) { (void)c; }
+bool usb_ncm_client(char *mac_str, char *ip_str) { (void)mac_str; (void)ip_str; return false; }
 #endif

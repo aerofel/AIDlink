@@ -11,6 +11,7 @@
 #include "pos.h"
 #include "poller.h"
 #include "log.h"
+#include "usb_ncm.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -200,13 +201,19 @@ static esp_err_t h_root(httpd_req_t *r) {
     chunk(r, "<div class='warn'>⚠ Experimental, non-certified. Ownship position only — never use as a primary/backup navigation source. Saving reboots the device to apply.</div>");
     chunk(r, "<form method='POST' action='/save'>");
 
-    // ① Uplink Wi-Fi
+    // ① Uplink Wi-Fi — with DHCP, show the LIVE assigned IP/gateway/netmask/DNS
+    // (read-only); with static config, show the stored values.
     bool dh = c->sta_dhcp;
-    uint8_t sip[4]; bool up = netcore_sta_up(sip);
     char ipv[16], gwv[16], mkv[16], dnv[16];
-    if (dh && up) snprintf(ipv, sizeof ipv, "%u.%u.%u.%u", sip[0], sip[1], sip[2], sip[3]);
-    else strlcpy(ipv, c->sta_ip, sizeof ipv);
-    strlcpy(gwv, c->sta_gw, sizeof gwv); strlcpy(mkv, c->sta_mask, sizeof mkv); strlcpy(dnv, c->sta_dns, sizeof dnv);
+    char lip[16], lgw[16], lmk[16], ldn[16];
+    bool up = netcore_sta_ipinfo(lip, lgw, lmk, ldn);
+    if (dh && up) {
+        strlcpy(ipv, lip, sizeof ipv); strlcpy(gwv, lgw, sizeof gwv);
+        strlcpy(mkv, lmk, sizeof mkv); strlcpy(dnv, ldn, sizeof dnv);
+    } else {
+        strlcpy(ipv, c->sta_ip, sizeof ipv); strlcpy(gwv, c->sta_gw, sizeof gwv);
+        strlcpy(mkv, c->sta_mask, sizeof mkv); strlcpy(dnv, c->sta_dns, sizeof dnv);
+    }
     const char *dis = dh ? " disabled" : "";
     chunk(r, "<div class='card'><h2>① Uplink Wi-Fi (we connect to)</h2><div class='grid'>");
     chunk(r, "<div class='f full'><label>Scan &amp; select a network</label><div style='display:flex;gap:.5rem'>"
@@ -316,7 +323,7 @@ static esp_err_t h_root(httpd_req_t *r) {
     chunkf(r, "async function uc(){try{let r=await fetch('/clients');let a=await r.json();let tb=document.querySelector('#clit tbody');"
               "document.getElementById('clic').textContent='('+a.length+' / %d)';"
               "if(!a.length){tb.innerHTML=\"<tr><td colspan='4' class='empty'>no clients connected</td></tr>\";return;}"
-              "tb.innerHTML=a.map((c,i)=>'<tr><td>'+(i+1)+'</td><td>'+c.mac+'</td><td>'+c.ip+'</td><td><span class=\"rssi\">'+c.rssi+' dBm</span></td></tr>').join('');"
+              "tb.innerHTML=a.map((c,i)=>'<tr><td>'+(i+1)+'</td><td>'+c.mac+'</td><td>'+c.ip+'</td><td><span class=\"rssi\">'+(typeof c.rssi=='number'?c.rssi+' dBm':c.rssi)+'</span></td></tr>').join('');"
               "}catch(e){}}", c->ap_max_clients);
     chunk(r, "var _dc=document.querySelector(\"input[name='staDhcp']\");"
              "function _td(){var d=_dc.checked;['staIp','staGw','staMask','staDns'].forEach(function(i){var e=document.getElementById(i);if(e)e.disabled=d;});}"
@@ -544,14 +551,24 @@ static esp_err_t h_status(httpd_req_t *r) {
 static esp_err_t h_clients(httpd_req_t *r) {
     if (!gate(r)) return ESP_OK;
     httpd_resp_set_type(r, "application/json");
-    wifi_sta_list_t list;
-    if (esp_wifi_ap_get_sta_list(&list) != ESP_OK) { httpd_resp_sendstr(r, "[]"); return ESP_OK; }
     chunk(r, "[");
-    for (int i = 0; i < list.num; i++) {
-        wifi_sta_info_t *s = &list.sta[i];
-        // IP per-MAC isn't tracked (no DHCP-lease map); report "(pending)" like v9's fallback.
-        chunkf(r, "%s{\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"ip\":\"(pending)\",\"rssi\":%d}",
-               i ? "," : "", s->mac[0], s->mac[1], s->mac[2], s->mac[3], s->mac[4], s->mac[5], s->rssi);
+    bool first = true;
+    // Wi-Fi AP stations
+    wifi_sta_list_t list;
+    if (esp_wifi_ap_get_sta_list(&list) == ESP_OK) {
+        for (int i = 0; i < list.num; i++) {
+            wifi_sta_info_t *s = &list.sta[i];
+            // IP per-MAC isn't tracked (no DHCP-lease map); report "(pending)" like v9's fallback.
+            chunkf(r, "%s{\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"ip\":\"(pending)\",\"rssi\":%d}",
+                   first ? "" : ",", s->mac[0], s->mac[1], s->mac[2], s->mac[3], s->mac[4], s->mac[5], s->rssi);
+            first = false;
+        }
+    }
+    // USB-C cable host (S3): shown with a "USB" signal instead of an RSSI.
+    char umac[18], uip[16];
+    if (usb_ncm_client(umac, uip)) {
+        chunkf(r, "%s{\"mac\":\"%s\",\"ip\":\"%s\",\"rssi\":\"USB\"}", first ? "" : ",", umac, uip);
+        first = false;
     }
     chunk(r, "]");
     httpd_resp_sendstr_chunk(r, NULL);

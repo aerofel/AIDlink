@@ -17,6 +17,10 @@ esp_netif_t *netcore_ap_netif(void);
 
 // True once the STA has an IP (uplink usable). Fills ip4 (4 bytes) when up.
 bool netcore_sta_up(uint8_t ip4_out[4]);
+
+// Live STA IP config as dotted-quad strings (each buf >=16). Returns true when
+// the STA is up; on DHCP this reflects the values assigned by the uplink.
+bool netcore_sta_ipinfo(char *ip, char *gw, char *mask, char *dns);
 // Count of stations currently associated to the SoftAP.
 int netcore_ap_client_count(void);
 

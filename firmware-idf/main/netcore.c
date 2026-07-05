@@ -30,6 +30,21 @@ int netcore_ap_client_count(void) {
     return esp_wifi_ap_get_sta_list(&list) == ESP_OK ? (int)list.num : 0;
 }
 
+bool netcore_sta_ipinfo(char *ip, char *gw, char *mask, char *dns) {
+    ip[0] = gw[0] = mask[0] = dns[0] = 0;
+    if (!s_sta_up || !s_sta) return false;
+    esp_netif_ip_info_t info;
+    if (esp_netif_get_ip_info(s_sta, &info) == ESP_OK) {
+        snprintf(ip, 16, IPSTR, IP2STR(&info.ip));
+        snprintf(gw, 16, IPSTR, IP2STR(&info.gw));
+        snprintf(mask, 16, IPSTR, IP2STR(&info.netmask));
+    }
+    esp_netif_dns_info_t d;
+    if (esp_netif_get_dns_info(s_sta, ESP_NETIF_DNS_MAIN, &d) == ESP_OK)
+        snprintf(dns, 16, IPSTR, IP2STR(&d.ip.u_addr.ip4));
+    return true;
+}
+
 // Scan uplink networks. The STA is put into a scannable state first: pause
 // auto-reconnect and stop any in-progress connection attempt (the driver rejects
 // a scan while "STA is connecting"). Returns 0 on success; fills *count.

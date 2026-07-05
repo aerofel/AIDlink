@@ -10,3 +10,8 @@
 // Wi-Fi STA uplink, so a USB host (Mac) plugged into the native USB gets internet
 // through the S3 — coexisting with the SoftAP.
 void usb_ncm_start(const aidlink_cfg_t *c);
+
+// If a USB-cable host is currently connected, fill mac_str (>=18) and ip_str
+// (>=16) and return true; else false. Always false on non-USB targets.
+#include <stdbool.h>
+bool usb_ncm_client(char *mac_str, char *ip_str);
