@@ -68,24 +68,15 @@ static void apply_fix(double lat, double lon, double alt, double gs, double trac
     s_prev_lat = lat; s_prev_lon = lon; s_prev_ms = t; s_have_prev = true;
 }
 
-// Emulator: advance along cfg.sim* track at cfg.sim_gs each tick.
+// Emulator: emit a FIXED position at cfg.sim* (matches v9 — does not advance;
+// fixed=true so the ADBP consumer-side dead-reckoner leaves it in place).
 static void sim_step(uint32_t dt_ms) {
+    (void)dt_ms;
     pos_state_t p; pos_get(&p);
-    static bool init;
-    static double lat, lon;
-    if (!init) { lat = CFG->sim_lat; lon = CFG->sim_lon; init = true; }
-    double dt_h = dt_ms / 3600000.0;
-    double dnm = CFG->sim_gs * dt_h;
-    if (dnm > 0) {
-        double d = dnm / 3440.065, t = CFG->sim_trk * M_PI / 180.0;
-        double la = lat * M_PI / 180.0, lo = lon * M_PI / 180.0;
-        double la2 = asin(sin(la) * cos(d) + cos(la) * sin(d) * cos(t));
-        double lo2 = lo + atan2(sin(t) * sin(d) * cos(la), cos(d) - sin(la) * sin(la2));
-        lat = la2 * 180.0 / M_PI; lon = lo2 * 180.0 / M_PI;
-    }
+    double gs = CFG->sim_gs; if (gs < 0) gs = 0; if (gs > 1500) gs = 1500;
     p.valid = true; p.simulated = true; p.fixed = true; p.have_track = true;
-    p.lat = lat; p.lon = lon; p.alt_ft = CFG->sim_alt;
-    p.gs_kt = CFG->sim_gs; p.track_deg = CFG->sim_trk;
+    p.lat = CFG->sim_lat; p.lon = CFG->sim_lon; p.alt_ft = CFG->sim_alt;
+    p.gs_kt = gs; p.track_deg = CFG->sim_trk;
     p.last_fix_ms = now_ms();
     time_t tt = time(NULL); if (tt > 1700000000) p.utc_ms = (uint64_t)tt * 1000;
     strlcpy(p.flight, CFG->ac_tail, sizeof p.flight);
