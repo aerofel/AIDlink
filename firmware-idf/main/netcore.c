@@ -14,6 +14,8 @@ static esp_netif_t *s_sta, *s_ap;
 
 static bool s_sta_up;
 static uint8_t s_sta_ip[4];
+static bool s_have_ssid;          // an uplink SSID is configured
+static volatile bool s_no_reconnect;   // suppress auto-reconnect (during a scan)
 
 esp_netif_t *netcore_sta_netif(void) { return s_sta; }
 esp_netif_t *netcore_ap_netif(void) { return s_ap; }
@@ -28,13 +30,36 @@ int netcore_ap_client_count(void) {
     return esp_wifi_ap_get_sta_list(&list) == ESP_OK ? (int)list.num : 0;
 }
 
+// Scan uplink networks. The STA is put into a scannable state first: pause
+// auto-reconnect and stop any in-progress connection attempt (the driver rejects
+// a scan while "STA is connecting"). Returns 0 on success; fills *count.
+int netcore_scan(wifi_ap_record_t *recs, uint16_t max, uint16_t *count) {
+    *count = 0;
+    s_no_reconnect = true;
+    esp_wifi_disconnect();
+    vTaskDelay(pdMS_TO_TICKS(120));   // let the connecting state clear
+    wifi_scan_config_t sc = { .show_hidden = true };
+    esp_err_t e = esp_wifi_scan_start(&sc, true);   // blocking
+    if (e == ESP_OK) {
+        uint16_t n = 0;
+        esp_wifi_scan_get_ap_num(&n);
+        if (n > max) n = max;
+        if (n) esp_wifi_scan_get_ap_records(&n, recs);
+        *count = n;
+    } else {
+        ESP_LOGW(TAG, "scan_start failed: %s", esp_err_to_name(e));
+    }
+    s_no_reconnect = false;
+    if (s_have_ssid) esp_wifi_connect();   // resume connecting to the uplink
+    return e == ESP_OK ? 0 : -1;
+}
+
 static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
+        if (s_have_ssid && !s_no_reconnect) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_sta_up = false;
-        ESP_LOGW(TAG, "[STA] disconnected, retrying");
-        esp_wifi_connect();
+        if (s_have_ssid && !s_no_reconnect) esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         s_sta_ip[0] = esp_ip4_addr1_16(&e->ip_info.ip);
@@ -103,6 +128,7 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
     // STA config
+    s_have_ssid = c->sta_ssid[0] != 0;
     wifi_config_t sta = {0};
     strlcpy((char *)sta.sta.ssid, c->sta_ssid, sizeof(sta.sta.ssid));
     strlcpy((char *)sta.sta.password, c->sta_pass, sizeof(sta.sta.password));

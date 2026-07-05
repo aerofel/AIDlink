@@ -411,6 +411,12 @@ static void fld_ip(const char *body, const char *k, char *dst, size_t cap) {
         strlcpy(dst, v, cap);
 }
 
+static void reboot_task(void *arg) {
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(600));   // let the response flush + socket close
+    esp_restart();
+}
+
 static esp_err_t h_save(httpd_req_t *r) {
     if (!gate(r)) return ESP_OK;
     int len = r->content_len;
@@ -480,9 +486,17 @@ static esp_err_t h_save(httpd_req_t *r) {
 
     cfg_save(c);
     httpd_resp_set_type(r, "text/html; charset=utf-8");
-    httpd_resp_sendstr(r, "<meta charset='utf-8'><meta http-equiv='refresh' content='6;url=/'><body style='background:#070b14;color:#eaf2ff;font-family:system-ui;text-align:center;padding-top:18vh'><h2 style='color:#22d3ee'>Saved ✓</h2><p>Rebooting to apply… returning in a few seconds.</p></body>");
-    vTaskDelay(pdMS_TO_TICKS(400));
-    esp_restart();
+    // Same "Saved ✓" look as v9, but instead of a fixed meta-refresh (which races
+    // the reboot + USB re-enumeration over the cable and lands on a blank page),
+    // poll '/' until the device is back, then navigate.
+    httpd_resp_sendstr(r,
+        "<meta charset='utf-8'><body style='background:#070b14;color:#eaf2ff;font-family:system-ui;text-align:center;padding-top:18vh'>"
+        "<h2 style='color:#22d3ee'>Saved ✓</h2><p>Rebooting to apply… returning when it's back.</p>"
+        "<script>function t(){fetch('/',{cache:'no-store'}).then(function(r){if(r.ok)location.href='/';else setTimeout(t,1000);}).catch(function(){setTimeout(t,1000);});}"
+        "setTimeout(t,3000);</script></body>");
+    // Reboot from a separate task so this handler returns and httpd closes the
+    // connection cleanly (the client renders the page before we reset).
+    xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
     return ESP_OK;
 }
 
@@ -532,12 +546,9 @@ static esp_err_t h_clients(httpd_req_t *r) {
 static esp_err_t h_scan(httpd_req_t *r) {
     if (!gate(r)) return ESP_OK;
     httpd_resp_set_type(r, "application/json; charset=utf-8");
-    wifi_scan_config_t sc = { .show_hidden = true };
-    if (esp_wifi_scan_start(&sc, true) != ESP_OK) { httpd_resp_sendstr(r, "[]"); return ESP_OK; }
-    uint16_t n = 0; esp_wifi_scan_get_ap_num(&n);
-    if (n > 48) n = 48;
-    wifi_ap_record_t *recs = n ? calloc(n, sizeof(*recs)) : NULL;
-    if (recs) esp_wifi_scan_get_ap_records(&n, recs);
+    wifi_ap_record_t *recs = calloc(48, sizeof(*recs));
+    uint16_t n = 0;
+    if (recs) netcore_scan(recs, 48, &n);
     chunk(r, "[");
     for (int i = 0; recs && i < n; i++) {
         char je[100]; json_esc(je, sizeof je, (char *)recs[i].ssid);
