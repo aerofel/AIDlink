@@ -11,12 +11,10 @@
 #include "nvs.h"
 
 #define COOKIE_NAME "AIDSESS"
-#define SESS_IDLE_US (30ULL * 60 * 1000000)   // 30 min idle timeout (non-remember)
 
 static const char *TAG = "auth";
 static char     s_tok[33];        // 32 hex + NUL; "" = no session
 static bool     s_remember;
-static uint64_t s_seen_us;
 
 void auth_hash(const char *salt, const char *password, char out64[65]) {
     char in[160];
@@ -38,7 +36,6 @@ void auth_init(void) {
         size_t len = sizeof s_tok;
         if (nvs_get_str(h, "auth_tok", s_tok, &len) == ESP_OK && s_tok[0]) {
             s_remember = true;
-            s_seen_us = esp_timer_get_time();
         }
         nvs_close(h);
     }
@@ -59,8 +56,9 @@ bool auth_ok(const aidlink_cfg_t *c, const char *cookie_hdr) {
     char tok[33];
     if (!cookie_hdr || !web_cookie_val(cookie_hdr, COOKIE_NAME, tok, sizeof tok)) return false;
     if (strcmp(tok, s_tok) != 0) return false;
-    if (!s_remember && esp_timer_get_time() - s_seen_us > SESS_IDLE_US) return false;
-    s_seen_us = esp_timer_get_time();
+    // No server-side idle timeout: the session is valid until logout / password
+    // change / a new login. The previous 30-min idle (plus a fragile session
+    // cookie iOS Safari drops on app-switch) forced constant re-logins.
     return true;
 }
 
@@ -74,15 +72,13 @@ bool auth_login(const aidlink_cfg_t *c, const char *user, const char *pass,
 
     auth_rand_hex(s_tok, 16);
     s_remember = remember;
-    s_seen_us = esp_timer_get_time();
-    persist_tok(remember ? s_tok : "");
+    persist_tok(s_tok);   // always persist so the session survives a reboot
 
-    if (remember)
-        snprintf(set_cookie, sccap,
-                 COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=2592000", s_tok);
-    else
-        snprintf(set_cookie, sccap,
-                 COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict", s_tok);
+    // Always give the cookie a Max-Age (a bare session cookie gets dropped by iOS
+    // Safari when you switch to the EFB app). "Stay connected" just extends it.
+    long max_age = remember ? 2592000L : 604800L;   // 30 days vs 7 days
+    snprintf(set_cookie, sccap,
+             COOKIE_NAME "=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=%ld", s_tok, max_age);
     ESP_LOGI(TAG, "login ok (remember=%d)", remember);
     return true;
 }

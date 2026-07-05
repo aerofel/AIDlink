@@ -623,8 +623,15 @@ static esp_err_t h_logtoggle(httpd_req_t *r) {
 
 // ---------- AID Web API (XML, public) ----------
 static void api_resp(httpd_req_t *r, const char *cmd, const char *inner) {
+    // Drain any POST body so a keep-alive connection stays framed correctly.
+    char drain[128]; int rem = r->content_len;
+    while (rem > 0) { int n = httpd_req_recv(r, drain, rem < (int)sizeof drain ? rem : (int)sizeof drain); if (n <= 0) break; rem -= n; }
     char buf[512];
-    time_t now = time(NULL); struct tm tm; gmtime_r(&now, &tm);
+    time_t now = time(NULL);
+    // No SNTP yet -> time() is uptime-based (~1970). Use a plausible epoch like v9
+    // so EFBs don't reject the AID over a 1970 timestamp.
+    if (now < 1700000000) now = 1750000000 + (time_t)(esp_timer_get_time() / 1000000);
+    struct tm tm; gmtime_r(&now, &tm);
     char ts[32]; strftime(ts, sizeof ts, "%Y-%m-%dT%H:%M:%SZ", &tm);
     snprintf(buf, sizeof buf,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response commandName=\"%s\" returnCode=\"0\" timestamp=\"%s\">%s</Response>",
@@ -656,7 +663,7 @@ void web_start(aidlink_cfg_t *cfg) {
     CFG = cfg;
     log_set_enable(cfg->log_enable);
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
-    hc.max_uri_handlers = 24;
+    hc.max_uri_handlers = 32;
     hc.stack_size = 8192;
     hc.lru_purge_enable = true;
     if (httpd_start(&s_http, &hc) != ESP_OK) { ESP_LOGE(TAG, "httpd start failed"); return; }
@@ -670,11 +677,14 @@ void web_start(aidlink_cfg_t *cfg) {
     reg("/login", HTTP_GET, h_login_get);
     reg("/login", HTTP_POST, h_login_post);
     reg("/logout", HTTP_GET, h_logout);
-    reg("/getAPIVersion", HTTP_GET, h_api_ver);
-    reg("/getWiFiAPStatus", HTTP_GET, h_api_wifi);
-    reg("/getAoIPStatus", HTTP_GET, h_api_aoip);
-    reg("/getAcarsStatus", HTTP_GET, h_api_acars);
-    reg("/cmdReboot", HTTP_GET, h_api_reboot);
+    // AID Web API — answer BOTH GET and POST (the ARINC-834 API uses POST; v9's
+    // web.on() answered any method). GET-only made EFBs like Jeppesen FliteDeck
+    // get a 405 on their POST probe and fail to detect the AID.
+    reg("/getAPIVersion", HTTP_GET, h_api_ver);    reg("/getAPIVersion", HTTP_POST, h_api_ver);
+    reg("/getWiFiAPStatus", HTTP_GET, h_api_wifi);  reg("/getWiFiAPStatus", HTTP_POST, h_api_wifi);
+    reg("/getAoIPStatus", HTTP_GET, h_api_aoip);    reg("/getAoIPStatus", HTTP_POST, h_api_aoip);
+    reg("/getAcarsStatus", HTTP_GET, h_api_acars);  reg("/getAcarsStatus", HTTP_POST, h_api_acars);
+    reg("/cmdReboot", HTTP_GET, h_api_reboot);      reg("/cmdReboot", HTTP_POST, h_api_reboot);
     httpd_register_err_handler(s_http, HTTPD_404_NOT_FOUND, h_404);
     ESP_LOGI(TAG, "[WEB] http://%s/", cfg->ap_ip);
 }
