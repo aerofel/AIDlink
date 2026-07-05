@@ -135,5 +135,24 @@ is `rm -rf build managed_components dependencies.lock` then rebuild. Also IDF
 `-Werror=format`: uint32_t IP bytes are `unsigned long` here — cast to `(unsigned)`
 for `%u`.
 
-Next: M4 (position poller + sources + emulator) — makes the ADBP feed and web
-status show real data.
+## 2026-07-05 — M4 position poller + sources + emulator done
+
+Ported the poller to ESP-IDF. Pure, host-tested parsers (`poller_sources.c`,
+compiled against real IDF cJSON source in the host test): Viasat nested-`value`
++ ISO8601→epoch, Panasonic flat `td_id_*` with deg×1000 sign decode. `geo.c`
+(host-tested) does great-circle bearing/haversine to derive track+GS when the
+source omits them. `poller.c` fetches via `esp_http_client` (insecure TLS +
+`disable_auto_redirect` to mirror v9's raw-socket `setInsecure()`/no-redirect),
+`apply_fix` derives+clamps, `sim_step` runs the emulator, stale→NCD watchdog.
+
+Verified end-to-end over the cable: enabled the emulator from the web portal →
+`/status` shows valid position → ADBP `getAvionicParameters` returns
+`validity="1"` LAT/LON/GS/TRK/ALT/ACID/GNSS_AVAIL (track 245°→-115.00 via
+norm180, ACID=F-ONEO). The full chain emulator→pos_set()→ADBP works.
+
+Parity note: v9's emulator is a **fixed** position (fixed=true, no advance) —
+matched it (dropped an initial moving-emulator version). 6 host suites pass;
+both targets build; classic esp32 = 0 tinyusb.
+
+Next: M5 (mDNS, logging, config-migration parity, S3 partition tuning, retire
+the Arduino sketch).
