@@ -91,18 +91,25 @@ static void handle_request(int cs, uint32_t peer_ip) {
     int np = adbp_parse_params(req, names, ADBP_MAXPARAMS);
     bool miss = false;
 
-    // traffic log: which ADBP method + how many params, from which client
-    const char *meth = strstr(req, "getAvionicParameters") ? "getAvionicParameters"
-                     : strstr(req, "subscribeAvionicParameters") ? "subscribeAvionicParameters"
-                     : strstr(req, "unSubscribe") ? "unSubscribe" : "?";
-    logln("ADBP %s (%d params) from %u.%u.%u.%u", meth, np,
+    // method name verbatim from <method name="..."> — handles FOMAX's
+    // getParameters / unsubscribe as well as the Viasat-style names.
+    char method[48] = "?";
+    { const char *m = strstr(req, "name=\"");
+      if (m) { m += 6; int i = 0; while (m[i] && m[i] != '"' && i < (int)sizeof method - 1) { method[i] = m[i]; i++; } method[i] = 0; } }
+    char rmethod[64]; snprintf(rmethod, sizeof rmethod, "%sResponse", method);
+    bool is_get   = strstr(req, "getParameters") || strstr(req, "getAvionicParameters");
+    bool is_sub   = strstr(req, "subscribeAvionicParameters") != NULL;
+    bool is_unsub = strstr(req, "unSubscribe") || strstr(req, "unsubscribe");
+    logln("ADBP %s (%d params) from %u.%u.%u.%u", method, np,
           (unsigned)(peer_ip & 0xFF), (unsigned)((peer_ip >> 8) & 0xFF),
           (unsigned)((peer_ip >> 16) & 0xFF), (unsigned)((peer_ip >> 24) & 0xFF));
 
-    if (strstr(req, "getAvionicParameters")) {
+    bool data_sent = false;   // drives the "data sent" LED blue-flash
+    if (is_get && !is_sub) {
         build_params(body, sizeof body, names, np, &miss);
-        adbp_wrap_resp(resp, sizeof resp, "getAvionicParametersResponse", miss ? 8 : 0, body);
-    } else if (strstr(req, "subscribeAvionicParameters")) {
+        adbp_wrap_resp(resp, sizeof resp, rmethod, miss ? 8 : 0, body);
+        data_sent = true;
+    } else if (is_sub) {
         bool on_event = strstr(req, "OnEvent") != NULL;
         long pport = adbp_tag_num(req, "publishport", 0);
         long per = adbp_tag_num(req, "refreshperiod", 5000); if (per < 100) per = 5000;
@@ -124,22 +131,22 @@ static void handle_request(int cs, uint32_t peer_ip) {
             } else ESP_LOGW(TAG, "no free subscription slot");
         }
         build_params(body, sizeof body, names, np, &miss);
-        adbp_wrap_resp(resp, sizeof resp,
-                       on_event ? "subscribeAvionicParametersOnEventResponse" : "subscribeAvionicParametersResponse",
-                       0, body);
-    } else if (strstr(req, "unSubscribe")) {
+        adbp_wrap_resp(resp, sizeof resp, rmethod, 0, body);
+        data_sent = true;
+    } else if (is_unsub) {
         long pport = adbp_tag_num(req, "publishport", 0);
         for (int i = 0; i < MAX_SUBS; i++)
             if (s_subs[i].active && s_subs[i].ip == peer_ip && (pport == 0 || s_subs[i].port == pport)) {
                 if (s_subs[i].sock >= 0) close(s_subs[i].sock);
                 memset(&s_subs[i], 0, sizeof s_subs[i]); s_subs[i].sock = -1;
             }
-        adbp_wrap_resp(resp, sizeof resp, "unSubscribeResponse", 0, "<parameters></parameters>");
+        adbp_wrap_resp(resp, sizeof resp, rmethod, 0, "<parameters></parameters>");
     } else {
         adbp_wrap_resp(resp, sizeof resp, "UnknownMethod", 2, "<parameters></parameters>");
     }
 
     send(cs, resp, strlen(resp), 0);
+    if (data_sent) s_push_seq++;   // LED: blue-flash on any position data sent to the EFB (poll or subscribe)
     vTaskDelay(pdMS_TO_TICKS(5));
     close(cs);
 }
