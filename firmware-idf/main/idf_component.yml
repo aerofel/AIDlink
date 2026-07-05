@@ -1,6 +1,8 @@
 ## Managed component dependencies.
 dependencies:
   idf: "^5.0"
+  # mDNS: reachable as <dev_name>.local, advertises _http and _aidlink-adbp.
+  espressif/mdns: "^1.2"
   # USB-NCM device class — only pulled in for targets with native USB-OTG.
   espressif/esp_tinyusb:
     version: "^2.0.0"

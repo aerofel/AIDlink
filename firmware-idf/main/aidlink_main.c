@@ -14,6 +14,7 @@
 #include "pos.h"
 #include "adbp.h"
 #include "poller.h"
+#include "services.h"
 
 static const char *TAG = "aidlink";
 static aidlink_cfg_t cfg;   // static: consulted by the web server for the device's lifetime
@@ -46,4 +47,5 @@ void app_main(void) {
     web_start(&cfg);
     adbp_start(&cfg);      // ARINC-834 ADBP position feed
     poller_start(&cfg);    // position source poller + emulator
+    services_start(&cfg);  // mDNS: <dev_name>.local + service advertisement
 }
