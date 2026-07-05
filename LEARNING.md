@@ -177,3 +177,45 @@ cable: DHCP lease + NAT internet path, web portal (login/save/persist), and the
 ADBP feed emitting valid ARINC-834 parameters from the emulator. The one thing
 still to confirm on real hardware is the live upstream-Wi-Fi → NAT → internet
 path (needs a real uplink present).
+
+## 2026-07-05 — Post-milestone hardening + features (from field testing)
+
+After the M1–M5 rewrite, live testing on the S3 surfaced a series of fixes and
+additions (all committed):
+
+- **Exact v9 web UI:** the M2 portal was cosmetically simplified; reproduced the
+  v9 CSS/layout/fields byte-for-byte, incl. the config-field data model
+  (`apIp`/`apMask`/`apLease` strings, not `ap_prefix`).
+- **Wi-Fi scan returned 0:** the STA auto-reconnected on every disconnect so it
+  was perpetually "connecting" (driver rejects scans then). Added `netcore_scan()`
+  that pauses reconnect + disconnects to a scannable state; only auto-connect when
+  an SSID is configured.
+- **Save → blank page:** `esp_restart()` in-handler + a fixed meta-refresh raced
+  the reboot/USB re-enumeration. Now: reboot from a deferred task; the "Saved" page
+  polls `/login` until back, then navigates.
+- **Blank login page — "Header fields are too long":** the real one. Default
+  `CONFIG_HTTPD_MAX_REQ_HDR_LEN` is 512; a browser's cookie + User-Agent + Accept
+  headers exceed it → server rejects → blank. Raised to 2048 (URI 1024). Also
+  added `Cache-Control: no-store` so a blank captured mid-reboot can't stick.
+- **Login expiring quickly:** dropped the 30-min server idle timeout; always
+  persist the token to NVS and set a cookie `Max-Age` (7d, or 30d "remember") — a
+  bare session cookie was dropped by iOS Safari on app-switch to the EFB.
+- **AID not detected by Jeppesen FliteDeck:** the ARINC-834 AID Web API uses
+  **POST**, but endpoints were GET-only → 405 on the EFB's probe. v9 answered any
+  method. Now GET+POST, drain the POST body (keep-alive framing), and stamp a
+  plausible ~2025 timestamp instead of 1970 (time() before SNTP).
+- **Clients list showed "(pending)":** resolve each station MAC to its lease via
+  `esp_netif_dhcps_get_clients_by_mac()`. Also list the USB-C cable host, and log
+  AP client join/leave (with reason code) to the traffic log.
+- **Live gw/DNS display:** the Uplink card showed blank Gateway/Netmask/DNS on
+  DHCP; now reads the live STA netif via `netcore_sta_ipinfo()`.
+- **Defaults:** uplink DHCP on, poll 1 s, aircraft `F-XXXX`/`A320`.
+- **Onboard RGB status LED (S3, `statusled.c`):** WS2812 on GPIO48 via the
+  `led_strip` component. flashing orange = scanning, solid green = connected,
+  flashing red = searching, brief blue flash (~250 ms) = position frame sent. The
+  board's other small LEDs are hardwired UART/USB activity (not controllable) —
+  confirmed with an identify test pattern (only pixel 0 responded).
+
+Repo hygiene: the `Desktop/AIDlink` path is **iCloud-synced**, which spawns
+`name 2.ext` conflict copies; a batch of them had been committed. Removed all
+`* 2.*` files (they were never in the CMake SRCS list, so harmless but confusing).

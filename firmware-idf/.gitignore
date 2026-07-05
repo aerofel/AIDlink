@@ -4,3 +4,7 @@ sdkconfig
 sdkconfig.old
 managed_components/
 dependencies.lock
+
+# iCloud sync conflict copies ("name 2.ext") — never commit these
+* 2.*
+*\ 2.*
