@@ -11,6 +11,7 @@
 #include "usb_ncm.h"
 #include "auth.h"
 #include "web.h"
+#include "pos.h"
 
 static const char *TAG = "aidlink";
 static aidlink_cfg_t cfg;   // static: consulted by the web server for the device's lifetime
@@ -24,6 +25,7 @@ void app_main(void) {
         nvs_flash_init();
     }
 
+    pos_init();
     cfg_load(&cfg);
 
     // First-boot credential seed: default login admin / password (salted SHA-256).
