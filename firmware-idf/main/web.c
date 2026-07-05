@@ -553,14 +553,23 @@ static esp_err_t h_clients(httpd_req_t *r) {
     httpd_resp_set_type(r, "application/json");
     chunk(r, "[");
     bool first = true;
-    // Wi-Fi AP stations
+    // Wi-Fi AP stations — resolve each MAC to its DHCP-leased IP.
     wifi_sta_list_t list;
-    if (esp_wifi_ap_get_sta_list(&list) == ESP_OK) {
-        for (int i = 0; i < list.num; i++) {
+    if (esp_wifi_ap_get_sta_list(&list) == ESP_OK && list.num > 0) {
+        esp_netif_pair_mac_ip_t pairs[16];
+        int n = list.num > 16 ? 16 : list.num;
+        for (int i = 0; i < n; i++) memcpy(pairs[i].mac, list.sta[i].mac, 6);
+        esp_netif_dhcps_get_clients_by_mac(netcore_ap_netif(), n, pairs);
+        for (int i = 0; i < n; i++) {
             wifi_sta_info_t *s = &list.sta[i];
-            // IP per-MAC isn't tracked (no DHCP-lease map); report "(pending)" like v9's fallback.
-            chunkf(r, "%s{\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"ip\":\"(pending)\",\"rssi\":%d}",
-                   first ? "" : ",", s->mac[0], s->mac[1], s->mac[2], s->mac[3], s->mac[4], s->mac[5], s->rssi);
+            char ip[16];
+            uint32_t a = pairs[i].ip.addr;   // network order; 0 = no lease yet
+            if (a) snprintf(ip, sizeof ip, "%u.%u.%u.%u",
+                            (unsigned)(a & 0xFF), (unsigned)((a >> 8) & 0xFF),
+                            (unsigned)((a >> 16) & 0xFF), (unsigned)((a >> 24) & 0xFF));
+            else strcpy(ip, "(pending)");
+            chunkf(r, "%s{\"mac\":\"%02X:%02X:%02X:%02X:%02X:%02X\",\"ip\":\"%s\",\"rssi\":%d}",
+                   first ? "" : ",", s->mac[0], s->mac[1], s->mac[2], s->mac[3], s->mac[4], s->mac[5], ip, s->rssi);
             first = false;
         }
     }
