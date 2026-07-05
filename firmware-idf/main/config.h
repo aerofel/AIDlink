@@ -18,12 +18,13 @@ typedef struct {
     char    ap_ssid[33];       // our SoftAP SSID
     char    ap_pass[65];       // our SoftAP passphrase
     bool    ap_hidden;         // hide SSID beacon
-    uint8_t ap_ip[4];          // SoftAP / gateway IP (e.g. 172.20.1.1)
-    uint8_t ap_prefix;         // SoftAP subnet prefix length (e.g. 26)
+    char    ap_ip[16];         // SoftAP / AID IP (e.g. "172.20.1.1")
+    char    ap_mask[16];       // SoftAP netmask (e.g. "255.255.255.192")
+    char    ap_lease[16];      // DHCP pool start IP (e.g. "172.20.1.2")
     uint16_t ap_lease_min;     // DHCP lease time, minutes
-    uint8_t ap_dhcp_count;     // DHCP pool size
-    uint8_t ap_channel;        // 0 = follow STA
-    uint8_t ap_max_clients;    // 1..10
+    int      ap_dhcp_count;    // DHCP pool size
+    int      ap_channel;       // 0 = follow STA
+    int      ap_max_clients;   // 1..10
     char    ap_client_dns[16]; // optional forced client DNS ("" = live uplink resolver)
     // --- USB-NCM downstream (S3) ---
     uint8_t usb_ip[4];         // USB-NCM gateway IP (S3 only, e.g. 172.20.2.1)

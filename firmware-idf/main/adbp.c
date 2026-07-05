@@ -8,6 +8,7 @@
 #include "adbp.h"
 #include "adbp_frame.h"
 #include "pos.h"
+#include "log.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -88,6 +89,14 @@ static void handle_request(int cs, uint32_t peer_ip) {
     char names[ADBP_MAXPARAMS][ADBP_MAXNAME];
     int np = adbp_parse_params(req, names, ADBP_MAXPARAMS);
     bool miss = false;
+
+    // traffic log: which ADBP method + how many params, from which client
+    const char *meth = strstr(req, "getAvionicParameters") ? "getAvionicParameters"
+                     : strstr(req, "subscribeAvionicParameters") ? "subscribeAvionicParameters"
+                     : strstr(req, "unSubscribe") ? "unSubscribe" : "?";
+    logln("ADBP %s (%d params) from %u.%u.%u.%u", meth, np,
+          (unsigned)(peer_ip & 0xFF), (unsigned)((peer_ip >> 8) & 0xFF),
+          (unsigned)((peer_ip >> 16) & 0xFF), (unsigned)((peer_ip >> 24) & 0xFF));
 
     if (strstr(req, "getAvionicParameters")) {
         build_params(body, sizeof body, names, np, &miss);

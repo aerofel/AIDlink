@@ -7,14 +7,10 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "dhcpserver/dhcpserver.h"
+#include "lwip/ip4_addr.h"
 
 static const char *TAG = "net";
 static esp_netif_t *s_sta, *s_ap;
-
-// Build a network-order IPv4 addr (ESP32 is little-endian, lwIP addr is net-order).
-static inline uint32_t mk_netaddr(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-    return (uint32_t)a | ((uint32_t)b << 8) | ((uint32_t)c << 16) | ((uint32_t)d << 24);
-}
 
 static bool s_sta_up;
 static uint8_t s_sta_ip[4];
@@ -50,25 +46,35 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
     }
 }
 
+// Parse a dotted-quad string to a network-order IPv4 addr (0 on failure).
+static uint32_t ip4_of(const char *s) {
+    ip4_addr_t a;
+    return ip4addr_aton(s, &a) ? a.addr : 0;
+}
+
 // Configure SoftAP IP, DHCP pool, and DNS offer (AP IP -> our forwarder).
 static void configure_ap_netif(const aidlink_cfg_t *c) {
     esp_netif_dhcps_stop(s_ap);
 
+    uint32_t ap_addr = ip4_of(c->ap_ip);
+    uint32_t ap_mask = ip4_of(c->ap_mask);
+    uint32_t lease_start = ip4_of(c->ap_lease);
+    if (!ap_addr) ap_addr = ip4_of("172.20.1.1");
+    if (!ap_mask) ap_mask = ip4_of("255.255.255.192");
+    if (!lease_start) lease_start = (ap_addr & 0x00FFFFFF) | (((ap_addr >> 24) + 1) << 24);
+
     esp_netif_ip_info_t ip = {0};
-    esp_netif_set_ip4_addr(&ip.ip, c->ap_ip[0], c->ap_ip[1], c->ap_ip[2], c->ap_ip[3]);
-    esp_netif_set_ip4_addr(&ip.gw, c->ap_ip[0], c->ap_ip[1], c->ap_ip[2], c->ap_ip[3]);
-    uint32_t m = cfg_netmask_from_prefix(c->ap_prefix);
-    esp_netif_set_ip4_addr(&ip.netmask, (m >> 24) & 0xFF, (m >> 16) & 0xFF, (m >> 8) & 0xFF, m & 0xFF);
+    ip.ip.addr = ap_addr; ip.gw.addr = ap_addr; ip.netmask.addr = ap_mask;
     ESP_ERROR_CHECK(esp_netif_set_ip_info(s_ap, &ip));
 
-    // DHCP lease pool: start at ap_ip.(last+1), count = ap_dhcp_count
-    int start_last = c->ap_ip[3] + 1;
-    int end_last = start_last + (c->ap_dhcp_count ? c->ap_dhcp_count : 1) - 1;
-    if (end_last > 254) end_last = 254;
+    // DHCP lease pool: from ap_lease for ap_dhcp_count addresses.
+    int count = c->ap_dhcp_count ? c->ap_dhcp_count : 1;
+    uint8_t last = (lease_start >> 24) & 0xFF;
+    int end_last = last + count - 1; if (end_last > 254) end_last = 254;
     dhcps_lease_t lease = {0};
     lease.enable = true;
-    lease.start_ip.addr = mk_netaddr(c->ap_ip[0], c->ap_ip[1], c->ap_ip[2], start_last);
-    lease.end_ip.addr = mk_netaddr(c->ap_ip[0], c->ap_ip[1], c->ap_ip[2], end_last);
+    lease.start_ip.addr = lease_start;
+    lease.end_ip.addr = (lease_start & 0x00FFFFFF) | ((uint32_t)end_last << 24);
     esp_netif_dhcps_option(s_ap, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease));
     uint32_t lease_min = c->ap_lease_min ? c->ap_lease_min : 120;
     esp_netif_dhcps_option(s_ap, ESP_NETIF_OP_SET, ESP_NETIF_IP_ADDRESS_LEASE_TIME, &lease_min, sizeof(lease_min));
@@ -76,7 +82,7 @@ static void configure_ap_netif(const aidlink_cfg_t *c) {
     // Offer the AP's own IP as the DNS server; the forwarder relays to the uplink.
     esp_netif_dns_info_t di = {0};
     di.ip.type = ESP_IPADDR_TYPE_V4;
-    esp_netif_set_ip4_addr(&di.ip.u_addr.ip4, c->ap_ip[0], c->ap_ip[1], c->ap_ip[2], c->ap_ip[3]);
+    di.ip.u_addr.ip4.addr = ap_addr;
     esp_netif_set_dns_info(s_ap, ESP_NETIF_DNS_MAIN, &di);
     dhcps_offer_t offer = OFFER_DNS;
     esp_netif_dhcps_option(s_ap, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &offer, sizeof(offer));
@@ -120,8 +126,7 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
         esp_err_t e = esp_netif_napt_enable(s_ap);
         ESP_LOGI(TAG, "[AP] NAPT %s", e == ESP_OK ? "ON" : "FAILED");
     }
-    ESP_LOGI(TAG, "[AP] %s IP=%d.%d.%d.%d/%d DNS->self",
-             c->ap_ssid, c->ap_ip[0], c->ap_ip[1], c->ap_ip[2], c->ap_ip[3], c->ap_prefix);
+    ESP_LOGI(TAG, "[AP] %s IP=%s mask=%s DNS->self", c->ap_ssid, c->ap_ip, c->ap_mask);
 
     dnsfwd_start(s_sta, c->ap_client_dns);
     return s_sta;

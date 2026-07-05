@@ -160,6 +160,12 @@ static void poller_task(void *arg) {
     }
 }
 
+void poller_status(bool *ok, uint32_t *at_ms, char *msg, unsigned msgcap) {
+    if (ok) *ok = s_poll_ok;
+    if (at_ms) *at_ms = s_poll_at_ms;
+    if (msg) strlcpy(msg, s_poll_msg, msgcap);
+}
+
 void poller_start(const aidlink_cfg_t *cfg) {
     CFG = cfg;
     xTaskCreate(poller_task, "poller", 8192, NULL, 4, NULL);

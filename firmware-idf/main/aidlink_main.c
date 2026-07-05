@@ -15,6 +15,7 @@
 #include "adbp.h"
 #include "poller.h"
 #include "services.h"
+#include "log.h"
 
 static const char *TAG = "aidlink";
 static aidlink_cfg_t cfg;   // static: consulted by the web server for the device's lifetime
@@ -29,6 +30,7 @@ void app_main(void) {
     }
 
     pos_init();
+    log_init();
     cfg_load(&cfg);
 
     // First-boot credential seed: default login admin / password (salted SHA-256).
