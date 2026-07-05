@@ -11,17 +11,19 @@
 // ============================================================================
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
+#include <WiFiUdp.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <math.h>
 #include <time.h>
-#define FW_BUILD ("v6 " __DATE__ " " __TIME__)
+#define FW_BUILD ("v9 " __DATE__ " " __TIME__)
 #include "esp_wifi.h"
 #include "esp_netif.h"
 #include "esp_random.h"
 #include "mbedtls/sha256.h"
 #include "dhcpserver/dhcpserver.h"
+#include "dhcpserver/dhcpserver_options.h"
 #include "defs.h"
 
 // ----------------------------- CONFIG (persisted in NVS) --------------------
@@ -960,22 +962,95 @@ static void applyDhcpPool(IPAddress start,int count,int leaseMin){
   esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &l, sizeof(l));
   uint32_t lt=(uint32_t)(leaseMin<1?1:leaseMin);
   esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_IP_ADDRESS_LEASE_TIME, &lt, sizeof(lt));
+  // Re-assert the DNS offer on the freshly (re)started dhcps: hand every client the AP's own
+  // IP as its resolver so it hits our on-device forwarder (dnsFwdLoop). Doing it here — not just
+  // in softAPConfig() — guarantees the offer survives this stop/restart cycle.
+  { IPAddress apip; apip.fromString(cfg.apIp);
+    esp_netif_dns_info_t di; memset(&di,0,sizeof(di));
+    di.ip.type=IPADDR_TYPE_V4; di.ip.u_addr.ip4.addr=(uint32_t)apip;
+    esp_netif_set_dns_info(ap, ESP_NETIF_DNS_MAIN, &di);
+    dhcps_offer_t off=OFFER_DNS;
+    esp_netif_dhcps_option(ap, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &off, sizeof(off)); }
   esp_netif_dhcps_start(ap);
   Serial.printf("[DHCP] pool %s-%s lease=%lumin\n",start.toString().c_str(),end.toString().c_str(),(unsigned long)lt);
 }
+
+// ---------------------------- DNS FORWARDER ---------------------------------
+// AP clients are handed the AP's own IP (172.20.1.1) as their DNS server. This tiny
+// UDP relay listens on :53, forwards each query to the *live* uplink resolver, and
+// returns the reply. Because the upstream is resolved per-query (not baked into the
+// client's DHCP lease), DNS automatically follows STA reconnects / uplink DNS changes
+// and never black-holes the way a stale leased resolver does.
+static WiFiUDP dnsSrv;                       // client-facing socket, bound to :53
+static WiFiUDP dnsCli;                       // uplink-facing socket (fixed src port)
+static bool    dnsUp=false;
+struct DnsPend { IPAddress cip; uint16_t cport; uint16_t oid; uint16_t sid; uint32_t t0; bool used; };
+static DnsPend dnsPend[16];                   // in-flight queries (NAT-style id remap)
+static uint16_t dnsSeq=0;
+
+static IPAddress dnsUpstream(){               // where to relay, resolved live each query
+  IPAddress u;
+  if(cfg.apClientDns.length()){ u.fromString(cfg.apClientDns); return u; }
+  u=WiFi.dnsIP(); if((uint32_t)u!=0) return u;
+  u=WiFi.dnsIP(1); return u;                  // 0.0.0.0 if the uplink has no resolver yet
+}
+static void dnsFwdBegin(){
+  dnsSrv.stop(); dnsCli.stop();
+  for(int i=0;i<16;i++) dnsPend[i].used=false;
+  dnsUp = dnsSrv.begin(53) && dnsCli.begin(5333);
+  Serial.printf("[DNS] forwarder %s (clients->%s, relay->uplink)\n",
+                dnsUp?"up on :53":"FAILED", cfg.apIp.c_str());
+}
+static void dnsFwdLoop(){
+  if(!dnsUp) return;
+  static uint8_t buf[1400];
+  uint32_t now=millis();
+  // client query -> uplink (drain a few per tick)
+  for(int guard=0; guard<8; guard++){
+    int n=dnsSrv.parsePacket(); if(n<=0) break;
+    IPAddress cip=dnsSrv.remoteIP(); uint16_t cport=dnsSrv.remotePort();
+    int len=dnsSrv.read(buf,sizeof(buf));
+    IPAddress up=dnsUpstream();
+    if(len<12 || (uint32_t)up==0) continue;   // malformed or no uplink resolver -> drop
+    int slot=-1; for(int i=0;i<16;i++){ if(!dnsPend[i].used){ slot=i; break; } }
+    if(slot<0){ uint32_t best=0; slot=0;       // table full -> evict the oldest in-flight query
+      for(int i=0;i<16;i++){ uint32_t age=now-dnsPend[i].t0; if(age>=best){ best=age; slot=i; } } }
+    uint16_t sid=(uint16_t)((slot<<12) | (dnsSeq++ & 0x0FFF));   // slot in top nibble, seq = anti-stale tag
+    dnsPend[slot]={cip,cport,(uint16_t)((buf[0]<<8)|buf[1]),sid,now,true};
+    buf[0]=sid>>8; buf[1]=sid&0xFF;            // remap the DNS transaction id (avoids client collisions)
+    dnsCli.beginPacket(up,53); dnsCli.write(buf,len); dnsCli.endPacket();
+  }
+  // uplink reply -> client
+  for(int guard=0; guard<8; guard++){
+    int m=dnsCli.parsePacket(); if(m<=0) break;
+    int len=dnsCli.read(buf,sizeof(buf));
+    if(len<12) continue;
+    uint16_t sid=(buf[0]<<8)|buf[1]; int slot=(sid>>12)&0x0F;
+    if(!dnsPend[slot].used || dnsPend[slot].sid!=sid) continue;   // stale/evicted reply -> drop
+    buf[0]=dnsPend[slot].oid>>8; buf[1]=dnsPend[slot].oid&0xFF;   // restore the client's original id
+    dnsSrv.beginPacket(dnsPend[slot].cip,dnsPend[slot].cport); dnsSrv.write(buf,len); dnsSrv.endPacket();
+    dnsPend[slot].used=false;
+  }
+  for(int i=0;i<16;i++) if(dnsPend[i].used && now-dnsPend[i].t0>3000) dnsPend[i].used=false;  // expire
+}
 static void startAP(){
-  IPAddress ip,mask,lease,dns; ip.fromString(cfg.apIp); mask.fromString(cfg.apMask); lease.fromString(cfg.apLease);
-  if(cfg.apClientDns.length()) dns.fromString(cfg.apClientDns);
-  else { dns=WiFi.dnsIP(); if((uint32_t)dns==0) dns=ip; }
-  WiFi.softAPConfig(ip,ip,mask,lease,dns);
+  IPAddress ip,mask,lease; ip.fromString(cfg.apIp); mask.fromString(cfg.apMask); lease.fromString(cfg.apLease);
+  // Hand every client the AP's own IP as its DNS server; our on-device forwarder relays queries to
+  // the live uplink resolver. This is deliberately NOT the raw upstream DNS: a client caches the
+  // DHCP-provided resolver for the whole lease, so baking in the upstream (or 0.0.0.0 when the STA
+  // link isn't up yet) black-holes DNS until the lease renews. The AP IP is always valid.
+  WiFi.softAPConfig(ip,ip,mask,lease,ip);
   int ch=cfg.apChannel>0?cfg.apChannel:(WiFi.channel()?WiFi.channel():1);
   int mx=cfg.apMaxClients; if(mx<1)mx=1; if(mx>10)mx=10;
   WiFi.softAP(cfg.apSsid.c_str(), cfg.apPass.c_str(), ch, cfg.apHidden?1:0, mx);
   delay(200);
   applyDhcpPool(lease, cfg.apDhcpCount, cfg.apLeaseMin);
   bool napt=cfg.naptEnable ? WiFi.AP.enableNAPT(true) : (WiFi.AP.enableNAPT(false),false);
-  Serial.printf("[AP] %s%s IP=%s ch=%d max=%d NAPT=%s DNS->%s\n",cfg.apSsid.c_str(),cfg.apHidden?"(hidden)":"",
-                WiFi.softAPIP().toString().c_str(),ch,mx,napt?"ON":"off",dns.toString().c_str());
+  dnsFwdBegin();
+  IPAddress up=dnsUpstream();
+  Serial.printf("[AP] %s%s IP=%s ch=%d max=%d NAPT=%s DNS->%s (relay->%s)\n",cfg.apSsid.c_str(),cfg.apHidden?"(hidden)":"",
+                WiFi.softAPIP().toString().c_str(),ch,mx,napt?"ON":"off",ip.toString().c_str(),
+                (uint32_t)up?up.toString().c_str():"(uplink down)");
 }
 void setup(){
   Serial.begin(115200); delay(300);
@@ -1038,6 +1113,7 @@ void loop(){
   if(s!=WL_CONNECTED && millis()-lastRetry>10000){ lastRetry=millis(); WiFi.begin(cfg.staSsid.c_str(), cfg.staPass.length()?cfg.staPass.c_str():nullptr); }
   uint32_t now=millis(); if(now-lastSim>=1000){ simStep(now-lastSim); lastSim=now; }
   web.handleClient();
+  dnsFwdLoop();                        // relay AP-client DNS queries to the live uplink resolver
   WiFiClient cl=adbp.available(); if(cl) handleAdbp(cl);
   pushSubs();
   web.handleClient();                  // 2nd service after the (now short) ADBP/push work -> keep UI snappy
