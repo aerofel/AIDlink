@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
-# ESP32-S3 overrides: keep console on UART (native USB is reserved for USB-NCM),
-# enable octal PSRAM (this is an N16R8 module).
+# ESP32-S3 overrides. Console on UART (flashed/monitored via the CH343 UART port),
+# which is also the final design: the native USB is reserved for TinyUSB NCM in M5.
 CONFIG_ESP_CONSOLE_UART_DEFAULT=y
-CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
-CONFIG_SPIRAM=y
-CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+# NOTE: octal PSRAM (CONFIG_SPIRAM/MODE_OCT) deferred to M5 (not needed for M1).
