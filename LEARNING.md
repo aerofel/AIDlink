@@ -110,4 +110,30 @@ Gotchas:
   `if`s on one line).
 - `/status` position fields are placeholders until the M4 poller lands.
 
-Next: M3 (ADBP ARINC-834 server).
+## 2026-07-05 — M3 ADBP ARINC-834 server done
+
+Ported the ADBP feed to ESP-IDF (lwIP sockets). Split pure wire-format logic into
+`adbp_frame.c` (host-tested, incl. the self-referential `length=` fixed-point
+iteration) and the socket/task layer in `adbp.c`. Shared ownship state in
+`pos.c` (mutex-guarded).
+
+Verified over the USB-C cable (Python TCP client to 172.20.2.1:24000):
+- `getAvionicParameters` → valid `<response errorcode="0">` with the requested
+  params; unknown method → errorcode 2.
+- `subscribe` (publishport 51050, 1s period) → the AID connected back to the
+  Mac's port and pushed 5 frames at ~1 Hz, each framed
+  `<method name="publishAvionicParameters" length="214">…` with the correct
+  self-referential length.
+
+All params read `validity="2"` (NCD) because there's no position producer yet —
+that's M4 (poller/emulator writes pos_set()). Both targets build; 4 host test
+suites pass; classic esp32 = 0 tinyusb.
+
+Recurring gotcha: the `espressif__tinyusb` managed component fails CMake
+reconfigure (`component.cmake:486 add_library`) whenever sources are added; fix
+is `rm -rf build managed_components dependencies.lock` then rebuild. Also IDF
+`-Werror=format`: uint32_t IP bytes are `unsigned long` here — cast to `(unsigned)`
+for `%u`.
+
+Next: M4 (position poller + sources + emulator) — makes the ADBP feed and web
+status show real data.
