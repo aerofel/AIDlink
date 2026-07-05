@@ -46,7 +46,7 @@ static void led_task(void *arg) {
     for (;;) {
         uint32_t now = now_ms();
         uint32_t seq = adbp_push_seq();
-        if (seq != last_seq) { last_seq = seq; blue_until = now + 90; }   // data sent -> blue blip
+        if (seq != last_seq) { last_seq = seq; blue_until = now + 250; }   // data sent -> clearly-visible blue flash
 
         if (now < blue_until) {
             px(0, 0, LVL);             // blue blip (overrides status briefly)
