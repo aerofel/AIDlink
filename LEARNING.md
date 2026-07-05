@@ -58,7 +58,36 @@ new project in `firmware-idf/`). Key things that cost time:
 - Host-testable pure logic isolated in `*_util.c` (no IDF deps), tested with a
   plain `clang` assert runner — avoids the IDF linux-target/Unity machinery.
 
-M1 status: T1 scaffold, T2 config, T3 DNS forwarder, T4 netcore all done & builds
-clean on both targets. **T4 hardware-verified on the S3** (via UART): SoftAP
-`AIDlink` broadcasting (host scan), DHCP up, `NAPT ON`, DNS forwarder on :53.
-STA/internet deferred (empty SSID + no bench uplink; web UI = M2). Next: T5 USB-NCM.
+### Milestone 1 — COMPLETE (acceptance results)
+
+All 7 tasks done on branch `esp-idf-rewrite`. Evidence:
+
+- **Host unit tests:** `config_subnet` 5/5 PASS, `dnsfwd_remap` 6/6 PASS (plain clang).
+- **Dual-target builds:** both `esp32` and `esp32s3` build clean. Classic `esp32`
+  map has **0 tinyusb symbols** (USB-OTG guard verified).
+- **S3 hardware (flashed via CH343 UART):** boots; SoftAP `AIDlink` up
+  `172.20.1.1/26` NAPT ON; USB-NCM up `172.20.2.1/29` DHCP+NAPT; DNS forwarder
+  on :53; TinyUSB driver installed — all simultaneously, no crash.
+- **USB-C cable = network interface (the feature):** Mac `en12` leased
+  **172.20.2.2** over the cable; ping gateway 172.20.2.1 **0% loss ~1.3 ms**;
+  Mac installs **default route via the cable**. Coexists with the AP (both
+  subnets served at once).
+- **Not yet verifiable on the bench:** full DNS/internet-through-NAT (needs a live
+  WiFi uplink + a configured STA SSID — the web UI to set it is M2; the forwarder
+  correctly drops queries with no upstream). Autodetect-on-unplug (needs physical
+  replug) — deferred to a live session.
+
+### Extra gotchas found during M1
+
+- **`idf.py set-target` + stale `build/`:** switching target without clearing
+  `build/` leaves `flasher_args.json` on the old `--chip`, so `flash` fails with a
+  cryptic esptool error. `flash-idf.sh` now force-cleans on target change (exact
+  match, so `esp32` ≠ `esp32s3`).
+- **USB-NCM RX must copy:** TinyUSB owns the rx buffer only for the callback's
+  duration; `esp_netif_receive` is async → copy the frame and free it in
+  `driver_free_rx_buffer`.
+- **Two distinct MACs:** the S3-side netif MAC and the host-side NCM MAC must
+  differ or ARP won't resolve over the cable.
+
+Next: M2 (web config portal) — lets you set the uplink SSID so the STA/internet
+path can be verified end-to-end over both the AP and the cable.
