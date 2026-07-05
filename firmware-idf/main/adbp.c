@@ -36,6 +36,7 @@ typedef struct {
 
 static sub_t s_subs[MAX_SUBS];
 static const aidlink_cfg_t *CFG;
+static volatile uint32_t s_push_seq;   // ++ on every frame pushed to an EFB
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -191,7 +192,7 @@ static void push_subs(void) {
 
         int w = send(su->sock, msg, mlen, 0);
         if (w <= 0) { close(su->sock); su->sock = -1; su->was_connected = false; }
-        else { if (dl) send(su->sock, delim, dl, 0); su->push_count++; }
+        else { if (dl) send(su->sock, delim, dl, 0); su->push_count++; s_push_seq++; }
 
         su->last_push_ms = now; su->last_fix_seen = cur_fix;
     }
@@ -225,6 +226,8 @@ bool adbp_feeding(void) {
             return true;
     return false;
 }
+
+uint32_t adbp_push_seq(void) { return s_push_seq; }
 
 void adbp_start(const aidlink_cfg_t *cfg) {
     CFG = cfg;

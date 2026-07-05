@@ -14,3 +14,7 @@ void adbp_start(const aidlink_cfg_t *cfg);
 // True if we're actively feeding position to an EFB: at least one active
 // subscription we've pushed to within the last few seconds.
 bool adbp_feeding(void);
+
+// Monotonic counter incremented on every position frame pushed to an EFB. Poll
+// it to flash a "data sent" LED (value changed since last read == a push).
+uint32_t adbp_push_seq(void);

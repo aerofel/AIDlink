@@ -17,6 +17,7 @@ static bool s_sta_up;
 static uint8_t s_sta_ip[4];
 static bool s_have_ssid;          // an uplink SSID is configured
 static volatile bool s_no_reconnect;   // suppress auto-reconnect (during a scan)
+static volatile bool s_scanning;       // a Wi-Fi scan is in progress
 
 esp_netif_t *netcore_sta_netif(void) { return s_sta; }
 esp_netif_t *netcore_ap_netif(void) { return s_ap; }
@@ -53,6 +54,7 @@ bool netcore_sta_ipinfo(char *ip, char *gw, char *mask, char *dns) {
 // a scan while "STA is connecting"). Returns 0 on success; fills *count.
 int netcore_scan(wifi_ap_record_t *recs, uint16_t max, uint16_t *count) {
     *count = 0;
+    s_scanning = true;
     s_no_reconnect = true;
     esp_wifi_disconnect();
     vTaskDelay(pdMS_TO_TICKS(120));   // let the connecting state clear
@@ -68,9 +70,12 @@ int netcore_scan(wifi_ap_record_t *recs, uint16_t max, uint16_t *count) {
         ESP_LOGW(TAG, "scan_start failed: %s", esp_err_to_name(e));
     }
     s_no_reconnect = false;
+    s_scanning = false;
     if (s_have_ssid) esp_wifi_connect();   // resume connecting to the uplink
     return e == ESP_OK ? 0 : -1;
 }
+
+bool netcore_scanning(void) { return s_scanning; }
 
 static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {

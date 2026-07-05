@@ -27,6 +27,9 @@ int netcore_ap_client_count(void);
 // True if an uplink SSID is configured (STA is actively trying to connect).
 bool netcore_has_ssid(void);
 
+// True while a Wi-Fi scan is in progress.
+bool netcore_scanning(void);
+
 // Scan uplink Wi-Fi networks into recs[max]; fills *count. Returns 0 on success.
 // Coordinates with the STA connection state so the scan isn't rejected.
 int netcore_scan(wifi_ap_record_t *recs, uint16_t max, uint16_t *count);
