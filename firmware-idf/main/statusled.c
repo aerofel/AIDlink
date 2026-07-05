@@ -21,43 +21,43 @@
 #include "netcore.h"
 #include "adbp.h"
 
-// ESP32-S3-DevKitC-1 onboard RGB LED chain. If your board's RGB LED is on a
-// different pin (some use 38 or 47), change this one line. The two LEDs are
-// assumed to be a 2-pixel WS2812 chain on this pin.
+// The one controllable LED: the onboard WS2812 on GPIO48. (The board's other
+// small LEDs are hardwired UART/USB activity indicators, not GPIO-controllable.)
+// It shows Wi-Fi state by color and blips blue on each position frame sent:
+//   flashing orange = scanning · solid green = uplink connected ·
+//   flashing red = searching · brief blue blip = position frame sent to an EFB
 #define LED_GPIO   48
-#define LED_COUNT  2
-#define LVL 40   // brightness 0..255; kept low so it isn't blinding
+#define LED_COUNT  1
+#define LVL 40   // brightness 0..255
 
 static const char *TAG = "led";
 static led_strip_handle_t s_strip;
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
-static void px(int i, uint8_t r, uint8_t g, uint8_t b) {
-    if (s_strip && i < LED_COUNT) led_strip_set_pixel(s_strip, i, r, g, b);
+static void px(uint8_t r, uint8_t g, uint8_t b) {
+    if (s_strip) { led_strip_set_pixel(s_strip, 0, r, g, b); led_strip_refresh(s_strip); }
 }
 
 static void led_task(void *arg) {
-    px(0, 20, 20, 20); if (s_strip) led_strip_refresh(s_strip);   // boot: dim white
+    px(20, 20, 20);                    // boot: dim white
     vTaskDelay(pdMS_TO_TICKS(500));
     uint32_t last_seq = adbp_push_seq();
     uint32_t blue_until = 0;
     for (;;) {
         uint32_t now = now_ms();
-        bool blink = (now / 300) % 2;      // ~1.6 Hz flash, independent of loop rate
-
-        // pixel 1 — brief blue flash on each frame sent
         uint32_t seq = adbp_push_seq();
-        if (seq != last_seq) { last_seq = seq; blue_until = now + 60; }
-        px(1, 0, 0, now < blue_until ? LVL : 0);
+        if (seq != last_seq) { last_seq = seq; blue_until = now + 90; }   // data sent -> blue blip
 
-        // pixel 0 — Wi-Fi status
-        uint8_t ip[4];
-        if (netcore_scanning())        px(0, blink ? LVL : 0, blink ? LVL / 2 : 0, 0);  // orange flash
-        else if (netcore_sta_up(ip))   px(0, 0, LVL, 0);                                 // solid green
-        else                           px(0, blink ? LVL : 0, 0, 0);                     // red flash
-
-        if (s_strip) led_strip_refresh(s_strip);
-        vTaskDelay(pdMS_TO_TICKS(50));
+        if (now < blue_until) {
+            px(0, 0, LVL);             // blue blip (overrides status briefly)
+        } else {
+            bool blink = (now / 300) % 2;
+            uint8_t ip[4];
+            if (netcore_scanning())      px(blink ? LVL : 0, blink ? LVL / 2 : 0, 0);  // orange flash
+            else if (netcore_sta_up(ip)) px(0, LVL, 0);                                 // solid green
+            else                         px(blink ? LVL : 0, 0, 0);                     // red flash
+        }
+        vTaskDelay(pdMS_TO_TICKS(40));
     }
 }
 
@@ -70,7 +70,7 @@ void statusled_start(void) {
     }
     led_strip_clear(s_strip);
     xTaskCreate(led_task, "statusled", 3072, NULL, 3, NULL);
-    ESP_LOGI(TAG, "status LEDs on GPIO%d x%d (0=wifi, 1=data)", LED_GPIO, LED_COUNT);
+    ESP_LOGI(TAG, "status LED on GPIO%d (orange=scan, green=wifi, red=searching, blue blip=data)", LED_GPIO);
 }
 
 #else   // no onboard RGB LED (e.g. classic ESP32)
