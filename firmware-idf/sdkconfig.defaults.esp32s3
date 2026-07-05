@@ -1,0 +1,11 @@
+# SPDX-License-Identifier: Apache-2.0
+# ESP32-S3 overrides. Console on UART (flashed/monitored via the CH343 UART port),
+# which is also the final design: the native USB is reserved for TinyUSB NCM in M5.
+CONFIG_ESP_CONSOLE_UART_DEFAULT=y
+# TinyUSB owns the native USB (USB-NCM), so the USB-Serial-JTAG console must be off.
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="16MB"
+# USB-NCM device class (esp_tinyusb).
+CONFIG_TINYUSB_NET_MODE_NCM=y
+# NOTE: octal PSRAM (CONFIG_SPIRAM/MODE_OCT) deferred to M5 (not needed for M1).

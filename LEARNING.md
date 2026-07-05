@@ -35,3 +35,59 @@
   172.20.1.1; correct `(uplink down)` reporting). **Live positive-path resolution
   still to be confirmed with the real Viasat/Aircalin uplink present** — with the
   uplink up, a client can test: `nslookup wifi.inflight.viasat.com 172.20.1.1`.
+
+## 2026-07-05 — ESP-IDF rewrite (Milestone 1) hardware gotchas
+
+Rewriting AIDlink on ESP-IDF v5.3.5 (one codebase, targets `esp32` + `esp32s3`;
+new project in `firmware-idf/`). Key things that cost time:
+
+- **ESP-IDF install didn't include cmake/ninja** (only compilers). Fix:
+  `python3 $IDF_PATH/tools/idf_tools.py install cmake ninja`.
+- **NAPT Kconfig was renamed.** `CONFIG_LWIP_IP_NAPT` (old) is silently ignored on
+  v5.3 → `esp_netif_napt_enable()` returns error and logs `NAPT FAILED`. Correct
+  symbols: `CONFIG_LWIP_IP_FORWARD=y` **and** `CONFIG_LWIP_IPV4_NAPT=y`.
+- **ESP32-S3 native-USB flashing boot-loops this board.** Flashing via the native
+  USB (USB-Serial-JTAG, VID 0x303A, `/dev/cu.usbmodem101`) leaves the 2nd-stage
+  bootloader crashing on entry (`rst:0x7 TG0WDT_SYS_RST`, never banners). **Stock
+  `hello_world` fails identically** → it's the board/native-USB path, not our code.
+  **Flash + monitor the S3 via its CH343 UART port** (VID 0x1A86,
+  `/dev/cu.usbmodem5AE6043xxxx`) instead — boots fine there. The native USB is then
+  free for TinyUSB NCM (M1/T5). Console = UART on the S3 for this reason.
+- **Octal PSRAM deferred.** `CONFIG_SPIRAM_MODE_OCT` isn't needed for M1; left off
+  (it was an early red herring while chasing the boot loop). Revisit in M5.
+- Host-testable pure logic isolated in `*_util.c` (no IDF deps), tested with a
+  plain `clang` assert runner — avoids the IDF linux-target/Unity machinery.
+
+### Milestone 1 — COMPLETE (acceptance results)
+
+All 7 tasks done on branch `esp-idf-rewrite`. Evidence:
+
+- **Host unit tests:** `config_subnet` 5/5 PASS, `dnsfwd_remap` 6/6 PASS (plain clang).
+- **Dual-target builds:** both `esp32` and `esp32s3` build clean. Classic `esp32`
+  map has **0 tinyusb symbols** (USB-OTG guard verified).
+- **S3 hardware (flashed via CH343 UART):** boots; SoftAP `AIDlink` up
+  `172.20.1.1/26` NAPT ON; USB-NCM up `172.20.2.1/29` DHCP+NAPT; DNS forwarder
+  on :53; TinyUSB driver installed — all simultaneously, no crash.
+- **USB-C cable = network interface (the feature):** Mac `en12` leased
+  **172.20.2.2** over the cable; ping gateway 172.20.2.1 **0% loss ~1.3 ms**;
+  Mac installs **default route via the cable**. Coexists with the AP (both
+  subnets served at once).
+- **Not yet verifiable on the bench:** full DNS/internet-through-NAT (needs a live
+  WiFi uplink + a configured STA SSID — the web UI to set it is M2; the forwarder
+  correctly drops queries with no upstream). Autodetect-on-unplug (needs physical
+  replug) — deferred to a live session.
+
+### Extra gotchas found during M1
+
+- **`idf.py set-target` + stale `build/`:** switching target without clearing
+  `build/` leaves `flasher_args.json` on the old `--chip`, so `flash` fails with a
+  cryptic esptool error. `flash-idf.sh` now force-cleans on target change (exact
+  match, so `esp32` ≠ `esp32s3`).
+- **USB-NCM RX must copy:** TinyUSB owns the rx buffer only for the callback's
+  duration; `esp_netif_receive` is async → copy the frame and free it in
+  `driver_free_rx_buffer`.
+- **Two distinct MACs:** the S3-side netif MAC and the host-side NCM MAC must
+  differ or ARP won't resolve over the cable.
+
+Next: M2 (web config portal) — lets you set the uplink SSID so the STA/internet
+path can be verified end-to-end over both the AP and the cable.
