@@ -13,3 +13,8 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c);
 
 esp_netif_t *netcore_sta_netif(void);
 esp_netif_t *netcore_ap_netif(void);
+
+// True once the STA has an IP (uplink usable). Fills ip4 (4 bytes) when up.
+bool netcore_sta_up(uint8_t ip4_out[4]);
+// Count of stations currently associated to the SoftAP.
+int netcore_ap_client_count(void);

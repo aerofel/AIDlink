@@ -16,17 +16,36 @@ static inline uint32_t mk_netaddr(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
     return (uint32_t)a | ((uint32_t)b << 8) | ((uint32_t)c << 16) | ((uint32_t)d << 24);
 }
 
+static bool s_sta_up;
+static uint8_t s_sta_ip[4];
+
 esp_netif_t *netcore_sta_netif(void) { return s_sta; }
 esp_netif_t *netcore_ap_netif(void) { return s_ap; }
+
+bool netcore_sta_up(uint8_t ip4_out[4]) {
+    if (s_sta_up && ip4_out) memcpy(ip4_out, s_sta_ip, 4);
+    return s_sta_up;
+}
+
+int netcore_ap_client_count(void) {
+    wifi_sta_list_t list;
+    return esp_wifi_ap_get_sta_list(&list) == ESP_OK ? (int)list.num : 0;
+}
 
 static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_sta_up = false;
         ESP_LOGW(TAG, "[STA] disconnected, retrying");
         esp_wifi_connect();
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
+        s_sta_ip[0] = esp_ip4_addr1_16(&e->ip_info.ip);
+        s_sta_ip[1] = esp_ip4_addr2_16(&e->ip_info.ip);
+        s_sta_ip[2] = esp_ip4_addr3_16(&e->ip_info.ip);
+        s_sta_ip[3] = esp_ip4_addr4_16(&e->ip_info.ip);
+        s_sta_up = true;
         ESP_LOGI(TAG, "[STA] up IP=" IPSTR, IP2STR(&e->ip_info.ip));
     }
 }
