@@ -7,6 +7,7 @@
 #include "nvs_flash.h"
 #include "config.h"
 #include "netcore.h"
+#include "usb_ncm.h"
 
 static const char *TAG = "aidlink";
 
@@ -22,4 +23,5 @@ void app_main(void) {
     aidlink_cfg_t cfg;
     cfg_load(&cfg);
     netcore_start(&cfg);
+    usb_ncm_start(&cfg);   // USB-NCM cable networking (no-op without native USB)
 }
