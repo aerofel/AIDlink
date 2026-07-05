@@ -35,3 +35,30 @@
   172.20.1.1; correct `(uplink down)` reporting). **Live positive-path resolution
   still to be confirmed with the real Viasat/Aircalin uplink present** — with the
   uplink up, a client can test: `nslookup wifi.inflight.viasat.com 172.20.1.1`.
+
+## 2026-07-05 — ESP-IDF rewrite (Milestone 1) hardware gotchas
+
+Rewriting AIDlink on ESP-IDF v5.3.5 (one codebase, targets `esp32` + `esp32s3`;
+new project in `firmware-idf/`). Key things that cost time:
+
+- **ESP-IDF install didn't include cmake/ninja** (only compilers). Fix:
+  `python3 $IDF_PATH/tools/idf_tools.py install cmake ninja`.
+- **NAPT Kconfig was renamed.** `CONFIG_LWIP_IP_NAPT` (old) is silently ignored on
+  v5.3 → `esp_netif_napt_enable()` returns error and logs `NAPT FAILED`. Correct
+  symbols: `CONFIG_LWIP_IP_FORWARD=y` **and** `CONFIG_LWIP_IPV4_NAPT=y`.
+- **ESP32-S3 native-USB flashing boot-loops this board.** Flashing via the native
+  USB (USB-Serial-JTAG, VID 0x303A, `/dev/cu.usbmodem101`) leaves the 2nd-stage
+  bootloader crashing on entry (`rst:0x7 TG0WDT_SYS_RST`, never banners). **Stock
+  `hello_world` fails identically** → it's the board/native-USB path, not our code.
+  **Flash + monitor the S3 via its CH343 UART port** (VID 0x1A86,
+  `/dev/cu.usbmodem5AE6043xxxx`) instead — boots fine there. The native USB is then
+  free for TinyUSB NCM (M1/T5). Console = UART on the S3 for this reason.
+- **Octal PSRAM deferred.** `CONFIG_SPIRAM_MODE_OCT` isn't needed for M1; left off
+  (it was an early red herring while chasing the boot loop). Revisit in M5.
+- Host-testable pure logic isolated in `*_util.c` (no IDF deps), tested with a
+  plain `clang` assert runner — avoids the IDF linux-target/Unity machinery.
+
+M1 status: T1 scaffold, T2 config, T3 DNS forwarder, T4 netcore all done & builds
+clean on both targets. **T4 hardware-verified on the S3** (via UART): SoftAP
+`AIDlink` broadcasting (host scan), DHCP up, `NAPT ON`, DNS forwarder on :53.
+STA/internet deferred (empty SSID + no bench uplink; web UI = M2). Next: T5 USB-NCM.
