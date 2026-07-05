@@ -54,6 +54,7 @@ void cfg_load(aidlink_cfg_t *c) {
     c->usb_prefix = 29; c->napt_enable = true;
     strcpy(c->dev_name, "aidlink");
     c->adbp_port = 24000; c->ds_port = 51000;
+    c->frame_len = 1; c->frame_delim = 0; c->frame_prolog_each = true;
     strcpy(c->api_ver, "3.1"); strcpy(c->ac_tail, "TEST01");
     c->src_type = 0;
     strcpy(c->vs_url, "http://192.168.4.2:8080/flight/info");
@@ -88,6 +89,9 @@ void cfg_load(aidlink_cfg_t *c) {
     get_str(h, "dev_name", c->dev_name, sizeof c->dev_name);
     c->adbp_port = get_u16(h, "adbp_port", c->adbp_port);
     c->ds_port = get_u16(h, "ds_port", c->ds_port);
+    c->frame_len = get_i32(h, "frame_len", c->frame_len);
+    c->frame_delim = get_i32(h, "frame_delim", c->frame_delim);
+    c->frame_prolog_each = get_bool(h, "frame_prolog", c->frame_prolog_each);
     get_str(h, "api_ver", c->api_ver, sizeof c->api_ver);
     get_str(h, "ac_tail", c->ac_tail, sizeof c->ac_tail);
     get_str(h, "ac_type", c->ac_type, sizeof c->ac_type);
@@ -136,6 +140,9 @@ int cfg_save(const aidlink_cfg_t *c) {
     e |= nvs_set_str(h, "dev_name", c->dev_name);
     e |= nvs_set_u16(h, "adbp_port", c->adbp_port);
     e |= nvs_set_u16(h, "ds_port", c->ds_port);
+    e |= nvs_set_i32(h, "frame_len", c->frame_len);
+    e |= nvs_set_i32(h, "frame_delim", c->frame_delim);
+    e |= nvs_set_u8(h, "frame_prolog", c->frame_prolog_each ? 1 : 0);
     e |= nvs_set_str(h, "api_ver", c->api_ver);
     e |= nvs_set_str(h, "ac_tail", c->ac_tail);
     e |= nvs_set_str(h, "ac_type", c->ac_type);

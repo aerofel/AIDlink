@@ -19,6 +19,7 @@ typedef struct {
     double   gs_kt;         // knots
     double   track_deg;     // degrees true
     uint64_t utc_ms;        // fix time, ms since epoch (0 = unknown)
+    uint32_t last_fix_ms;   // monotonic ms (esp_timer) of last fix — freshness gate
     char     flight[16];
     char     tail[12];
     char     orig[8];

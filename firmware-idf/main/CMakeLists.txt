@@ -2,7 +2,8 @@
 # Copyright 2026 AIDlink contributors
 set(srcs "aidlink_main.c" "config.c" "config_util.c"
          "dnsfwd.c" "dnsfwd_util.c" "netcore.c" "usb_ncm.c"
-         "auth.c" "web.c" "web_util.c" "pos.c")
+         "auth.c" "web.c" "web_util.c" "pos.c"
+         "adbp.c" "adbp_frame.c")
 set(reqs nvs_flash esp_wifi esp_netif esp_event lwip
          esp_http_server mbedtls esp_timer esp_app_format)
 
