@@ -3,9 +3,11 @@
 set(srcs "aidlink_main.c" "config.c" "config_util.c"
          "dnsfwd.c" "dnsfwd_util.c" "netcore.c" "usb_ncm.c"
          "auth.c" "web.c" "web_util.c" "pos.c"
-         "adbp.c" "adbp_frame.c")
+         "adbp.c" "adbp_frame.c"
+         "poller.c" "poller_sources.c" "geo.c")
 set(reqs nvs_flash esp_wifi esp_netif esp_event lwip
-         esp_http_server mbedtls esp_timer esp_app_format)
+         esp_http_server esp_http_client esp-tls json
+         mbedtls esp_timer esp_app_format)
 
 # TinyUSB (USB-NCM) only exists on targets with native USB-OTG.
 if(CONFIG_SOC_USB_OTG_SUPPORTED)

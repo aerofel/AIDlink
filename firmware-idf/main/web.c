@@ -7,6 +7,7 @@
 #include "web.h"
 #include "auth.h"
 #include "netcore.h"
+#include "pos.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -324,14 +325,16 @@ static esp_err_t h_status(httpd_req_t *r) {
     uint8_t sip[4] = {0}; bool up = netcore_sta_up(sip);
     char ipbuf[16] = "";
     if (up) snprintf(ipbuf, sizeof ipbuf, "%u.%u.%u.%u", sip[0], sip[1], sip[2], sip[3]);
+    pos_state_t p; pos_get(&p);
     char json[512];
-    // position fields are placeholders until the M4 poller is wired in.
     snprintf(json, sizeof json,
-        "{\"sta\":%s,\"ssid\":\"%s\",\"clients\":%d,\"valid\":false,\"sim\":%s,"
-        "\"lat\":0,\"lon\":0,\"trk\":0,\"gs\":0,\"alt\":0,\"staip\":\"%s\","
-        "\"pollok\":false,\"pollage\":-1,\"pollmsg\":\"poller not yet ported (M4)\"}",
+        "{\"sta\":%s,\"ssid\":\"%s\",\"clients\":%d,\"valid\":%s,\"sim\":%s,"
+        "\"lat\":%.5f,\"lon\":%.5f,\"trk\":%.1f,\"gs\":%.1f,\"alt\":%.0f,\"staip\":\"%s\","
+        "\"pollok\":%s,\"pollage\":-1,\"pollmsg\":\"%s\"}",
         up ? "true" : "false", CFG->sta_ssid, netcore_ap_client_count(),
-        CFG->sim_enable ? "true" : "false", ipbuf);
+        p.valid ? "true" : "false", p.simulated ? "true" : "false",
+        p.lat, p.lon, p.track_deg, p.gs_kt, p.alt_ft, ipbuf,
+        p.valid ? "true" : "false", p.simulated ? "emulator" : (p.valid ? "ok" : "no fix"));
     httpd_resp_set_type(r, "application/json");
     httpd_resp_sendstr(r, json);
     return ESP_OK;
