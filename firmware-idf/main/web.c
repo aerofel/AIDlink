@@ -87,6 +87,13 @@ static void ff_tog(httpd_req_t *r, const char *lbl, const char *nm, bool v) {
            nm, v ? "checked" : "", lbl);
 }
 
+// Never let a browser cache a config/login page — a blank page captured during a
+// reboot/USB-re-enumeration window would otherwise stay "stuck" from cache.
+static void no_cache(httpd_req_t *r) {
+    httpd_resp_set_hdr(r, "Cache-Control", "no-store, no-cache, must-revalidate");
+    httpd_resp_set_hdr(r, "Pragma", "no-cache");
+}
+
 static bool gate(httpd_req_t *r) {
     char cookie[200] = {0};
     httpd_req_get_hdr_value_str(r, "Cookie", cookie, sizeof cookie);
@@ -158,6 +165,7 @@ static esp_err_t h_root(httpd_req_t *r) {
     if (!gate(r)) return ESP_OK;
     const aidlink_cfg_t *c = CFG;
     char e1[128];
+    no_cache(r);
     httpd_resp_set_type(r, "text/html; charset=utf-8");
 
     chunk(r, "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>");
@@ -341,6 +349,7 @@ static esp_err_t h_root(httpd_req_t *r) {
 // ---------- login ----------
 static void send_login_form(httpd_req_t *r, bool err) {
     httpd_resp_set_status(r, err ? "401 Unauthorized" : "200 OK");
+    no_cache(r);
     httpd_resp_set_type(r, "text/html; charset=utf-8");
     chunk(r, "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>");
     chunk(r, "<title>AIDlink — Sign in</title><style>"); chunk(r, CSS); chunk(r, "</style></head><body><div class='wrap' style='max-width:430px'>");
@@ -485,15 +494,21 @@ static esp_err_t h_save(httpd_req_t *r) {
     free(body);
 
     cfg_save(c);
+    no_cache(r);
     httpd_resp_set_type(r, "text/html; charset=utf-8");
     // Same "Saved ✓" look as v9, but instead of a fixed meta-refresh (which races
     // the reboot + USB re-enumeration over the cable and lands on a blank page),
-    // poll '/' until the device is back, then navigate.
+    // wait past the reboot's dead window, then poll '/login' with a short timeout
+    // and require two consecutive successes before navigating (so we don't jump
+    // into the connection mid-re-enumeration).
     httpd_resp_sendstr(r,
         "<meta charset='utf-8'><body style='background:#070b14;color:#eaf2ff;font-family:system-ui;text-align:center;padding-top:18vh'>"
         "<h2 style='color:#22d3ee'>Saved ✓</h2><p>Rebooting to apply… returning when it's back.</p>"
-        "<script>function t(){fetch('/',{cache:'no-store'}).then(function(r){if(r.ok)location.href='/';else setTimeout(t,1000);}).catch(function(){setTimeout(t,1000);});}"
-        "setTimeout(t,3000);</script></body>");
+        "<script>var ok=0;function t(){var c=new AbortController();var to=setTimeout(function(){c.abort();},2000);"
+        "fetch('/login',{cache:'no-store',signal:c.signal}).then(function(r){clearTimeout(to);"
+        "if(r.ok){ok++;if(ok>=2){location.replace('/');return;}}else ok=0;setTimeout(t,1000);})"
+        ".catch(function(){clearTimeout(to);ok=0;setTimeout(t,1000);});}"
+        "setTimeout(t,5000);</script></body>");
     // Reboot from a separate task so this handler returns and httpd closes the
     // connection cleanly (the client renders the page before we reset).
     xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);

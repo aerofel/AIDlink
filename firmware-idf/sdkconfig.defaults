@@ -8,3 +8,7 @@ CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 CONFIG_LWIP_IP_FORWARD=y
 CONFIG_LWIP_IPV4_NAPT=y
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+# Browsers send large Cookie + User-Agent + Accept headers; the 512-byte default
+# makes esp_http_server reject them ("Header fields are too long") -> blank page.
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=2048
+CONFIG_HTTPD_MAX_URI_LEN=1024
