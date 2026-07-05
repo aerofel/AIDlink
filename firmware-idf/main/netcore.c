@@ -2,6 +2,7 @@
 // Copyright 2026 AIDlink contributors
 #include "netcore.h"
 #include "dnsfwd.h"
+#include "log.h"
 #include <string.h>
 #include "esp_wifi.h"
 #include "esp_event.h"
@@ -75,6 +76,14 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_sta_up = false;
         if (s_have_ssid && !s_no_reconnect) esp_wifi_connect();
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
+        wifi_event_ap_staconnected_t *e = data;
+        logln("AP client joined %02X:%02X:%02X:%02X:%02X:%02X",
+              e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5]);
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
+        wifi_event_ap_stadisconnected_t *e = data;
+        logln("AP client left  %02X:%02X:%02X:%02X:%02X:%02X (reason %d)",
+              e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5], e->reason);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         s_sta_ip[0] = esp_ip4_addr1_16(&e->ip_info.ip);
