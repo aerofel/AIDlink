@@ -10,3 +10,7 @@
 
 // Start the ADBP server task (command accept loop + periodic push).
 void adbp_start(const aidlink_cfg_t *cfg);
+
+// True if we're actively feeding position to an EFB: at least one active
+// subscription we've pushed to within the last few seconds.
+bool adbp_feeding(void);

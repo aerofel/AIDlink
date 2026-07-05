@@ -218,6 +218,14 @@ static void adbp_task(void *arg) {
     }
 }
 
+bool adbp_feeding(void) {
+    uint32_t now = now_ms();
+    for (int i = 0; i < MAX_SUBS; i++)
+        if (s_subs[i].active && s_subs[i].push_count > 0 && now - s_subs[i].last_push_ms < 5000)
+            return true;
+    return false;
+}
+
 void adbp_start(const aidlink_cfg_t *cfg) {
     CFG = cfg;
     for (int i = 0; i < MAX_SUBS; i++) s_subs[i].sock = -1;

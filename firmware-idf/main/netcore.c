@@ -31,6 +31,8 @@ int netcore_ap_client_count(void) {
     return esp_wifi_ap_get_sta_list(&list) == ESP_OK ? (int)list.num : 0;
 }
 
+bool netcore_has_ssid(void) { return s_have_ssid; }
+
 bool netcore_sta_ipinfo(char *ip, char *gw, char *mask, char *dns) {
     ip[0] = gw[0] = mask[0] = dns[0] = 0;
     if (!s_sta_up || !s_sta) return false;

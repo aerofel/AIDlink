@@ -3,6 +3,11 @@ dependencies:
   idf: "^5.0"
   # mDNS: reachable as <dev_name>.local, advertises _http and _aidlink-adbp.
   espressif/mdns: "^1.2"
+  # Onboard WS2812 RGB status LED (S3 only).
+  espressif/led_strip:
+    version: "^2.4"
+    rules:
+      - if: "target == esp32s3"
   # USB-NCM device class — only pulled in for targets with native USB-OTG.
   espressif/esp_tinyusb:
     version: "^2.0.0"
