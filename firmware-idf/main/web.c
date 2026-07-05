@@ -25,14 +25,17 @@ static aidlink_cfg_t *CFG;
 static httpd_handle_t s_http;
 
 // ---- small chunk helpers ----
-static void chunk(httpd_req_t *r, const char *s) { httpd_resp_sendstr_chunk(r, s); }
+// NOTE: a zero-length chunk terminates an HTTP chunked response, so every helper
+// must skip empty strings (e.g. an empty field value) or the page truncates.
+static void chunk(httpd_req_t *r, const char *s) { if (s && s[0]) httpd_resp_sendstr_chunk(r, s); }
 static void chunkf(httpd_req_t *r, const char *fmt, ...) {
     char buf[512]; va_list ap; va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap); va_end(ap);
-    httpd_resp_sendstr_chunk(r, buf);
+    if (buf[0]) httpd_resp_sendstr_chunk(r, buf);
 }
 static void esc_chunk(httpd_req_t *r, const char *s) {
-    char e[256]; web_html_esc(e, sizeof e, s); httpd_resp_sendstr_chunk(r, e);
+    char e[256]; web_html_esc(e, sizeof e, s);
+    if (e[0]) httpd_resp_sendstr_chunk(r, e);
 }
 
 // text/number/toggle form fields
