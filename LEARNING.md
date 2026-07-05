@@ -89,5 +89,25 @@ All 7 tasks done on branch `esp-idf-rewrite`. Evidence:
 - **Two distinct MACs:** the S3-side netif MAC and the host-side NCM MAC must
   differ or ARP won't resolve over the cable.
 
-Next: M2 (web config portal) — lets you set the uplink SSID so the STA/internet
-path can be verified end-to-end over both the AP and the cable.
+## 2026-07-05 — M2 web config portal (esp_http_server) done
+
+Ported the v9 web portal + auth to ESP-IDF. Verified end-to-end **over the USB-C
+cable** (curl to the NCM gateway 172.20.2.1): login (admin/password), cookie
+gating (protected 302 vs public API), full config page (7 cards / 38 fields),
+/save → clamp → reboot, and **settings persist in NVS** (saved staSsid survived a
+reboot and showed in /status). Both targets build; classic esp32 = 0 tinyusb.
+
+Gotchas:
+- **Chunked-encoding terminator bug:** `httpd_resp_sendstr_chunk(r, "")` writes a
+  zero-length chunk = the HTTP end-of-response marker. An empty field value
+  (blank staSsid) truncated the page mid-render (2 KB vs 6 KB). Fix: the chunk
+  helpers skip empty strings.
+- **Managed-component wedge:** after adding deps to `REQUIRES`, the build failed
+  in `espressif__tinyusb` CMake (`rndis_reports.c` add_library). `rm -rf
+  managed_components dependencies.lock build` + reconfigure fixed it.
+- `esp_app_get_description()` needs `esp_app_desc.h`; `time/gmtime_r/strftime`
+  need `<time.h>`; IDF builds with `-Werror=misleading-indentation` (no two
+  `if`s on one line).
+- `/status` position fields are placeholders until the M4 poller lands.
+
+Next: M3 (ADBP ARINC-834 server).
