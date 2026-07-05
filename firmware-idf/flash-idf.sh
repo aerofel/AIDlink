@@ -29,7 +29,18 @@ if [ -z "$PORT" ]; then echo "no port found for $TGT; pass one explicitly"; exit
 . "$IDF_PATH/export.sh" >/dev/null 2>&1
 
 cd "$(dirname "$0")"
-# set-target regenerates sdkconfig from sdkconfig.defaults[.<target>]; safe to repeat.
+# If the existing build dir was configured for a different target, fully clean it.
+# (A stale build/ leaves flasher_args.json pointing at the old --chip, which makes
+# `flash` fail with a confusing esptool error.) Exact-match the target so we don't
+# treat "esp32" as matching a prior "esp32s3" build (substring).
+if [ -d build ]; then
+  PREV=$(sed -n 's/.*"target"[^"]*"\([^"]*\)".*/\1/p' build/project_description.json 2>/dev/null | head -1)
+  if [ -n "$PREV" ] && [ "$PREV" != "$TGT" ]; then
+    echo ">>> build/ was for '$PREV', now '$TGT' — cleaning"
+    rm -rf build sdkconfig
+  fi
+fi
+# set-target regenerates sdkconfig from sdkconfig.defaults[.<target>].
 idf.py set-target "$TGT"
 if [ "${3:-}" = "monitor" ]; then
   idf.py -p "$PORT" flash monitor
