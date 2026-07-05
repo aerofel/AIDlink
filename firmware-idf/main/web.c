@@ -556,7 +556,7 @@ static esp_err_t h_clients(httpd_req_t *r) {
     // Wi-Fi AP stations — resolve each MAC to its DHCP-leased IP.
     wifi_sta_list_t list;
     if (esp_wifi_ap_get_sta_list(&list) == ESP_OK && list.num > 0) {
-        esp_netif_pair_mac_ip_t pairs[16];
+        esp_netif_pair_mac_ip_t pairs[16] = {0};   // zero ip: a MAC with no lease -> "(pending)", not stack garbage
         int n = list.num > 16 ? 16 : list.num;
         for (int i = 0; i < n; i++) memcpy(pairs[i].mac, list.sta[i].mac, 6);
         esp_netif_dhcps_get_clients_by_mac(netcore_ap_netif(), n, pairs);
