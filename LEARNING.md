@@ -154,5 +154,26 @@ Parity note: v9's emulator is a **fixed** position (fixed=true, no advance) —
 matched it (dropped an initial moving-emulator version). 6 host suites pass;
 both targets build; classic esp32 = 0 tinyusb.
 
-Next: M5 (mDNS, logging, config-migration parity, S3 partition tuning, retire
-the Arduino sketch).
+## 2026-07-05 — M5 polish/parity + ESP-IDF rewrite COMPLETE
+
+- **mDNS** (`services.c`): advertises `<dev_name>.local` + `_http` +
+  `_aidlink-adbp` (managed component `espressif/mdns`). Boots
+  `[mDNS] http://aidlink.local/`. Resolves for Wi-Fi AP clients; cable hosts use
+  the fixed 172.20.2.1 gateway (mDNS doesn't bind our custom USB netif).
+- **Docs**: `firmware-idf/README.md` (build/flash, cable, host tests, layout);
+  main README now points to both firmwares.
+- **Kept the Arduino sketch** rather than deleting it — it's the proven shipping
+  build, and full parity isn't signed off until the live upstream Wi-Fi→NAT→
+  internet path is confirmed on real hardware (bench has had no live uplink).
+- **Deferred** (documented, low-value): the /log ring-buffer web endpoint (UART
+  logging works; the IDF web UI doesn't poll /log), a cfgVer migration counter
+  (per-key NVS default seeding is equivalent), and S3 16 MB partition expansion
+  (the 3 MB app is 66% free).
+
+### Final state
+6 host suites pass; both targets build clean (esp32 67% / esp32s3 66% app free;
+classic esp32 = 0 tinyusb symbols). On the S3, hardware-verified over the USB-C
+cable: DHCP lease + NAT internet path, web portal (login/save/persist), and the
+ADBP feed emitting valid ARINC-834 parameters from the emulator. The one thing
+still to confirm on real hardware is the live upstream-Wi-Fi → NAT → internet
+path (needs a real uplink present).

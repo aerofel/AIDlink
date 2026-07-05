@@ -228,14 +228,21 @@ clamps/derives ground speed, and dead-reckons position at the push rate for smoo
 ## Repository layout
 
 ```
-firmware/aidlink/aidlink.ino   # all firmware logic: WiFi/NAT, poller, ADBP server, web UI, logging
+firmware/aidlink/aidlink.ino   # Arduino firmware (proven/shipping): WiFi/NAT, poller, ADBP, web UI
 firmware/aidlink/defs.h        # Config / PosState / Sub structs
-tools/flash.sh                 # compile + upload (auto-version; macOS TCC-safe)
+firmware-idf/                  # ESP-IDF rewrite — dual-target (esp32 + esp32s3) + USB-cable networking
+firmware-idf/README.md         #   build/flash, USB-NCM cable, source layout, host tests
+tools/flash.sh                 # Arduino: compile + upload (auto-version; macOS TCC-safe)
 tools/tee_serial.py            # background serial logger
 tools/reboot.py                # reboot the board from the host (RTS toggle)
 examples/flight_info.json      # sample position-source response
 LICENSE                        # Apache-2.0
 ```
+
+> **Two firmwares:** `firmware/aidlink/` is the original Arduino sketch (the
+> proven build). `firmware-idf/` is the ESP-IDF rewrite that additionally turns
+> an **ESP32-S3's USB-C cable into a network link** (DHCP + NAT to the uplink,
+> coexisting with the Wi-Fi AP) — see [`firmware-idf/README.md`](firmware-idf/README.md).
 
 ---
 
