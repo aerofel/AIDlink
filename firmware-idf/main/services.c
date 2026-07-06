@@ -4,6 +4,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "mdns.h"
+#include "esp_netif_sntp.h"
 #include "esp_log.h"
 
 static const char *TAG = "mdns";
@@ -32,4 +33,10 @@ void services_start(const aidlink_cfg_t *cfg) {
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
     mdns_service_add(NULL, "_aidlink-adbp", "_tcp", cfg->adbp_port, NULL, 0);
     ESP_LOGI(TAG, "[mDNS] http://%s.local/  (adbp on %u)", host, cfg->adbp_port);
+
+    // SNTP: disciplines the clock whenever the uplink actually reaches the
+    // internet; retries quietly forever otherwise. The poller's HTTP-Date
+    // fallback covers the walled-garden case (see poller.c).
+    esp_sntp_config_t sc = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+    if (esp_netif_sntp_init(&sc) == ESP_OK) ESP_LOGI(TAG, "SNTP started (pool.ntp.org)");
 }

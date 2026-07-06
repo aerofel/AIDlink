@@ -7,11 +7,22 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_mac.h"
 #include "dhcpserver/dhcpserver.h"
 #include "lwip/ip4_addr.h"
 
+// On USB-capable targets (S3) we front the Wi-Fi AP and the USB-NCM port with an
+// L2 bridge that owns the AID IP/DHCP/NAPT, so both see the AID at 172.20.1.1.
+#if CONFIG_SOC_USB_OTG_SUPPORTED
+#define AIDLINK_BRIDGE 1
+#include "esp_netif_br_glue.h"
+#endif
+
 static const char *TAG = "net";
 static esp_netif_t *s_sta, *s_ap;
+#if AIDLINK_BRIDGE
+static esp_netif_t *s_br;   // L2 bridge (Wi-Fi AP + USB-NCM), holds the AID IP
+#endif
 
 static bool s_sta_up;
 static uint8_t s_sta_ip[4];
@@ -21,6 +32,24 @@ static volatile bool s_scanning;       // a Wi-Fi scan is in progress
 
 esp_netif_t *netcore_sta_netif(void) { return s_sta; }
 esp_netif_t *netcore_ap_netif(void) { return s_ap; }
+
+esp_netif_t *netcore_bridge_netif(void) {
+#if AIDLINK_BRIDGE
+    return s_br;
+#else
+    return NULL;
+#endif
+}
+
+// The netif that owns the AID IP, DHCP pool and NAPT: the bridge on the S3,
+// else the SoftAP. Used for NAPT and for enumerating DHCP leases (clients list).
+esp_netif_t *netcore_downstream_netif(void) {
+#if AIDLINK_BRIDGE
+    return s_br;
+#else
+    return s_ap;
+#endif
+}
 
 bool netcore_sta_up(uint8_t ip4_out[4]) {
     if (s_sta_up && ip4_out) memcpy(ip4_out, s_sta_ip, 4);
@@ -108,9 +137,10 @@ static uint32_t ip4_of(const char *s) {
     return ip4addr_aton(s, &a) ? a.addr : 0;
 }
 
-// Configure SoftAP IP, DHCP pool, and DNS offer (AP IP -> our forwarder).
-static void configure_ap_netif(const aidlink_cfg_t *c) {
-    esp_netif_dhcps_stop(s_ap);
+// Configure the downstream netif's IP, DHCP pool, and DNS offer (its own IP ->
+// our forwarder). Works on either the SoftAP or the bridge netif.
+static void configure_dhcp(esp_netif_t *nif, const aidlink_cfg_t *c) {
+    esp_netif_dhcps_stop(nif);
 
     uint32_t ap_addr = ip4_of(c->ap_ip);
     uint32_t ap_mask = ip4_of(c->ap_mask);
@@ -121,7 +151,7 @@ static void configure_ap_netif(const aidlink_cfg_t *c) {
 
     esp_netif_ip_info_t ip = {0};
     ip.ip.addr = ap_addr; ip.gw.addr = ap_addr; ip.netmask.addr = ap_mask;
-    ESP_ERROR_CHECK(esp_netif_set_ip_info(s_ap, &ip));
+    ESP_ERROR_CHECK(esp_netif_set_ip_info(nif, &ip));
 
     // DHCP lease pool: from ap_lease for ap_dhcp_count addresses.
     int count = c->ap_dhcp_count ? c->ap_dhcp_count : 1;
@@ -131,32 +161,81 @@ static void configure_ap_netif(const aidlink_cfg_t *c) {
     lease.enable = true;
     lease.start_ip.addr = lease_start;
     lease.end_ip.addr = (lease_start & 0x00FFFFFF) | ((uint32_t)end_last << 24);
-    esp_netif_dhcps_option(s_ap, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease));
+    esp_netif_dhcps_option(nif, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease));
     uint32_t lease_min = c->ap_lease_min ? c->ap_lease_min : 120;
-    esp_netif_dhcps_option(s_ap, ESP_NETIF_OP_SET, ESP_NETIF_IP_ADDRESS_LEASE_TIME, &lease_min, sizeof(lease_min));
+    esp_netif_dhcps_option(nif, ESP_NETIF_OP_SET, ESP_NETIF_IP_ADDRESS_LEASE_TIME, &lease_min, sizeof(lease_min));
 
-    // Offer the AP's own IP as the DNS server; the forwarder relays to the uplink.
+    // Offer our own IP as the DNS server; the forwarder relays to the uplink.
     esp_netif_dns_info_t di = {0};
     di.ip.type = ESP_IPADDR_TYPE_V4;
     di.ip.u_addr.ip4.addr = ap_addr;
-    esp_netif_set_dns_info(s_ap, ESP_NETIF_DNS_MAIN, &di);
+    esp_netif_set_dns_info(nif, ESP_NETIF_DNS_MAIN, &di);
     dhcps_offer_t offer = OFFER_DNS;
-    esp_netif_dhcps_option(s_ap, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &offer, sizeof(offer));
+    esp_netif_dhcps_option(nif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &offer, sizeof(offer));
 
-    esp_netif_dhcps_start(s_ap);
+    esp_err_t e = esp_netif_dhcps_start(nif);
+    esp_netif_ip_info_t got = {0};
+    esp_netif_get_ip_info(nif, &got);
+    ESP_LOGI(TAG, "[NET] DHCP on %s: %s IP=" IPSTR " pool " IPSTR "+%d",
+             esp_netif_get_desc(nif), e == ESP_OK ? "started" : esp_err_to_name(e),
+             IP2STR(&got.ip), IP2STR(&lease.start_ip), count);
 }
+
+#if AIDLINK_BRIDGE
+// Build the L2 bridge that fronts the Wi-Fi AP (added here) and the USB-NCM port
+// (added later by usb_ncm_start). The bridge owns the AID IP/DHCP; NAPT is
+// enabled on it by the caller. s_ap must already be a bridged AP port (created
+// with flags=AUTOUP, ip_info=NULL). Returns with the bridge started.
+static void build_bridge(const aidlink_cfg_t *c) {
+    uint32_t ap_addr = ip4_of(c->ap_ip);
+    uint32_t ap_mask = ip4_of(c->ap_mask);
+    if (!ap_addr) ap_addr = ip4_of("172.20.1.1");
+    if (!ap_mask) ap_mask = ip4_of("255.255.255.192");
+    static esp_netif_ip_info_t brip;   // must outlive esp_netif_new
+    memset(&brip, 0, sizeof brip);
+    brip.ip.addr = ap_addr; brip.gw.addr = ap_addr; brip.netmask.addr = ap_mask;
+
+    esp_netif_inherent_config_t brc = ESP_NETIF_INHERENT_DEFAULT_BR_DHCPS();
+    brc.ip_info = &brip;                                  // override the 192.168.4.1 default
+    static bridgeif_config_t brinfo = {                  // must outlive the netif
+        .max_fdb_dyn_entries = 16, .max_fdb_sta_entries = 4, .max_ports = 4,
+    };
+    brc.bridge_info = &brinfo;
+    esp_read_mac(brc.mac, ESP_MAC_WIFI_SOFTAP);          // bridge MAC = device (AP) MAC
+    esp_netif_config_t brcfg = { .base = &brc, .stack = ESP_NETIF_NETSTACK_DEFAULT_BR };
+    s_br = esp_netif_new(&brcfg);
+
+    esp_netif_br_glue_handle_t glue = esp_netif_br_glue_new();
+    ESP_ERROR_CHECK(esp_netif_br_glue_add_wifi_port(glue, s_ap));
+    ESP_ERROR_CHECK(esp_netif_attach(s_br, glue));
+    // The glue owns the bridge lifecycle: on WIFI_EVENT_AP_START it starts the
+    // bridge, adds the AP port, and (DHCP_SERVER flag) starts DHCP. We apply our
+    // custom pool afterwards in netcore_start, once the bridge is up.
+}
+#endif
 
 esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    s_sta = esp_netif_create_default_wifi_sta();
-    s_ap = esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t wcfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&wcfg));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_evt, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_evt, NULL, NULL));
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
+
+    s_sta = esp_netif_create_default_wifi_sta();
+#if AIDLINK_BRIDGE
+    // AP as a bridged L2 port: no IP of its own, keep AUTOUP so it comes up to be
+    // bridged. The bridge (built below) holds the AID IP + DHCP + NAPT.
+    esp_netif_inherent_config_t apc = ESP_NETIF_INHERENT_DEFAULT_WIFI_AP();
+    apc.flags = ESP_NETIF_FLAG_AUTOUP;
+    apc.ip_info = NULL;
+    s_ap = esp_netif_create_wifi(WIFI_IF_AP, &apc);
+    ESP_ERROR_CHECK(esp_wifi_set_default_wifi_ap_handlers());
+#else
+    s_ap = esp_netif_create_default_wifi_ap();
+#endif
 
     // STA config
     s_have_ssid = c->sta_ssid[0] != 0;
@@ -175,15 +254,34 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
     ap.ap.channel = 0;  // follow STA
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
 
-    configure_ap_netif(c);
+#if AIDLINK_BRIDGE
+    build_bridge(c);        // creates s_br, bridges the AP port, starts DHCP on the bridge
+#else
+    configure_dhcp(s_ap, c);
+#endif
 
     ESP_ERROR_CHECK(esp_wifi_start());
 
+#if AIDLINK_BRIDGE
+    // The glue starts the bridge netif on WIFI_EVENT_AP_START but only brings its
+    // link "up" on the first Wi-Fi association (WIFI_EVENT_AP_STACONNECTED). We
+    // need the bridge up unconditionally — a USB client alone, with no Wi-Fi
+    // client, must still get DHCP/NAPT — so we connect it ourselves once the glue
+    // has created it (AP_START), then apply our DHCP pool. action_connected only
+    // brings the link up (no netif_add), so it won't collide with the glue.
+    vTaskDelay(pdMS_TO_TICKS(300));                      // let AP_START reach the glue
+    esp_netif_action_connected(s_br, NULL, 0, NULL);     // bring the bridge link up
+    for (int i = 0; i < 20 && !esp_netif_is_netif_up(s_br); i++) vTaskDelay(pdMS_TO_TICKS(50));
+    configure_dhcp(s_br, c);
+#endif
+
+    esp_netif_t *down = netcore_downstream_netif();
     if (c->napt_enable) {
-        esp_err_t e = esp_netif_napt_enable(s_ap);
-        ESP_LOGI(TAG, "[AP] NAPT %s", e == ESP_OK ? "ON" : "FAILED");
+        esp_err_t e = esp_netif_napt_enable(down);
+        ESP_LOGI(TAG, "[NET] NAPT %s", e == ESP_OK ? "ON" : "FAILED");
     }
-    ESP_LOGI(TAG, "[AP] %s IP=%s mask=%s DNS->self", c->ap_ssid, c->ap_ip, c->ap_mask);
+    ESP_LOGI(TAG, "[NET] %s AID IP=%s mask=%s DNS->self%s", c->ap_ssid, c->ap_ip, c->ap_mask,
+             netcore_bridge_netif() ? " (bridged AP+USB)" : "");
 
     dnsfwd_start(s_sta, c->ap_client_dns);
     return s_sta;

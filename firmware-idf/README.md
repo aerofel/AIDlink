@@ -86,6 +86,52 @@ The board's other small LEDs (power, UART/USB activity) are hardwired and not
 software-controllable. If your board's RGB LED is on a different pin, change
 `LED_GPIO` in `statusled.c`.
 
+The LED is gated per-board in `board.c` (eFuse MAC → features): on the LilyGO
+T-Display-S3 GPIO48 is LCD data line D7, so the WS2812 driver must not run there.
+
+## Onboard flight display (LilyGO T-Display-S3)
+
+Boards flagged `has_display` in `board.c` drive the 1.9″ ST7789 (320×170
+landscape, Intel-8080 8-bit bus) via `esp_lcd` + LVGL 9 (`esp_lvgl_port`,
+S3-only managed components). `display.c` renders, at 1 Hz from the shared
+ownship state:
+
+- **tail** (cyan) and **flight number** (top row),
+- **DEP → ARR** route, large, greyed while the fix is invalid,
+- **distance to arrival** in NM (great-circle to the destination from the
+  embedded gazetteer `airports.c` — Aircalin network + Pacific/Asia/AU/NZ,
+  IATA and ICAO codes),
+- **zone + UTC (`12:30:12z`) + local time at position** (bottom row). The
+  offset comes from an embedded IANA-derived timezone grid (`tzdb.c`, 1°
+  resolution, DST-aware, :30/:45 offsets included). UTC needs no internet:
+  the clock is disciplined by the position feed's own HTTP `Date` header
+  (poller.c), with the fix timestamp as fallback and SNTP as an opportunistic
+  bonus when the uplink really reaches the internet.
+
+The same binary runs on display-less S3 boards (`display_start()` is a no-op
+there); the classic ESP32 build contains zero LVGL/esp_lcd code.
+
+**Memory budget (hard-won):** the display shares internal SRAM with
+WiFi + TinyUSB + the L2 bridge. LVGL's pool is capped at 16 KB
+(`CONFIG_LV_MEM_SIZE_KILOBYTES` — the 64 KB default is a *static* BSS array
+that starved the DMA draw buffer and made `lvgl_port_add_disp` return NULL =
+black screen), and rendering uses a single 320×20 partial buffer. Display
+bring-up mirrors every step into the web `/log` ring — the only "console"
+this board has.
+
+**T-Display-S3 reflashing:** the single USB-C is USB-NCM while AIDlink runs.
+Two routes into the ROM downloader:
+1. **Remote (preferred):** `curl -b <cookies> http://172.20.1.1/dfu` — the
+   auth-gated `/dfu` endpoint forces download-boot and restarts. Then
+   `idf.py -p /dev/cu.usbmodem* flash`.
+2. **Physical:** hold **BOT** (GPIO0), tap RST, release.
+
+Either way, after flashing over the native USB the S3 usually **re-latches
+into download mode** on soft reset (`boot:0x23` = forced download) — finish
+with **one physical RST tap**. A USB replug is *not* a power cycle if a
+battery is connected. No UART bridge: logs only on the UART0 header pins
+(43/44), or via `/log` over the network.
+
 ## Tests
 
 Pure logic is host-unit-tested with plain `clang` (no on-target harness needed):
@@ -98,6 +144,8 @@ clang -Imain -o /tmp/t host_test/test_dnsfwd_remap.c    main/dnsfwd_util.c   && 
 clang -Imain -o /tmp/t host_test/test_web_util.c        main/web_util.c      && /tmp/t
 clang -Imain -o /tmp/t host_test/test_adbp_frame.c      main/adbp_frame.c -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_geo.c             main/geo.c        -lm && /tmp/t
+clang -Imain -o /tmp/t host_test/test_airports.c        main/airports.c main/geo.c -lm && /tmp/t
+clang -Imain -o /tmp/t host_test/test_tzdb.c            main/tzdb.c main/tzdb_data.c -lm && /tmp/t
 clang -Imain -I$CJ -o /tmp/t host_test/test_poller_sources.c main/poller_sources.c $CJ/cJSON.c -lm && /tmp/t
 ```
 
@@ -117,7 +165,11 @@ clang -Imain -I$CJ -o /tmp/t host_test/test_poller_sources.c main/poller_sources
 | `poller.*` / `poller_sources.c` / `geo.*` | position poller, JSON parsers, geo (all host-tested) |
 | `services.*` | mDNS advertisement |
 | `log.*` | device traffic-log ring buffer (web `/log`) |
-| `statusled.*` | onboard RGB status LED (S3) |
+| `statusled.*` | onboard RGB status LED (boards that have one) |
+| `board.*` | board identity by eFuse MAC → per-board hardware (LED, display) |
+| `display.*` | T-Display-S3 flight display (esp_lcd i80 ST7789 + LVGL) |
+| `airports.*` | embedded IATA/ICAO → lat/lon gazetteer (host-tested) |
+| `tzdb.*` / `tzdb_data.c` | 1° world timezone grid + offset transitions, generated from IANA data (host-tested; regenerate ~2028) |
 
 ## Relationship to the Arduino sketch
 

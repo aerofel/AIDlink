@@ -20,24 +20,18 @@
 #include "esp_netif_defaults.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "dhcpserver/dhcpserver.h"
+#include "lwip/ip4_addr.h"
 #include "tinyusb.h"
 #include "tinyusb_default_config.h"
 #include "tinyusb_net.h"
 #include "netcore.h"
 
 static const char *TAG = "usbncm";
-static esp_netif_t *s_usb_netif;
-static esp_netif_ip_info_t s_ip;
+static esp_netif_t *s_usb_netif;   // L2-only bridge port (no IP of its own)
 static uint32_t s_last_rx_ms;      // last time the host sent us a frame
-static uint8_t  s_host_mac[6];     // MAC assigned to the host-side NCM interface
-static char     s_client_ip[16];   // DHCP address handed to the host
+static uint8_t  s_host_mac[6];     // MAC of the host-side NCM interface (the client)
 
 typedef struct { esp_netif_driver_base_t base; } usb_driver_t;
-
-static inline uint32_t mk_netaddr(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-    return (uint32_t)a | ((uint32_t)b << 8) | ((uint32_t)c << 16) | ((uint32_t)d << 24);
-}
 
 // lwIP -> USB host: hand the frame to TinyUSB (copies into its TX, so eb=NULL).
 static esp_err_t usb_transmit(void *h, void *buffer, size_t len) {
@@ -60,13 +54,21 @@ static esp_err_t usb_recv_cb(void *buffer, uint16_t len, void *ctx) {
 }
 
 // A host is "connected" if it sent us a frame in the last 30 s (NCM hosts emit
-// periodic ARP/traffic). Reports the host NCM MAC and its DHCP address.
+// periodic ARP/traffic). Reports the host NCM MAC and the DHCP address the bridge
+// leased it (the host is a bridge client now, not on a separate USB subnet).
 bool usb_ncm_client(char *mac_str, char *ip_str) {
     if (s_last_rx_ms == 0) return false;
     if ((uint32_t)(esp_timer_get_time() / 1000) - s_last_rx_ms > 30000) return false;
     snprintf(mac_str, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
              s_host_mac[0], s_host_mac[1], s_host_mac[2], s_host_mac[3], s_host_mac[4], s_host_mac[5]);
-    strlcpy(ip_str, s_client_ip, 16);
+    ip_str[0] = 0;
+    esp_netif_t *br = netcore_bridge_netif();
+    esp_netif_pair_mac_ip_t pair = {0};
+    memcpy(pair.mac, s_host_mac, 6);
+    if (br && esp_netif_dhcps_get_clients_by_mac(br, 1, &pair) == ESP_OK && pair.ip.addr)
+        snprintf(ip_str, 16, IPSTR, IP2STR(&pair.ip));
+    else
+        strlcpy(ip_str, "(pending)", 16);
     return true;
 }
 
@@ -84,17 +86,18 @@ static esp_err_t usb_post_attach(esp_netif_t *netif, void *args) {
 }
 
 void usb_ncm_start(const aidlink_cfg_t *c) {
-    // --- static IP for the USB subnet (e.g. 172.20.2.1/29) ---
-    memset(&s_ip, 0, sizeof(s_ip));
-    esp_netif_set_ip4_addr(&s_ip.ip, c->usb_ip[0], c->usb_ip[1], c->usb_ip[2], c->usb_ip[3]);
-    esp_netif_set_ip4_addr(&s_ip.gw, c->usb_ip[0], c->usb_ip[1], c->usb_ip[2], c->usb_ip[3]);
-    uint32_t m = cfg_netmask_from_prefix(c->usb_prefix);
-    esp_netif_set_ip4_addr(&s_ip.netmask, (m >> 24) & 0xFF, (m >> 16) & 0xFF, (m >> 8) & 0xFF, m & 0xFF);
+    (void)c;
+    // The bridge (built by netcore_start) owns the AID IP, DHCP pool and NAPT. The
+    // USB link is just another L2 port on it, so both Wi-Fi and cable clients land
+    // on the same 172.20.1.0/26 subnet and reach the AID at 172.20.1.1.
+    esp_netif_t *br = netcore_bridge_netif();
+    if (!br) { ESP_LOGE(TAG, "[USB] no bridge netif; USB-NCM not started"); return; }
 
-    // --- create a DHCP-server esp_netif over an ethernet netstack ---
+    // --- L2-only esp_netif over an ethernet netstack: no IP/ARP/DHCP of its own
+    //     (flags=0, ip_info=NULL), it gets bridged below. ---
     esp_netif_inherent_config_t base = {
-        .flags = (esp_netif_flags_t)(ESP_NETIF_DHCP_SERVER | ESP_NETIF_FLAG_AUTOUP),
-        .ip_info = &s_ip,
+        .flags = 0,
+        .ip_info = NULL,
         .if_key = "USB_NCM",
         .if_desc = "usb",
         .route_prio = 15,
@@ -107,7 +110,7 @@ void usb_ncm_start(const aidlink_cfg_t *c) {
     s_usb_netif = esp_netif_new(&cfg);
     if (!s_usb_netif) { ESP_LOGE(TAG, "esp_netif_new failed"); return; }
 
-    // netif (S3-side) MAC — must differ from the host-side NCM MAC for ARP to work.
+    // port (device-side) MAC — distinct from the host-side NCM MAC.
     uint8_t nmac[6];
     esp_read_mac(nmac, ESP_MAC_ETH);
     nmac[0] |= 0x02;   // locally administered
@@ -118,30 +121,11 @@ void usb_ncm_start(const aidlink_cfg_t *c) {
     drv->base.post_attach = usb_post_attach;
     ESP_ERROR_CHECK(esp_netif_attach(s_usb_netif, drv));
 
-    // bring the interface up (no real link events on this virtual netif)
+    // Start the port (registers its lwip_netif), then add it to the already-started
+    // bridge. Both must be started before esp_netif_bridge_add_port().
     esp_netif_action_start(s_usb_netif, NULL, 0, NULL);
     esp_netif_action_connected(s_usb_netif, NULL, 0, NULL);
-
-    // --- DHCP pool + DNS offer (USB gateway IP -> served by the DNS forwarder) ---
-    esp_netif_dhcps_stop(s_usb_netif);
-    esp_netif_set_ip_info(s_usb_netif, &s_ip);
-    dhcps_lease_t lease = {0};
-    lease.enable = true;
-    lease.start_ip.addr = mk_netaddr(c->usb_ip[0], c->usb_ip[1], c->usb_ip[2], c->usb_ip[3] + 1);
-    lease.end_ip.addr = mk_netaddr(c->usb_ip[0], c->usb_ip[1], c->usb_ip[2], c->usb_ip[3] + 4);
-    esp_netif_dhcps_option(s_usb_netif, ESP_NETIF_OP_SET, ESP_NETIF_REQUESTED_IP_ADDRESS, &lease, sizeof(lease));
-    esp_netif_dns_info_t di = {0};
-    di.ip.type = ESP_IPADDR_TYPE_V4;
-    esp_netif_set_ip4_addr(&di.ip.u_addr.ip4, c->usb_ip[0], c->usb_ip[1], c->usb_ip[2], c->usb_ip[3]);
-    esp_netif_set_dns_info(s_usb_netif, ESP_NETIF_DNS_MAIN, &di);
-    dhcps_offer_t offer = OFFER_DNS;
-    esp_netif_dhcps_option(s_usb_netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &offer, sizeof(offer));
-    esp_netif_dhcps_start(s_usb_netif);
-
-    if (c->napt_enable) {
-        esp_err_t e = esp_netif_napt_enable(s_usb_netif);
-        ESP_LOGI(TAG, "[USB] NAPT %s", e == ESP_OK ? "ON" : "FAILED");
-    }
+    ESP_ERROR_CHECK(esp_netif_bridge_add_port(br, s_usb_netif));
 
     // --- TinyUSB + NCM class ---
     tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
@@ -153,13 +137,9 @@ void usb_ncm_start(const aidlink_cfg_t *c) {
     };
     esp_read_mac(net_cfg.mac_addr, ESP_MAC_ETH);   // host-side NCM MAC (distinct from nmac)
     memcpy(s_host_mac, net_cfg.mac_addr, 6);        // remember it for the clients list
-    snprintf(s_client_ip, sizeof s_client_ip, "%d.%d.%d.%d",
-             c->usb_ip[0], c->usb_ip[1], c->usb_ip[2], c->usb_ip[3] + 1);   // DHCP pool start
     ESP_ERROR_CHECK(tinyusb_net_init(&net_cfg));
 
-    // The DNS forwarder already binds 0.0.0.0:53, so it serves the USB gateway too.
-    ESP_LOGI(TAG, "[USB] NCM up: %d.%d.%d.%d/%d DHCP+NAPT, DNS->self",
-             c->usb_ip[0], c->usb_ip[1], c->usb_ip[2], c->usb_ip[3], c->usb_prefix);
+    ESP_LOGI(TAG, "[USB] NCM bridged onto the AID subnet (DHCP+NAPT via bridge)");
 }
 
 #else  // no native USB (e.g. classic ESP32)

@@ -15,6 +15,16 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c);
 esp_netif_t *netcore_sta_netif(void);
 esp_netif_t *netcore_ap_netif(void);
 
+// The downstream netif that owns the AID IP, DHCP pool and NAPT — and that
+// serves DHCP leases for the clients list. On the S3 this is the L2 bridge
+// (Wi-Fi AP + USB-NCM share it); on the classic ESP32 it is the SoftAP itself.
+// Never NULL after netcore_start().
+esp_netif_t *netcore_downstream_netif(void);
+
+// The L2 bridge netif (S3 only), or NULL when bridging isn't built. USB-NCM
+// attaches itself to this as a bridge port.
+esp_netif_t *netcore_bridge_netif(void);
+
 // True once the STA has an IP (uplink usable). Fills ip4 (4 bytes) when up.
 bool netcore_sta_up(uint8_t ip4_out[4]);
 

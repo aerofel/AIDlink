@@ -40,6 +40,26 @@ int main(void) {
     // missing lat/lon -> fail
     assert(!poller_parse_viasat("{\"altitude\":{\"value\":\"100\"}}", &lat, &lon, &alt, &gs, &track, &ht, &utc, flight, tail, orig, dest));
 
+    // --- Real Viasat /ac/flight/info capture (2026-02-27, F-ONEA NWWW->NFFN):
+    // full attr/updated_at/value wrapping, "+0000" time suffix, NO groundSpeed
+    // field at all (gs must come back -1 = derive-from-fixes).
+    const char *vr = "{\"altitude\":{\"attr\":{\"display_name\":\"Altitude\"},\"updated_at\":1772220174,\"value\":\"36968\"},"
+                     "\"city_pair\":{\"attr\":{},\"updated_at\":1772230034,\"value\":\"NWWW NFFN\"},"
+                     "\"current_time\":{\"attr\":{},\"updated_at\":1772220174,\"value\":\"2026-02-27T22:14:48+0000\"},"
+                     "\"destinationCode\":{\"attr\":{},\"updated_at\":1772220174,\"value\":\"NFFN\"},"
+                     "\"flightNumber\":{\"attr\":{},\"updated_at\":1772220174,\"value\":\"ACI330\"},"
+                     "\"latitude\":{\"attr\":{},\"updated_at\":1772220174,\"value\":\"-18.5564\"},"
+                     "\"longitude\":{\"attr\":{},\"updated_at\":1772220174,\"value\":\"172.12\"},"
+                     "\"originCode\":{\"attr\":{},\"updated_at\":1772220174,\"value\":\"NWWW\"},"
+                     "\"tail_number\":{\"attr\":{},\"updated_at\":1772220174,\"value\":\"F-ONEA\"}}";
+    assert(poller_parse_viasat(vr, &lat, &lon, &alt, &gs, &track, &ht, &utc, flight, tail, orig, dest));
+    assert(fabs(lat - (-18.5564)) < 1e-6 && fabs(lon - 172.12) < 1e-6);
+    assert(fabs(alt - 36968) < 1e-6);
+    assert(gs == -1 && !ht);                       // no groundSpeed/track in feed
+    assert(strcmp(flight, "ACI330") == 0 && strcmp(tail, "F-ONEA") == 0);
+    assert(strcmp(orig, "NWWW") == 0 && strcmp(dest, "NFFN") == 0);
+    assert(utc == 1772230488000ULL);               // 2026-02-27T22:14:48Z
+
     // --- Panasonic flat td_id_* with deg*1000 sign encoding ---
     memset(flight, 0, sizeof flight); memset(tail, 0, sizeof tail);
     const char *p = "{\"td_id_fltdata_present_position_latitude\":\"00007980\","   //  7.980

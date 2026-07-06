@@ -10,6 +10,7 @@
 #include "netcore.h"
 #include "pos.h"
 #include "poller.h"
+#include "airports.h"
 #include "log.h"
 #include "usb_ncm.h"
 #include <string.h>
@@ -21,6 +22,10 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_app_desc.h"
+#include "soc/soc_caps.h"
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+#include "soc/rtc_cntl_reg.h"   // FORCE_DOWNLOAD_BOOT for /dfu
+#endif
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -295,7 +300,13 @@ static esp_err_t h_root(httpd_req_t *r) {
            c->auth_hash[0] ? "leave blank to keep" : "set a password");
     chunk(r, "<div class='note'>Default login <b>admin / password</b> — change it here. When enabled with a password set, the config pages require login. Forgot it? Re-flash or erase NVS to reset.</div></div>");
 
-    chunk(r, "<div class='bar'><button type='submit'>Save &amp; reboot</button><button class='ghost' type='button' onclick='location.reload()'>Reload</button></div></form>");
+    chunk(r, "<div class='bar'><button type='submit'>Save &amp; reboot</button><button class='ghost' type='button' onclick='location.reload()'>Reload</button>");
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    chunk(r, "<button class='ghost' type='button' style='margin-left:auto' "
+             "onclick=\"if(confirm('Enter firmware update mode?\\n\\nThe device reboots into the USB bootloader and stays OFF the network until new firmware is flashed over the cable and RST is pressed once.'))location.href='/dfu'\">"
+             "&#11014; Firmware update…</button>");
+#endif
+    chunk(r, "</div></form>");
 
     // traffic log card
     chunk(r, "<div class='card'><h2>📡 Device traffic log <span class='text-muted' style='font-weight:400;font-size:.7rem'>— ADBP + HTTP from EFB clients (auto-refresh)</span></h2>");
@@ -534,14 +545,20 @@ static esp_err_t h_status(httpd_req_t *r) {
     long pollage = pat ? (long)((nowms - pat) / 1000) : -1;
     char pmsg_e[80], ssid_e[80]; esc(pmsg_e, sizeof pmsg_e, pmsg); esc(ssid_e, sizeof ssid_e, CFG->sta_ssid);
 
-    char json[640];
+    // dep/arr normalized to ICAO when the gazetteer knows the code
+    const char *dep = airports_icao(p.orig); if (!dep) dep = p.orig;
+    const char *arr = airports_icao(p.dest); if (!arr) arr = p.dest;
+
+    char json[768];
     snprintf(json, sizeof json,
         "{\"sta\":%s,\"ssid\":\"%s\",\"clients\":%d,\"valid\":%s,\"sim\":%s,"
         "\"lat\":%.5f,\"lon\":%.5f,\"trk\":%.1f,\"gs\":%.1f,\"alt\":%.0f,\"staip\":\"%s\","
+        "\"tail\":\"%s\",\"flight\":\"%s\",\"dep\":\"%s\",\"arr\":\"%s\","
         "\"pollok\":%s,\"pollage\":%ld,\"pollmsg\":\"%s\"}",
         up ? "true" : "false", ssid_e, netcore_ap_client_count(),
         valid ? "true" : "false", p.simulated ? "true" : "false",
         p.lat, p.lon, p.track_deg, p.gs_kt, p.alt_ft, staip,
+        p.tail[0] ? p.tail : CFG->ac_tail, p.flight, dep, arr,
         pok ? "true" : "false", pollage, pmsg_e);
     httpd_resp_set_type(r, "application/json");
     httpd_resp_sendstr(r, json);
@@ -559,7 +576,7 @@ static esp_err_t h_clients(httpd_req_t *r) {
         esp_netif_pair_mac_ip_t pairs[16] = {0};   // zero ip: a MAC with no lease -> "(pending)", not stack garbage
         int n = list.num > 16 ? 16 : list.num;
         for (int i = 0; i < n; i++) memcpy(pairs[i].mac, list.sta[i].mac, 6);
-        esp_netif_dhcps_get_clients_by_mac(netcore_ap_netif(), n, pairs);
+        esp_netif_dhcps_get_clients_by_mac(netcore_downstream_netif(), n, pairs);   // DHCP lives on the bridge (S3) / AP (esp32)
         for (int i = 0; i < n; i++) {
             wifi_sta_info_t *s = &list.sta[i];
             char ip[16];
@@ -655,6 +672,33 @@ static esp_err_t h_api_aoip(httpd_req_t *r) { api_resp(r,"getAoIPStatus","<AoIPS
 static esp_err_t h_api_acars(httpd_req_t *r) { api_resp(r,"getAcarsStatus","<AcarsStatus ATSUStatus=\"NORMAL\" AcarsForEFBAvailability=\"DISABLED\" AcarsLinkStatus=\"DISCONNECTED\"/>"); return ESP_OK; }
 static esp_err_t h_api_reboot(httpd_req_t *r) { api_resp(r,"cmdReboot",""); return ESP_OK; }
 
+// ---------- /dfu: reboot into the ROM downloader (software BOOT-strap) ----------
+#if SOC_USB_SERIAL_JTAG_SUPPORTED   // classic esp32: no forced download boot (UART bridge handles resets)
+// On boards whose only USB port is owned by TinyUSB-NCM (T-Display-S3), this is
+// the way to reflash without physically holding BOOT: force download-boot, then
+// restart — the port re-enumerates as USB-Serial-JTAG and esptool can flash.
+static void dfu_task(void *arg) {
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(500));   // let the HTTP response flush
+    REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
+    esp_restart();
+}
+static esp_err_t h_dfu(httpd_req_t *r) {
+    if (!gate(r)) return ESP_OK;
+    no_cache(r);
+    httpd_resp_set_type(r, "text/html; charset=utf-8");
+    httpd_resp_sendstr(r,
+        "<meta charset='utf-8'><body style='background:#070b14;color:#eaf2ff;"
+        "font-family:system-ui;text-align:center;padding-top:18vh'>"
+        "<h2 style='color:#fbbf24'>Firmware update mode</h2>"
+        "<p>Rebooting into the USB bootloader — the device is now off the network.</p>"
+        "<p style='color:#8aa0c0'>Flash over the USB cable (<code>idf.py flash</code>), "
+        "then press <b>RST</b> once to boot the new firmware.</p></body>");
+    xTaskCreate(dfu_task, "dfu", 2048, NULL, 5, NULL);
+    return ESP_OK;
+}
+#endif  // SOC_USB_SERIAL_JTAG_SUPPORTED
+
 static esp_err_t h_404(httpd_req_t *r, httpd_err_code_t e) {
     logln("HTTP %s", r->uri);
     httpd_resp_set_status(r, "404 Not Found");
@@ -694,6 +738,9 @@ void web_start(aidlink_cfg_t *cfg) {
     reg("/getAoIPStatus", HTTP_GET, h_api_aoip);    reg("/getAoIPStatus", HTTP_POST, h_api_aoip);
     reg("/getAcarsStatus", HTTP_GET, h_api_acars);  reg("/getAcarsStatus", HTTP_POST, h_api_acars);
     reg("/cmdReboot", HTTP_GET, h_api_reboot);      reg("/cmdReboot", HTTP_POST, h_api_reboot);
+#if SOC_USB_SERIAL_JTAG_SUPPORTED
+    reg("/dfu", HTTP_GET, h_dfu);
+#endif
     httpd_register_err_handler(s_http, HTTPD_404_NOT_FOUND, h_404);
     ESP_LOGI(TAG, "[WEB] http://%s/", cfg->ap_ip);
 }

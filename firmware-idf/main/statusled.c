@@ -20,6 +20,7 @@
 #include "esp_log.h"
 #include "netcore.h"
 #include "adbp.h"
+#include "board.h"
 
 // The one controllable LED: the onboard WS2812 on GPIO48. (The board's other
 // small LEDs are hardwired UART/USB activity indicators, not GPIO-controllable.)
@@ -62,6 +63,12 @@ static void led_task(void *arg) {
 }
 
 void statusled_start(void) {
+    // On the T-Display-S3, GPIO48 is LCD data line D7 — driving WS2812 pulses
+    // onto it would corrupt the display bus. Only boards that carry the LED.
+    if (!board_get()->has_ws2812) {
+        ESP_LOGI(TAG, "no WS2812 on %s — status LED disabled", board_get()->name);
+        return;
+    }
     led_strip_config_t sc = { .strip_gpio_num = LED_GPIO, .max_leds = LED_COUNT };
     led_strip_rmt_config_t rc = { .resolution_hz = 10 * 1000 * 1000 };
     if (led_strip_new_rmt_device(&sc, &rc, &s_strip) != ESP_OK) {

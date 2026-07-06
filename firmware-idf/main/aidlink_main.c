@@ -17,12 +17,14 @@
 #include "services.h"
 #include "log.h"
 #include "statusled.h"
+#include "board.h"
+#include "display.h"
 
 static const char *TAG = "aidlink";
 static aidlink_cfg_t cfg;   // static: consulted by the web server for the device's lifetime
 
 void app_main(void) {
-    ESP_LOGI(TAG, "[aidlink-idf] boot %s", CONFIG_IDF_TARGET);
+    ESP_LOGI(TAG, "[aidlink-idf] boot %s (%s)", CONFIG_IDF_TARGET, board_get()->name);
 
     esp_err_t e = nvs_flash_init();
     if (e == ESP_ERR_NVS_NO_FREE_PAGES || e == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -51,5 +53,6 @@ void app_main(void) {
     adbp_start(&cfg);      // ARINC-834 ADBP position feed
     poller_start(&cfg);    // position source poller + emulator
     services_start(&cfg);  // mDNS: <dev_name>.local + service advertisement
-    statusled_start();     // onboard RGB status LED (S3)
+    statusled_start();     // onboard RGB status LED (boards that have one)
+    display_start(&cfg);   // onboard flight display (boards that have one)
 }

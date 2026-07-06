@@ -13,3 +13,12 @@ dependencies:
     version: "^2.0.0"
     rules:
       - if: "target in [esp32s2, esp32s3, esp32p4]"
+  # LVGL + esp_lcd glue for the T-Display-S3 flight display (S3 only).
+  lvgl/lvgl:
+    version: "^9.2"
+    rules:
+      - if: "target == esp32s3"
+  espressif/esp_lvgl_port:
+    version: "^2.4"
+    rules:
+      - if: "target == esp32s3"

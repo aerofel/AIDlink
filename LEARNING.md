@@ -1,5 +1,132 @@
 # AIDlink — Learning Journal
 
+## 2026-07-06 — Display v2: offline clock chain, real timezones, live identity
+
+Second iteration after live testing with replayed Viasat/FOMAX captures:
+
+- **Clock without internet (the AID's normal life):** 3-tier UTC chain —
+  (1) the position feed's **HTTP `Date` response header** parsed in poller.c →
+  `settimeofday` (±3 s gate). Works in the walled garden: the time comes from
+  the same onboard server as the position. (2) the fix's own `current_time`,
+  ticked forward. (3) SNTP `pool.ntp.org`, opportunistic only — silent when
+  unreachable, most precise when reachable. Insight from a real ground capture:
+  Viasat's `current_time` **freezes when avionics updates stop** (it's
+  last-update time, not now) — that's why the Date header outranks it.
+- **Real timezone at position:** `tzdb.c` + generated `tzdb_data.c` — 1° world
+  grid (65 KB) of zone indices from `timezonefinder` + per-zone UTC-offset
+  transition tables (2026–2028). 389 IANA zones dedupe to **61** unique
+  signatures. Handles DST both hemispheres, +5:30, Chatham +12:45, ocean
+  nautical zones. Host-tested. **Coverage window: regenerate `tzdb_data.c`
+  (scratchpad `gen_tzdb.py`) when it lapses (2028).**
+- **Live aircraft identity:** a received tail replaces + persists `ac_tail`
+  (once per change); dep/arr normalized to **ICAO** via the gazetteer wherever
+  shown; `/status` gained `tail/flight/dep/arr`. Verified over ADBP: ACID
+  followed the replayed tail (F-ONEA → F-ONET) with current timestamps.
+- **Real Viasat capture pinned as host test:** full `attr/updated_at/value`
+  wrapping, `+0000` suffix, **no groundSpeed field** (→ gs=-1 → derived from
+  successive fixes — replay position jumps show as the 1500 kt clamp, by
+  design). Route came as ICAO (`NWWW NFFN`), not IATA as assumed.
+- **UI:** route 40pt → **32pt** (two ICAO codes overflowed 320 px), bottom row
+  = `UTC+11` zone label + `12:30:12z` + local-time clock. Portal got a
+  **⬆ Firmware update…** button (confirm dialog → `/dfu`) instead of a bare URL.
+
+## 2026-07-06 — T-Display-S3 black screen: LVGL RAM starvation (+ debug toolkit)
+
+The display stayed black although every esp_lcd call succeeded. Root cause and
+the console-less debugging kit that found it:
+
+- **Root cause: internal-SRAM starvation.** LVGL's builtin pool defaults to
+  `CONFIG_LV_MEM_SIZE_KILOBYTES=64` — a **static 64 KB BSS array** in internal
+  RAM, gone before boot even starts. With WiFi + TinyUSB + bridge, display init
+  saw only ~52 KB free; after `lvgl_port_init`, 17 KB — and the two 320×40
+  double buffers needed 2×25.6 KB DMA. `lvgl_port_add_disp` returned **NULL**
+  (silent!) and no frame was ever rendered. Fix: `LV_MEM_SIZE_KILOBYTES=16`
+  (frees 48 KB statically; heap at display init jumped 52→101 KB) + a single
+  320×20 partial buffer (12.8 KB). A 1 Hz text UI doesn't need more. Always
+  check `lvgl_port_add_disp` for NULL and log heap next to it.
+- **Debugging without a console:** the board's one USB port is NCM, UART0 is
+  bare header pins. Technique: `DLOG()` in display.c mirrors every bring-up
+  step's `esp_err_t` into the `log.c` ring buffer → read remotely via web
+  `/log` over the cable. Kept permanently.
+- **`/dfu` endpoint (web.c):** writes `RTC_CNTL_FORCE_DOWNLOAD_BOOT` and
+  restarts → ROM downloader on native USB, no BOOT button. Auth-gated. This
+  makes single-USB-port boards reflashable fully remotely.
+- **S3 download-mode latch:** after flashing over USB-Serial-JTAG (strap or
+  /dfu entry), `--after hard_reset` often lands back in the downloader
+  (`rst:0x15, boot:0x23 DOWNLOAD` = *forced* download, not the GPIO0 strap).
+  Every soft/USB reset re-latches. **Exit requires one physical RST tap** (or
+  full power-off — beware: with a battery on the JST, replugging USB is *not*
+  a power cycle). Post-flash ritual: flash → tap RST.
+- **ST7789 GRAM ghosts:** panel RAM survives resets — with the backlight lit
+  before the first flush, the *previous* firmware's screen shows (the LilyGO
+  factory demo appeared mid-debug; its Wi-Fi screen is also where the device's
+  "lilygo-aabb" nickname originally came from). Backlight now stays dark until
+  LVGL's first frame. Corollary: "old image on screen" ≠ "code is running".
+- **Reference check (LilyGo-Display-IDF, esp-claw):** pin map, dc_levels,
+  post-init order, and `disp_on_off(true)` all match ours; they run PCLK
+  10 MHz (we use 8), and send a 15-cmd ST7789V vendor list (PORCTRL/VCOMS/
+  gamma). Not needed for a working picture — revisit only if colors look off.
+
+## 2026-07-06 — LilyGO T-Display-S3 (Board 3) + onboard flight display
+
+New unit probed (`d0:cf:13:32:2f:48`, S3 v0.2, 16 MB quad flash, 8 MB PSRAM,
+single USB-C = native USB, no UART bridge → LilyGO T-Display-S3). Added a
+flight display: tail, flight no, DEP→ARR, NM-to-arrival, UTC offset + local
+time at position (`display.c` + `airports.c` gazetteer + `board.c` identity).
+
+- **One binary, per-board hardware:** boards are identified by eFuse MAC in
+  `board.c` (devkit = WS2812, T-Display = LCD). Runtime detection of an i80
+  panel isn't practical (the bus is write-only as wired) — a fleet MAC table
+  is simpler and safe. New units: probe MAC, add a row.
+- **GPIO48 collision:** on the T-Display-S3, GPIO48 is **LCD data D7**; on the
+  devkit it's the WS2812. Driving the LED strip there would corrupt the display
+  bus mid-write, so `statusled_start()` now gates on `board_get()->has_ws2812`.
+- **Native-USB flashing works on this board** (unlike the devkit's boot-loop,
+  which is confirmed board-specific, not an S3-generic issue). One port only:
+  after AIDlink boots, TinyUSB-NCM replaces USB-Serial-JTAG — the vanishing
+  serial port is the *success* signal. Reflash by holding BOOT while plugging.
+  No console at all in practice; verify via NCM lease + `/status`.
+- **Display stack:** IDF-native `esp_lcd` i80 ST7789 (320×170 landscape,
+  y-gap 35, invert on, swap_xy + mirror-y, 8 MHz PCLK) + LVGL 9 via
+  `espressif/esp_lvgl_port`, both rule-gated `target == esp32s3` in
+  `idf_component.yml`. Classic esp32 map: 0 lvgl/esp_lcd symbols. Backlight
+  (GPIO38) held dark until the first frame is rendered — no boot noise flash.
+- **Timezone at position:** solar estimate `round(lon/15)` (a real IANA tz
+  lookup needs a shapefile DB). Clock ticks from the fix's UTC timestamp
+  (`utc_ms + elapsed`), so it's correct with SNTP never running.
+- **Bench verify without a console:** served a fake Viasat feed from the Mac
+  (`scratchpad/flightsrv.py`, NOU→NRT @ 470 kt, live UTC), set src=custom via
+  a scripted `/save` POST (mind the presence-toggles: include `staDhcp`,
+  `napt`, `authEnable` or they silently turn off). Device polled 1 Hz over the
+  cable, `/status` tracked the moving fix. Full chain poller→pos→display live.
+
+## 2026-07-05 — L2-bridge the Wi-Fi AP + USB-NCM so the AID is at 172.20.1.1 on both
+
+- **Problem:** EFB hard-codes the AID at `172.20.1.1`. That was only the Wi-Fi AP
+  IP; over the USB cable the ESP32 was `172.20.2.1/29`, so iOS (which won't route
+  off-subnet traffic out a USB-Ethernet adapter) never reached the AID.
+- **Fix:** lwIP bridge (`CONFIG_ESP_NETIF_BRIDGE_EN`). A `BR_DHCPS` bridge netif
+  owns `172.20.1.1/26` + DHCP pool + NAPT-to-STA; the Wi-Fi AP and USB-NCM are
+  L2-only ports (`flags=0`/`AUTOUP`, `ip_info=NULL`, no per-port DHCP). Both
+  Wi-Fi and cable clients now land on `172.20.1.0/26` and hit the AID directly.
+- **Gotchas (all cost a boot loop / dead bridge):**
+  - The `esp_netif_br_glue` port machinery is `ETH_EVENT`-driven — a custom
+    TinyUSB netif added via `esp_netif_br_glue_add_port` is silently never bridged.
+    Add it with the public `esp_netif_bridge_add_port(br, usb)` directly, *after*
+    both bridge and port are started (both need a registered `lwip_netif`).
+  - Don't call `esp_netif_action_start(br)` yourself — the glue does it on
+    `WIFI_EVENT_AP_START` (its own `br_started` flag); a manual start double-adds
+    → `assert netif_add (netif already added)` boot loop.
+  - The glue only brings the bridge **link up** on `WIFI_EVENT_AP_STACONNECTED`
+    (first Wi-Fi client). For USB-only use, call `esp_netif_action_connected(br)`
+    yourself after AP_START, then start DHCP — else DHCP never runs & NAPT fails.
+  - Override the `BR_DHCPS` default `ip_info` (192.168.4.1) before `esp_netif_new`;
+    keep `bridgeif_config_t` static (retained by the netif).
+- **iOS routing insight:** service order only picks the *default route*; on-link
+  subnets always use their own interface. Making the AID on-link on USB is why
+  this works regardless of the iPad's Wi-Fi priority. Caveat: if the iPad is also
+  on FOMAX Wi-Fi at `172.20.1.x`, that's an unresolvable on-link clash.
+
 ## 2026-07-05 — AP-client DNS black-hole (intermittent DNS "not forwarded")
 
 - **Symptom:** Devices on the AIDlink AP (esp. iPhone/iPad reaching the Viasat

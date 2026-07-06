@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
+#include <sys/time.h>
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_http_client.h"
@@ -19,7 +20,7 @@
 #include "cJSON.h"
 
 static const char *TAG = "poll";
-static const aidlink_cfg_t *CFG;
+static aidlink_cfg_t *CFG;
 
 // producer-side previous fix (for track/GS derivation)
 static bool s_have_prev;
@@ -65,6 +66,14 @@ static void apply_fix(double lat, double lon, double alt, double gs, double trac
     if (dest) strlcpy(p.dest, dest, sizeof p.dest);
     pos_set(&p);
 
+    // A live tail number is the truth: replace the configured aircraft identity
+    // (placeholder F-XXXX or a previous airframe) and persist it. Once per change.
+    if (!sim && tail && tail[0] && strcmp(tail, CFG->ac_tail) != 0) {
+        ESP_LOGI(TAG, "aircraft identity: %s -> %s (from live data)", CFG->ac_tail, tail);
+        strlcpy(CFG->ac_tail, tail, sizeof CFG->ac_tail);
+        cfg_save(CFG);
+    }
+
     s_prev_lat = lat; s_prev_lon = lon; s_prev_ms = t; s_have_prev = true;
 }
 
@@ -85,17 +94,44 @@ static void sim_step(uint32_t dt_ms) {
 }
 
 // ---- HTTP fetch into a heap buffer ----
-typedef struct { char *buf; int len, cap; } fetch_t;
+typedef struct { char *buf; int len, cap; long date; } fetch_t;
+
+// RFC 7231 date ("Sun, 06 Jul 2026 13:59:00 GMT") -> epoch seconds, 0 if bad.
+// Every HTTP response carries one, so a successful poll disciplines the clock
+// even from sources with no time field (Panasonic) and with SNTP unreachable.
+static long parse_http_date(const char *s) {
+    static const char MON[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    char mon[4] = {0};
+    int d, y, h, mi, se;
+    const char *p = strchr(s, ',');
+    if (!p || sscanf(p + 1, " %d %3s %d %d:%d:%d", &d, mon, &y, &h, &mi, &se) != 6) return 0;
+    const char *f = strstr(MON, mon);
+    if (!f || y < 2025 || y > 2100) return 0;
+    int m = (int)(f - MON) / 3 + 1;
+    // days-from-civil (Howard Hinnant), same as poller_sources.c
+    y -= m <= 2;
+    long era = (y >= 0 ? y : y - 399) / 400;
+    unsigned yoe = (unsigned)(y - era * 400);
+    unsigned doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+    unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    long days = era * 146097 + (long)doe - 719468;
+    return days * 86400L + h * 3600L + mi * 60L + se;
+}
+
 static esp_err_t http_evt(esp_http_client_event_t *e) {
+    fetch_t *f = e->user_data;
     if (e->event_id == HTTP_EVENT_ON_DATA) {
-        fetch_t *f = e->user_data;
         if (f->len + e->data_len < f->cap) { memcpy(f->buf + f->len, e->data, e->data_len); f->len += e->data_len; f->buf[f->len] = 0; }
+    } else if (e->event_id == HTTP_EVENT_ON_HEADER) {
+        if (e->header_key && e->header_value && strcasecmp(e->header_key, "Date") == 0)
+            f->date = parse_http_date(e->header_value);
     }
     return ESP_OK;
 }
 
-// Fetch url into out (cap). Returns body length or -1.
-static int http_get(const char *url, char *out, int cap) {
+// Fetch url into out (cap). Returns body length or -1; *date_out gets the
+// response's Date header as epoch seconds (0 if absent/unparseable).
+static int http_get(const char *url, char *out, int cap, long *date_out) {
     fetch_t f = { .buf = out, .len = 0, .cap = cap };
     esp_http_client_config_t c = {
         .url = url, .event_handler = http_evt, .user_data = &f,
@@ -109,6 +145,7 @@ static int http_get(const char *url, char *out, int cap) {
     esp_err_t e = esp_http_client_perform(h);
     int status = esp_http_client_get_status_code(h);
     esp_http_client_cleanup(h);
+    if (date_out) *date_out = f.date;
     if (e != ESP_OK || status != 200) return -1;
     return f.len;
 }
@@ -129,8 +166,21 @@ static void poll_once(void) {
         default: url = CFG->vs_url; break;
     }
     static char body[4096];
-    int n = http_get(url, body, sizeof body);
+    long http_date = 0;
+    int n = http_get(url, body, sizeof body, &http_date);
     if (n <= 0) { s_poll_ok = false; strlcpy(s_poll_msg, "fetch failed", sizeof s_poll_msg); return; }
+
+    // Discipline the system clock from the response's Date header (1 s grain);
+    // SNTP, when it reaches a server, wins by keeping the delta under the gate.
+    if (http_date > 1750000000L) {
+        time_t now = time(NULL);
+        long long delta = (long long)now - http_date;
+        if (delta < -3 || delta > 3) {
+            struct timeval tv = { .tv_sec = (time_t)http_date };
+            settimeofday(&tv, NULL);
+            ESP_LOGI(TAG, "clock set from HTTP Date (was off %lld s)", delta);
+        }
+    }
 
     double lat, lon, alt = 0, gs = -1, track = 0; bool have_track = false; uint64_t utc = 0;
     char flight[16] = "", tail[12] = "", orig[8] = "", dest[8] = "";
@@ -166,7 +216,7 @@ void poller_status(bool *ok, uint32_t *at_ms, char *msg, unsigned msgcap) {
     if (msg) strlcpy(msg, s_poll_msg, msgcap);
 }
 
-void poller_start(const aidlink_cfg_t *cfg) {
+void poller_start(aidlink_cfg_t *cfg) {
     CFG = cfg;
     xTaskCreate(poller_task, "poller", 8192, NULL, 4, NULL);
 }
