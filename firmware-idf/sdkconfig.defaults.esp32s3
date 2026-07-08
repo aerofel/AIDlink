@@ -17,6 +17,7 @@ CONFIG_LWIP_BRIDGEIF_MAX_PORTS=7
 # LVGL fonts for the T-Display-S3 flight display (14 is the LVGL default).
 CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_24=y
 CONFIG_LV_FONT_MONTSERRAT_32=y
 CONFIG_LV_FONT_MONTSERRAT_40=y
 # LVGL's builtin pool comes from internal SRAM, which WiFi+TinyUSB+bridge already

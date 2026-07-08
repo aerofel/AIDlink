@@ -60,7 +60,8 @@ void cfg_load(aidlink_cfg_t *c) {
     strcpy(c->api_ver, "3.1"); strcpy(c->ac_tail, "F-XXXX"); strcpy(c->ac_type, "A320");
     c->src_type = 0;
     strcpy(c->vs_url, "http://192.168.4.2:8080/flight/info");
-    c->poll_ms = 1000; c->stale_ms = 15000;   // default 1 s poll
+    c->poll_ms = 1000; c->stale_ms = 30000;   // default 1 s poll; 30 s stale —
+    // the live cabin Wi-Fi drops fetch bursts >15 s, which NCD-blipped the feed
     c->auth_enable = true; strcpy(c->auth_user, "admin");
 
     nvs_handle_t h;

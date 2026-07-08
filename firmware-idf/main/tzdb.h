@@ -4,7 +4,7 @@
 // Embedded world timezone lookup: a 1° lat/lon grid of zone indices plus each
 // zone's UTC-offset transition table (covers DST and odd offsets like +5:30 or
 // Chatham's +12:45). Data in tzdb_data.c is GENERATED from the IANA tz database
-// (see scratchpad/gen_tzdb.py in LEARNING.md 2026-07-06); coverage is ~2 years
+// (tools/gen_tzdb.py; see LEARNING.md 2026-07-06); coverage is ~2 years
 // from generation — regenerate alongside firmware updates. Pure C, host-tested.
 #pragma once
 #include <stdint.h>

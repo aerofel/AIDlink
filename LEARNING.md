@@ -1,5 +1,61 @@
 # AIDlink — Learning Journal
 
+## 2026-07-08 — In-flight round 2: GS/track derivation, EFB data quality
+
+- **Derived GS flapped 0↔1500 kt, track swung wildly** (visible in the portal;
+  suspected cause of Jeppesen FD "no AID found" after discovery — all four AID
+  Web API probes answered correctly, so detection-level was fine). Root cause:
+  the live feed repeats its position between ~10 s avionics updates while we
+  poll at 1 Hz — naive per-poll differencing yields 0 between updates and a
+  clamped spike when the jump lands in a 1 s window. Fix: `derive.c` (pure,
+  host-tested): baseline advances only on real movement (>0.03 nm), EMA on
+  speed, **vector EMA on heading** (wrap-safe through 360°), teleport-spike
+  rejection, speed→0 only after 30 s of proven stationarity. **In-flight
+  verified:** GS 507–513 kt steady (TAS 474 + wind), track 127.1–127.8true
+  (mag hdg 112 + variation + drift) — vs the old 0/1500 chaos.
+- Brief honest NCD blips remain when the cabin Wi-Fi drops fetches >stale_ms;
+  default raised 15→30 s (NVS keeps old value on existing units — set
+  `Stale timeout` 30000 in the portal).
+- **`➤` for real:** npm unreachable in the walled garden, so
+  `tools/gen_arrow_font.py` renders a supersampled U+27A4 arrowhead directly
+  into an LVGL font C file (single glyph, padding baked into adv_w/ofs_x —
+  no space glyphs needed in the span). Guarded `#if CONFIG_IDF_TARGET_ESP32S3`
+  (lvgl.h doesn't exist on classic esp32 — caught by the dual-target build).
+- mbedTLS printed its insecure-mode warning EVERY poll → squelched to ERROR
+  level for the `esp-tls-mbedtls` tag only (deliberate config, not news).
+- `tools/autoflash-idf.sh` (from the session helper): waits for the downloader
+  port and flashes with retries — pairs with the portal's Firmware update
+  button; transient boot-window ports make the first attempt fail ~half the
+  time, hence the retry loop.
+
+## 2026-07-07 — LIVE on the aircraft: TLS Kconfig gate + first real-feed validation
+
+Both units ran against the real Aircalin/Viasat cabin system (ACI501). The one
+bug the bench could never catch, plus the milestone:
+
+- **HTTPS never worked until today.** poller.c was written for v9-parity
+  insecure TLS (`crt_bundle_attach=NULL`), but ESP-IDF also requires
+  `CONFIG_ESP_TLS_INSECURE=y` + `CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y` —
+  without them esp-tls refuses the handshake ("no verification option") and
+  the poller reports `fetch failed` forever. Invisible on the bench (no live
+  uplink); found because the Mac was on the same cabin Wi-Fi and could probe
+  `wifi.inflight.viasat.com` directly (real Sectigo cert, strict verify even
+  passes today — insecure mode chosen deliberately for walled-garden parity
+  with v9). Now in `sdkconfig.defaults`.
+- **Live validation (devkit UART log):** STA on the real client subnet
+  (172.19.128.x), TLS fetches at poll rate, and
+  `poll: clock set from HTTP Date (was off -1783376290 s)` — the offline clock
+  chain disciplined the clock from epoch-zero on the first fetch, +7 s trim on
+  the second. Bridge/NCM/web/ADBP all up simultaneously in flight.
+- The captive portal tracks *client MACs* (`status:"new"`); if the AID's own
+  polls are ever gated, authenticate once from any browser behind the AID's
+  NAT — the portal then sees the AID's MAC.
+- Live endpoint variant note: the real `/ac/flight/info` sometimes serves the
+  reduced no-`attr` shape and can omit `current_time` — parser handles both
+  (pinned host tests); clock survives via the Date header.
+- Units renamed per-device (dev_name `aidlink2` on the devkit) — two AIDs on
+  one aircraft need distinct SSIDs/mDNS names.
+
 ## 2026-07-06 — Display v2: offline clock chain, real timezones, live identity
 
 Second iteration after live testing with replayed Viasat/FOMAX captures:
@@ -17,7 +73,7 @@ Second iteration after live testing with replayed Viasat/FOMAX captures:
   transition tables (2026–2028). 389 IANA zones dedupe to **61** unique
   signatures. Handles DST both hemispheres, +5:30, Chatham +12:45, ocean
   nautical zones. Host-tested. **Coverage window: regenerate `tzdb_data.c`
-  (scratchpad `gen_tzdb.py`) when it lapses (2028).**
+  (`tools/gen_tzdb.py`) when it lapses (2028).**
 - **Live aircraft identity:** a received tail replaces + persists `ac_tail`
   (once per change); dep/arr normalized to **ICAO** via the gazetteer wherever
   shown; `/status` gained `tail/flight/dep/arr`. Verified over ADBP: ACID
@@ -29,6 +85,13 @@ Second iteration after live testing with replayed Viasat/FOMAX captures:
 - **UI:** route 40pt → **32pt** (two ICAO codes overflowed 320 px), bottom row
   = `UTC+11` zone label + `12:30:12z` + local-time clock. Portal got a
   **⬆ Firmware update…** button (confirm dialog → `/dfu`) instead of a bare URL.
+- **v3 avionics styling gotchas:** LVGL9 dropped label recoloring — mixed-color
+  lines need **spangroups** (`lv_spangroup_*`), and `lv_span_t` is opaque in
+  this LVGL: style via `lv_span_get_style(span)`, not `&span->style`. The
+  built-in Montserrat fonts have no `➤` (U+27A4) — nearest glyph is
+  `LV_SYMBOL_PLAY`; a literal ➤ needs a custom lv_font_conv build. `°` (U+00B0)
+  IS included. New Kconfig font sizes (e.g. MONTSERRAT_24) must go in both
+  `sdkconfig.defaults.esp32s3` and the live `sdkconfig`.
 
 ## 2026-07-06 — T-Display-S3 black screen: LVGL RAM starvation (+ debug toolkit)
 

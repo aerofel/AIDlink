@@ -7,6 +7,7 @@
 #include "poller.h"
 #include "pos.h"
 #include "geo.h"
+#include "derive.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -22,10 +23,10 @@
 static const char *TAG = "poll";
 static aidlink_cfg_t *CFG;
 
-// producer-side previous fix (for track/GS derivation)
-static bool s_have_prev;
-static double s_prev_lat, s_prev_lon;
-static uint32_t s_prev_ms;
+// producer-side GS/track derivation from successive fixes (see derive.c: the
+// live feed repeats its position between ~10 s avionics updates, so naive
+// per-poll differencing flapped GS between 0 and the clamp)
+static derive_state_t s_derive;
 
 // live poll status (surfaced on the web /status page later)
 static bool s_poll_ok;
@@ -41,17 +42,8 @@ static void apply_fix(double lat, double lon, double alt, double gs, double trac
     pos_state_t p; pos_get(&p);
     uint32_t t = now_ms();
 
-    double dgs = gs, dtrk = track; bool dhave = have_track;
-    if (s_have_prev) {
-        double dt_s = (t - s_prev_ms) / 1000.0;
-        double dnm = geo_dist_nm(s_prev_lat, s_prev_lon, lat, lon);
-        if (dt_s > 0.5 && dnm > 0.02) {
-            double derived_gs = dnm / (dt_s / 3600.0);
-            if (gs < 0) dgs = derived_gs;
-            if (!have_track) { dtrk = geo_bearing_deg(s_prev_lat, s_prev_lon, lat, lon); dhave = true; }
-        }
-    }
-    if (dgs < 0) dgs = 0;
+    double dgs, dtrk; bool dhave;
+    derive_update(&s_derive, lat, lon, t, gs, track, have_track, &dgs, &dtrk, &dhave);
     if (dgs > 1500) dgs = 1500;
 
     p.valid = true; p.simulated = sim; p.fixed = false;
@@ -73,8 +65,6 @@ static void apply_fix(double lat, double lon, double alt, double gs, double trac
         strlcpy(CFG->ac_tail, tail, sizeof CFG->ac_tail);
         cfg_save(CFG);
     }
-
-    s_prev_lat = lat; s_prev_lon = lon; s_prev_ms = t; s_have_prev = true;
 }
 
 // Emulator: emit a FIXED position at cfg.sim* (matches v9 — does not advance;
@@ -218,5 +208,8 @@ void poller_status(bool *ok, uint32_t *at_ms, char *msg, unsigned msgcap) {
 
 void poller_start(aidlink_cfg_t *cfg) {
     CFG = cfg;
+    // The v9-parity insecure TLS mode makes mbedTLS print a warning on every
+    // single poll — deliberate configuration, not news. Errors still show.
+    esp_log_level_set("esp-tls-mbedtls", ESP_LOG_ERROR);
     xTaskCreate(poller_task, "poller", 8192, NULL, 4, NULL);
 }

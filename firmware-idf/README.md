@@ -146,6 +146,7 @@ clang -Imain -o /tmp/t host_test/test_adbp_frame.c      main/adbp_frame.c -lm &&
 clang -Imain -o /tmp/t host_test/test_geo.c             main/geo.c        -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_airports.c        main/airports.c main/geo.c -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_tzdb.c            main/tzdb.c main/tzdb_data.c -lm && /tmp/t
+clang -Imain -o /tmp/t host_test/test_derive.c          main/derive.c main/geo.c -lm && /tmp/t
 clang -Imain -I$CJ -o /tmp/t host_test/test_poller_sources.c main/poller_sources.c $CJ/cJSON.c -lm && /tmp/t
 ```
 
@@ -170,6 +171,8 @@ clang -Imain -I$CJ -o /tmp/t host_test/test_poller_sources.c main/poller_sources
 | `display.*` | T-Display-S3 flight display (esp_lcd i80 ST7789 + LVGL) |
 | `airports.*` | embedded IATA/ICAO → lat/lon gazetteer (host-tested) |
 | `tzdb.*` / `tzdb_data.c` | 1° world timezone grid + offset transitions, generated from IANA data (host-tested; regenerate ~2028) |
+| `derive.*` | GS/track from successive fixes: movement-gated, filtered, wrap-safe (host-tested) |
+| `font_arrow.c` | generated single-glyph ➤ font for the display route line (`tools/gen_arrow_font.py`) |
 
 ## Relationship to the Arduino sketch
 

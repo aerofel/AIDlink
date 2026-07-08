@@ -21,6 +21,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <ctype.h>
 #include <math.h>
 #include <time.h>
 #include "freertos/FreeRTOS.h"
@@ -43,6 +44,9 @@
 
 static const char *TAG = "disp";
 
+// single-glyph U+27A4 arrowhead font (font_arrow.c, generated)
+LV_FONT_DECLARE(font_arrow);
+
 // Bring-up evidence into the /log ring buffer: this board has no serial console
 // (TinyUSB owns the only USB port), so the web /log endpoint is the only way to
 // see how far display init got. Cheap enough to keep permanently.
@@ -61,8 +65,22 @@ static const char *TAG = "disp";
 #define LCD_GAP_Y    35   // 170-line panel sits at offset 35 in the 240-line ST7789 RAM
 #define LCD_PCLK_HZ  (8 * 1000 * 1000)
 
+// palette (avionics-flavored, matches the web portal where possible)
+#define COL_GREY    0x9E9E9E
+#define COL_WHITE   0xFFFFFF
+#define COL_CYAN    0x00E5FF
+#define COL_AMBER   0xFFB300
+#define COL_GREEN   0x34D399
+#define COL_MAGENTA 0xFF55FF
+
 static const aidlink_cfg_t *CFG;
-static lv_obj_t *s_tail, *s_flight, *s_route, *s_dist, *s_tz, *s_utc, *s_clock;
+static lv_obj_t *s_tail, *s_actype, *s_nm, *s_tz, *s_clock;       // single-color labels
+static lv_obj_t *sg_flight, *sg_route, *sg_line, *sg_alt, *sg_utc; // multi-color spangroups
+static lv_span_t *sp_fl_pre, *sp_fl_num;                      // ACI | 330
+static lv_span_t *sp_ro_o, *sp_ro_ar, *sp_ro_d;               // NWWW | small arrow | NFFN
+static lv_span_t *sp_lat_h, *sp_lat_v, *sp_lon_h, *sp_lon_v;  // N | 22°34.12 | E | 110°10.23
+static lv_span_t *sp_alt_v, *sp_alt_u;                        // 31000 | ft
+static lv_span_t *sp_utc_t, *sp_utc_z;                        // 13:02:45 | z
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -147,19 +165,64 @@ static lv_obj_t *mklabel(lv_obj_t *parent, const lv_font_t *font, uint32_t hex,
     return l;
 }
 
+// LVGL9 dropped label recoloring — spangroups do the mixed-color lines.
+static lv_obj_t *mkspangroup(lv_obj_t *parent, lv_align_t align, int x, int y) {
+    lv_obj_t *sg = lv_spangroup_create(parent);
+    lv_spangroup_set_mode(sg, LV_SPAN_MODE_EXPAND);
+    lv_obj_align(sg, align, x, y);
+    return sg;
+}
+static lv_span_t *addspan(lv_obj_t *sg, const lv_font_t *font, uint32_t hex) {
+    lv_span_t *s = lv_spangroup_new_span(sg);
+    lv_span_set_text(s, "");
+    lv_style_set_text_font(lv_span_get_style(s), font);
+    lv_style_set_text_color(lv_span_get_style(s), lv_color_hex(hex));
+    return s;
+}
+
 static void build_ui(lv_display_t *disp) {
     lv_obj_t *scr = lv_display_get_screen_active(disp);
     lv_obj_set_style_bg_color(scr, lv_color_hex(0x000000), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
 
-    s_tail   = mklabel(scr, &lv_font_montserrat_20, 0x00E5FF, LV_ALIGN_TOP_LEFT,      8,   6);
-    s_flight = mklabel(scr, &lv_font_montserrat_20, 0xFFFFFF, LV_ALIGN_TOP_RIGHT,    -8,   6);
-    // 32pt fits two ICAO codes ("VTBS -> NWWW"); 40pt overflowed 320 px.
-    s_route  = mklabel(scr, &lv_font_montserrat_32, 0xFFFFFF, LV_ALIGN_CENTER,        0, -18);
-    s_dist   = mklabel(scr, &lv_font_montserrat_20, 0xFFB300, LV_ALIGN_CENTER,        0,  16);
-    s_tz     = mklabel(scr, &lv_font_montserrat_16, 0x9E9E9E, LV_ALIGN_BOTTOM_LEFT,   8, -30);
-    s_utc    = mklabel(scr, &lv_font_montserrat_20, 0x9E9E9E, LV_ALIGN_BOTTOM_LEFT,   8,  -6);
-    s_clock  = mklabel(scr, &lv_font_montserrat_32, 0xFFFFFF, LV_ALIGN_BOTTOM_RIGHT, -8,  -4);
+    s_tail   = mklabel(scr, &lv_font_montserrat_20, COL_CYAN,  LV_ALIGN_TOP_LEFT,      8,   6);
+
+    // aircraft type, top-center
+    s_actype = mklabel(scr, &lv_font_montserrat_20, COL_WHITE, LV_ALIGN_TOP_MID,       0,   6);
+
+    // flight number: airline prefix grayed, number+suffix white
+    sg_flight = mkspangroup(scr, LV_ALIGN_TOP_RIGHT, -8, 6);
+    sp_fl_pre = addspan(sg_flight, &lv_font_montserrat_20, COL_GREY);
+    sp_fl_num = addspan(sg_flight, &lv_font_montserrat_20, COL_WHITE);
+
+    // route line: 32pt ICAO codes joined by a smaller arrow, centered;
+    // remaining distance rides the same line, pinned right (16pt so a 4-digit
+    // NM clears the centered route at 320 px).
+    sg_route = mkspangroup(scr, LV_ALIGN_CENTER, 0, -18);
+    sp_ro_o  = addspan(sg_route, &lv_font_montserrat_32, COL_WHITE);
+    sp_ro_ar = addspan(sg_route, &font_arrow, COL_WHITE);
+    sp_ro_d  = addspan(sg_route, &lv_font_montserrat_32, COL_WHITE);
+    // remaining distance sits above the UTC readout, mirroring the zone label
+    // that sits above the local clock on the right
+    s_nm     = mklabel(scr, &lv_font_montserrat_16, COL_AMBER, LV_ALIGN_BOTTOM_LEFT, 8, -34);
+
+    // data line: coordinates full left, altitude full right, same 16pt
+    sg_line  = mkspangroup(scr, LV_ALIGN_LEFT_MID, 8, 16);
+    sp_lat_h = addspan(sg_line, &lv_font_montserrat_16, COL_GREY);
+    sp_lat_v = addspan(sg_line, &lv_font_montserrat_16, COL_GREEN);
+    sp_lon_h = addspan(sg_line, &lv_font_montserrat_16, COL_GREY);
+    sp_lon_v = addspan(sg_line, &lv_font_montserrat_16, COL_GREEN);
+    sg_alt   = mkspangroup(scr, LV_ALIGN_RIGHT_MID, -8, 16);
+    sp_alt_v = addspan(sg_alt, &lv_font_montserrat_16, COL_WHITE);
+    sp_alt_u = addspan(sg_alt, &lv_font_montserrat_14, COL_GREY);
+
+    s_tz     = mklabel(scr, &lv_font_montserrat_16, COL_GREY,  LV_ALIGN_BOTTOM_RIGHT, -8, -34);
+    s_clock  = mklabel(scr, &lv_font_montserrat_32, COL_WHITE, LV_ALIGN_BOTTOM_RIGHT, -8,  -2);
+
+    // UTC bottom-left: magenta time, grayed 'z'
+    sg_utc   = mkspangroup(scr, LV_ALIGN_BOTTOM_LEFT, 8, -4);
+    sp_utc_t = addspan(sg_utc, &lv_font_montserrat_24, COL_MAGENTA);
+    sp_utc_z = addspan(sg_utc, &lv_font_montserrat_20, COL_GREY);
 }
 
 // ---- 1 Hz content refresh ------------------------------------------------
@@ -169,29 +232,68 @@ static void refresh(void) {
     char buf[48];
 
     lv_label_set_text(s_tail, p.tail[0] ? p.tail : CFG->ac_tail);
-    lv_label_set_text(s_flight, p.flight[0] ? p.flight : CFG->ac_type);
+    lv_label_set_text(s_actype, CFG->ac_type);
 
+    // flight number: gray airline prefix (letters), white number + suffix
+    const char *fl = p.flight;
+    int pre = 0;
+    while (fl[pre] && !isdigit((unsigned char)fl[pre]) && pre < 7) pre++;
+    char prebuf[8];
+    memcpy(prebuf, fl, pre); prebuf[pre] = 0;
+    lv_span_set_text(sp_fl_pre, prebuf);
+    lv_span_set_text(sp_fl_num, fl + pre);
+    lv_spangroup_refresh(sg_flight);
+
+    // route with a small arrow; greyed while the fix is invalid/stale
+    uint32_t rocol = p.valid ? COL_WHITE : 0x616161;
+    lv_style_set_text_color(lv_span_get_style(sp_ro_o), lv_color_hex(rocol));
+    lv_style_set_text_color(lv_span_get_style(sp_ro_ar), lv_color_hex(rocol));
+    lv_style_set_text_color(lv_span_get_style(sp_ro_d), lv_color_hex(rocol));
     if (p.orig[0] || p.dest[0]) {
         // show ICAO codes; fall back to the code as received when unknown
         const char *o = airports_icao(p.orig); if (!o) o = p.orig[0] ? p.orig : "----";
         const char *d = airports_icao(p.dest); if (!d) d = p.dest[0] ? p.dest : "----";
-        snprintf(buf, sizeof buf, "%s " LV_SYMBOL_RIGHT " %s", o, d);
-        lv_label_set_text(s_route, buf);
+        lv_span_set_text(sp_ro_o, o);
+        lv_span_set_text(sp_ro_ar, "\xE2\x9E\xA4");   // U+27A4, padding baked into the glyph
+        lv_span_set_text(sp_ro_d, d);
     } else {
-        lv_label_set_text(s_route, p.valid ? "- - -" : "NO POSITION");
+        lv_span_set_text(sp_ro_o, p.valid ? "- - -" : "NO POSITION");
+        lv_span_set_text(sp_ro_ar, "");
+        lv_span_set_text(sp_ro_d, "");
     }
-    // grey the route out while the fix is invalid/stale
-    lv_obj_set_style_text_color(s_route, lv_color_hex(p.valid ? 0xFFFFFF : 0x616161), 0);
+    lv_spangroup_refresh(sg_route);
+
+    // data line: coords left, then altitude; distance pinned right
+    if (p.valid) {
+        double av = fabs(p.lat);
+        lv_span_set_text(sp_lat_h, p.lat >= 0 ? "N" : "S");
+        snprintf(buf, sizeof buf, "%02d\xC2\xB0%05.2f", (int)av, (av - (int)av) * 60.0);
+        lv_span_set_text(sp_lat_v, buf);
+        av = fabs(p.lon);
+        lv_span_set_text(sp_lon_h, p.lon >= 0 ? " E" : " W");
+        snprintf(buf, sizeof buf, "%03d\xC2\xB0%05.2f", (int)av, (av - (int)av) * 60.0);
+        lv_span_set_text(sp_lon_v, buf);
+        // altitude rounded to 10 ft — raw feet jitter isn't information
+        snprintf(buf, sizeof buf, "%d", (int)(lround(p.alt_ft / 10.0) * 10));
+        lv_span_set_text(sp_alt_v, buf);
+        lv_span_set_text(sp_alt_u, "ft");
+    } else {
+        lv_span_set_text(sp_lat_h, ""); lv_span_set_text(sp_lat_v, "");
+        lv_span_set_text(sp_lon_h, ""); lv_span_set_text(sp_lon_v, "");
+        lv_span_set_text(sp_alt_v, ""); lv_span_set_text(sp_alt_u, "");
+    }
+    lv_spangroup_refresh(sg_line);
+    lv_spangroup_refresh(sg_alt);
 
     double alat, alon;
     if (p.valid && p.dest[0] && airports_lookup(p.dest, &alat, &alon)) {
         int nm = (int)lround(geo_dist_nm(p.lat, p.lon, alat, alon));
-        snprintf(buf, sizeof buf, "%d NM TO GO", nm);
-        lv_label_set_text(s_dist, buf);
+        snprintf(buf, sizeof buf, "%dNM", nm);
+        lv_label_set_text(s_nm, buf);
     } else if (p.valid && p.simulated) {
-        lv_label_set_text(s_dist, "SIMULATED");
+        lv_label_set_text(s_nm, "SIM");
     } else {
-        lv_label_set_text(s_dist, "");
+        lv_label_set_text(s_nm, "");
     }
 
     // UTC: prefer the system clock (SNTP / HTTP-Date disciplined, see poller.c),
@@ -226,11 +328,13 @@ static void refresh(void) {
     if (utc) {
         time_t u = (time_t)(utc / 1000);
         gmtime_r(&u, &tm);
-        snprintf(buf, sizeof buf, "%02d:%02d:%02dz", tm.tm_hour, tm.tm_min, tm.tm_sec);
-        lv_label_set_text(s_utc, buf);
+        snprintf(buf, sizeof buf, "%02d:%02d:%02d", tm.tm_hour, tm.tm_min, tm.tm_sec);
+        lv_span_set_text(sp_utc_t, buf);
     } else {
-        lv_label_set_text(s_utc, "--:--:--z");
+        lv_span_set_text(sp_utc_t, "--:--:--");
     }
+    lv_span_set_text(sp_utc_z, "z");
+    lv_spangroup_refresh(sg_utc);
     if (utc && have_off) {
         time_t local = (time_t)(utc / 1000) + (time_t)off_min * 60;
         gmtime_r(&local, &tm);
