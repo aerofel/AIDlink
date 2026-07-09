@@ -11,6 +11,10 @@
 // through the S3 — coexisting with the SoftAP.
 void usb_ncm_start(const aidlink_cfg_t *c);
 
+// Cleanly detach from the USB host (TinyUSB uninstall) — call before rebooting
+// into the ROM downloader (/dfu) so the port re-enumerates reliably.
+void usb_ncm_stop(void);
+
 // If a USB-cable host is currently connected, fill mac_str (>=18) and ip_str
 // (>=16) and return true; else false. Always false on non-USB targets.
 #include <stdbool.h>

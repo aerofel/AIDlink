@@ -1,13 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 AIDlink contributors
 //
-// Drives two WS2812 pixels on the onboard LED chain:
-//   pixel 0 (the "big" status LED):
-//       flashing orange = scanning for Wi-Fi
-//       solid green     = Wi-Fi uplink connected
-//       flashing red    = searching / not connected
-//   pixel 1 (the "data" LED):
-//       brief blue flash on every position frame sent to an EFB
+// Drives the onboard WS2812 status LED (display-less boards):
+//   slow red blink    = no Wi-Fi uplink
+//   fast orange blink = scanning
+//   steady orange     = connected, no internet
+//   steady yellow     = connected + internet, weak signal
+//   steady green      = connected + internet, strong signal
+//   magenta blip      = a location was received from the feed (any state)
 #include "statusled.h"
 #include "sdkconfig.h"
 
@@ -19,14 +19,11 @@
 #include "esp_timer.h"
 #include "esp_log.h"
 #include "netcore.h"
-#include "adbp.h"
+#include "pos.h"
 #include "board.h"
 
 // The one controllable LED: the onboard WS2812 on GPIO48. (The board's other
 // small LEDs are hardwired UART/USB activity indicators, not GPIO-controllable.)
-// It shows Wi-Fi state by color and blips blue on each position frame sent:
-//   flashing orange = scanning · solid green = uplink connected ·
-//   flashing red = searching · brief blue blip = position frame sent to an EFB
 #define LED_GPIO   48
 #define LED_COUNT  1
 #define LVL 40   // brightness 0..255
@@ -42,21 +39,29 @@ static void px(uint8_t r, uint8_t g, uint8_t b) {
 static void led_task(void *arg) {
     px(20, 20, 20);                    // boot: dim white
     vTaskDelay(pdMS_TO_TICKS(500));
-    uint32_t last_seq = adbp_push_seq();
-    uint32_t blue_until = 0;
+    uint32_t last_seq = pos_fix_seq();
+    uint32_t magenta_until = 0;
     for (;;) {
         uint32_t now = now_ms();
-        uint32_t seq = adbp_push_seq();
-        if (seq != last_seq) { last_seq = seq; blue_until = now + 250; }   // data sent -> clearly-visible blue flash
+        uint32_t seq = pos_fix_seq();
+        if (seq != last_seq) { last_seq = seq; magenta_until = now + 250; }   // location received
 
-        if (now < blue_until) {
-            px(0, 0, LVL);             // blue blip (overrides status briefly)
+        if (now < magenta_until) {
+            px(LVL, 0, LVL);                                       // magenta blip
+        } else if (netcore_scanning()) {
+            bool b = (now / 150) % 2;                              // fast, ~3 Hz
+            px(b ? LVL : 0, b ? LVL / 2 : 0, 0);                   // orange flash
+        } else if (netcore_sta_up(NULL)) {
+            // weak/strong with hysteresis (mirrors the display's Wi-Fi fan)
+            static bool weak;
+            int rssi = netcore_sta_rssi();
+            if (rssi >= -67) weak = false; else if (rssi <= -73) weak = true;
+            if (!netcore_inet_up()) px(LVL, LVL / 2, 0);           // steady orange: no internet
+            else if (weak)          px(LVL, LVL, 0);               // steady yellow: weak + internet
+            else                    px(0, LVL, 0);                 // steady green: strong + internet
         } else {
-            bool blink = (now / 300) % 2;
-            uint8_t ip[4];
-            if (netcore_scanning())      px(blink ? LVL : 0, blink ? LVL / 2 : 0, 0);  // orange flash
-            else if (netcore_sta_up(ip)) px(0, LVL, 0);                                 // solid green
-            else                         px(blink ? LVL : 0, 0, 0);                     // red flash
+            bool b = (now / 600) % 2;                              // slow, ~0.8 Hz
+            px(b ? LVL : 0, 0, 0);                                 // red flash
         }
         vTaskDelay(pdMS_TO_TICKS(40));
     }
@@ -77,7 +82,7 @@ void statusled_start(void) {
     }
     led_strip_clear(s_strip);
     xTaskCreate(led_task, "statusled", 3072, NULL, 3, NULL);
-    ESP_LOGI(TAG, "status LED on GPIO%d (orange=scan, green=wifi, red=searching, blue blip=data)", LED_GPIO);
+    ESP_LOGI(TAG, "status LED on GPIO%d (red=no wifi, orange=scan/no-inet, yellow=weak+inet, green=strong+inet, magenta blip=fix)", LED_GPIO);
 }
 
 #else   // no onboard RGB LED (e.g. classic ESP32)

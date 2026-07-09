@@ -37,6 +37,13 @@ int netcore_ap_client_count(void);
 // True if an uplink SSID is configured (STA is actively trying to connect).
 bool netcore_has_ssid(void);
 
+// RSSI (dBm) of the connected uplink AP; 0 when the STA is not connected.
+int netcore_sta_rssi(void);
+
+// True when the last internet-reachability probe succeeded (bare TCP handshake
+// to a public DNS server — a walled-garden uplink shows false here).
+bool netcore_inet_up(void);
+
 // True while a Wi-Fi scan is in progress.
 bool netcore_scanning(void);
 

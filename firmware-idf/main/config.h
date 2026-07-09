@@ -8,6 +8,12 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+// ARINC 834 AID Web API version, reported to EFB probes (getAPIVersion) and
+// shown in /status. Fixed in code — v9 shipped "3.1" and EFBs (e.g. Jeppesen
+// FliteDeck) detect the AID against it; bump ONLY when the served API surface
+// actually changes, never per-aircraft (it is not a configuration item).
+#define AID_API_VERSION "3.1"
+
 typedef struct {
     // --- uplink (STA) ---
     char    sta_ssid[33];      // uplink SSID we connect to
@@ -37,8 +43,10 @@ typedef struct {
     // ADBP push framing (ARINC-834 experiment): frame_len 0=full/1=method/2=omit,
     // frame_delim 0=none/1=CRLF/2=LF/3=NUL, frame_prolog_each = XML prolog every frame.
     int      frame_len, frame_delim; bool frame_prolog_each;
-    char    api_ver[8];        // AID Web API version string (e.g. "3.1")
-    char    ac_tail[12], ac_type[8];  // aircraft identity
+    // Aircraft identity — RAM-only, filled by the live position feed, empty on
+    // every boot (never loaded from or saved to NVS, never user-set): the feed
+    // is the single source of truth and a reboot deliberately forgets it.
+    char    ac_tail[12], ac_type[8];
     // --- position source ---
     int      src_type;         // 0=Viasat, 1=Panasonic, 2=custom
     char     vs_url[128];      // custom/test source URL

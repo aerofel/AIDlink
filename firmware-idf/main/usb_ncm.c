@@ -142,7 +142,17 @@ void usb_ncm_start(const aidlink_cfg_t *c) {
     ESP_LOGI(TAG, "[USB] NCM bridged onto the AID subnet (DHCP+NAPT via bridge)");
 }
 
+// Detach from the USB host (uninstall TinyUSB) so the port disconnects cleanly.
+// Used by /dfu: rebooting into the ROM downloader while the host still holds
+// the NCM device intermittently leaves the host with a stale device and the
+// downloader's USB-Serial-JTAG never enumerates — a physical BOOT+RST was the
+// only recovery. A real detach first lets the downloader appear reliably.
+void usb_ncm_stop(void) {
+    tinyusb_driver_uninstall();
+}
+
 #else  // no native USB (e.g. classic ESP32)
 void usb_ncm_start(const aidlink_cfg_t *c) { (void)c; }
+void usb_ncm_stop(void) {}
 bool usb_ncm_client(char *mac_str, char *ip_str) { (void)mac_str; (void)ip_str; return false; }
 #endif

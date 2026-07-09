@@ -18,10 +18,11 @@ CONFIG_LWIP_BRIDGEIF_MAX_PORTS=7
 CONFIG_LV_FONT_MONTSERRAT_16=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_24=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_32=y
 CONFIG_LV_FONT_MONTSERRAT_40=y
 # LVGL's builtin pool comes from internal SRAM, which WiFi+TinyUSB+bridge already
 # squeeze hard (~52 KB free at display init). The default 64 KB pool starved the
 # DMA draw-buffer allocation (lvgl_port_add_disp -> NULL, the M-black-screen bug).
 # Our UI is 6 labels; 16 KB is ample.
-CONFIG_LV_MEM_SIZE_KILOBYTES=16
+CONFIG_LV_MEM_SIZE_KILOBYTES=24

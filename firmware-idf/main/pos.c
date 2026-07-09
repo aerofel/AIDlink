@@ -7,6 +7,7 @@
 
 static pos_state_t s_pos;
 static SemaphoreHandle_t s_mux;
+static volatile uint32_t s_fix_seq;   // bumps on every received fix (see pos_fix_seq)
 
 void pos_init(void) {
     if (!s_mux) s_mux = xSemaphoreCreateMutex();
@@ -23,9 +24,12 @@ void pos_get(pos_state_t *out) {
 void pos_set(const pos_state_t *in) {
     if (!s_mux) { s_pos = *in; return; }
     xSemaphoreTake(s_mux, portMAX_DELAY);
+    if (in->valid && in->last_fix_ms != s_pos.last_fix_ms) s_fix_seq++;
     s_pos = *in;
     xSemaphoreGive(s_mux);
 }
+
+uint32_t pos_fix_seq(void) { return s_fix_seq; }
 
 void pos_mark_stale(void) {
     if (!s_mux) { s_pos.valid = false; s_pos.service_avail = false; return; }

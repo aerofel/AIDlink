@@ -10,6 +10,9 @@
 #include "esp_mac.h"
 #include "dhcpserver/dhcpserver.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/sockets.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 // On USB-capable targets (S3) we front the Wi-Fi AP and the USB-NCM port with an
 // L2 bridge that owns the AID IP/DHCP/NAPT, so both see the AID at 172.20.1.1.
@@ -63,6 +66,12 @@ int netcore_ap_client_count(void) {
 
 bool netcore_has_ssid(void) { return s_have_ssid; }
 
+int netcore_sta_rssi(void) {
+    if (!s_sta_up) return 0;
+    wifi_ap_record_t ap;
+    return esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
+}
+
 bool netcore_sta_ipinfo(char *ip, char *gw, char *mask, char *dns) {
     ip[0] = gw[0] = mask[0] = dns[0] = 0;
     if (!s_sta_up || !s_sta) return false;
@@ -106,11 +115,66 @@ int netcore_scan(wifi_ap_record_t *recs, uint16_t max, uint16_t *count) {
 
 bool netcore_scanning(void) { return s_scanning; }
 
+// ---- internet reachability probe ------------------------------------------
+// An associated uplink says nothing about actual internet (walled gardens).
+// Probe with the cheapest possible exchange: a bare TCP handshake to a public
+// DNS server (SYN / SYN-ACK / RST, ~200 bytes, no payload, no DNS query) —
+// onboard data is metered. 30 s cadence while up, 15 s retry while down,
+// prompt probe when the STA gets an IP.
+// KNOWN LIMITATION (accepted, 2026-07-08): captive portals typically pass or
+// transparently answer port 53 pre-auth, so this can show "internet" behind
+// an unauthenticated hotspot. The content-validated alternative (HTTP
+// generate_204, tri-state captive detection) was proposed and declined —
+// keep the cheap handshake unless that decision changes.
+static volatile bool s_inet;
+static volatile bool s_inet_probe_now;
+
+static bool tcp_probe(const char *ip, uint16_t port, int timeout_ms) {
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0) return false;
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET; a.sin_port = htons(port); a.sin_addr.s_addr = inet_addr(ip);
+    int fl = fcntl(s, F_GETFL, 0); fcntl(s, F_SETFL, fl | O_NONBLOCK);
+    bool ok = false;
+    if (connect(s, (struct sockaddr *)&a, sizeof a) == 0) ok = true;
+    else if (errno == EINPROGRESS) {
+        fd_set wf; FD_ZERO(&wf); FD_SET(s, &wf);
+        struct timeval tv = { .tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000 };
+        if (select(s + 1, NULL, &wf, NULL, &tv) == 1) {
+            int err = 0; socklen_t l = sizeof err;
+            getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &l);
+            ok = (err == 0);
+        }
+    }
+    close(s);
+    return ok;
+}
+
+static void inet_task(void *arg) {
+    (void)arg;
+    int alt = 0;                 // alternate 1.1.1.1 / 8.8.8.8 across failures
+    uint32_t wait_ms = 3000;     // first probe shortly after boot
+    for (;;) {
+        for (uint32_t w = 0; w < wait_ms && !s_inet_probe_now; w += 500)
+            vTaskDelay(pdMS_TO_TICKS(500));
+        s_inet_probe_now = false;
+        if (!s_sta_up) { s_inet = false; wait_ms = 5000; continue; }
+        bool ok = tcp_probe(alt ? "8.8.8.8" : "1.1.1.1", 53, 3000);
+        if (!ok) alt ^= 1;
+        if (ok != s_inet) logln("internet %s", ok ? "reachable" : "unreachable");
+        s_inet = ok;
+        wait_ms = ok ? 30000 : 15000;
+    }
+}
+
+bool netcore_inet_up(void) { return s_inet; }
+
 static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         if (s_have_ssid && !s_no_reconnect) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_sta_up = false;
+        s_inet = false;
         if (s_have_ssid && !s_no_reconnect) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *e = data;
@@ -127,6 +191,7 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
         s_sta_ip[2] = esp_ip4_addr3_16(&e->ip_info.ip);
         s_sta_ip[3] = esp_ip4_addr4_16(&e->ip_info.ip);
         s_sta_up = true;
+        s_inet_probe_now = true;   // uplink just came up — probe internet promptly
         ESP_LOGI(TAG, "[STA] up IP=" IPSTR, IP2STR(&e->ip_info.ip));
     }
 }
@@ -284,5 +349,6 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
              netcore_bridge_netif() ? " (bridged AP+USB)" : "");
 
     dnsfwd_start(s_sta, c->ap_client_dns);
+    xTaskCreate(inet_task, "inetprobe", 3072, NULL, 2, NULL);
     return s_sta;
 }

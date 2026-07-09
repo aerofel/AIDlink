@@ -38,3 +38,8 @@ void pos_set(const pos_state_t *in);
 // Mark the fix invalid / service unavailable (e.g. on stale timeout) without
 // disturbing the last known lat/lon.
 void pos_mark_stale(void);
+
+// Monotonic counter, bumped on every valid fix written (real or emulator).
+// Consumers (display feed icon, status LED) watch it to blip "location
+// received" without polling the whole state.
+uint32_t pos_fix_seq(void);

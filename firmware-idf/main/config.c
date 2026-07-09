@@ -57,7 +57,9 @@ void cfg_load(aidlink_cfg_t *c) {
     strcpy(c->dev_name, "aidlink");
     c->adbp_port = 24000; c->ds_port = 51000;
     c->frame_len = 1; c->frame_delim = 0; c->frame_prolog_each = true;
-    strcpy(c->api_ver, "3.1"); strcpy(c->ac_tail, "F-XXXX"); strcpy(c->ac_type, "A320");
+    // ac_tail/ac_type start empty: the live feed fills and persists them
+    // (ADBP answers NCD and the display stays blank until identity arrives).
+    c->ac_tail[0] = 0; c->ac_type[0] = 0;
     c->src_type = 0;
     strcpy(c->vs_url, "http://192.168.4.2:8080/flight/info");
     c->poll_ms = 1000; c->stale_ms = 30000;   // default 1 s poll; 30 s stale —
@@ -96,9 +98,9 @@ void cfg_load(aidlink_cfg_t *c) {
     c->frame_len = get_i32(h, "frame_len", c->frame_len);
     c->frame_delim = get_i32(h, "frame_delim", c->frame_delim);
     c->frame_prolog_each = get_bool(h, "frame_prolog", c->frame_prolog_each);
-    get_str(h, "api_ver", c->api_ver, sizeof c->api_ver);
-    get_str(h, "ac_tail", c->ac_tail, sizeof c->ac_tail);
-    get_str(h, "ac_type", c->ac_type, sizeof c->ac_type);
+    // ac_tail/ac_type are deliberately NOT loaded (or saved): identity is
+    // RAM-only, empty on every boot, and filled by the live feed. Stored
+    // ac_tail/ac_type keys from older firmware are simply ignored.
     c->src_type = get_i32(h, "src_type", c->src_type);
     get_str(h, "vs_url", c->vs_url, sizeof c->vs_url);
     c->poll_ms = get_u32(h, "poll_ms", c->poll_ms);
@@ -148,9 +150,6 @@ int cfg_save(const aidlink_cfg_t *c) {
     e |= nvs_set_i32(h, "frame_len", c->frame_len);
     e |= nvs_set_i32(h, "frame_delim", c->frame_delim);
     e |= nvs_set_u8(h, "frame_prolog", c->frame_prolog_each ? 1 : 0);
-    e |= nvs_set_str(h, "api_ver", c->api_ver);
-    e |= nvs_set_str(h, "ac_tail", c->ac_tail);
-    e |= nvs_set_str(h, "ac_type", c->ac_type);
     e |= nvs_set_i32(h, "src_type", c->src_type);
     e |= nvs_set_str(h, "vs_url", c->vs_url);
     e |= nvs_set_u32(h, "poll_ms", c->poll_ms);

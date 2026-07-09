@@ -1,5 +1,225 @@
 # AIDlink — Learning Journal
 
+## 2026-07-09 — ETA v3: immediate appearance, blends into steadiness
+
+- The 240 s blank warm-up bothered in practice. `eta_update()` now takes the
+  instantaneous derived GS again and **blends it with the window made-good
+  speed by coverage w = span/600 s**: ETA shows from the first fix (livelier
+  early), and both the EMA time constant (12→120 s) and the display
+  hysteresis (18→90 s) ramp up with w — a seamless transition into the
+  fully steady long-window behavior. Host test asserts: appears on the first
+  sample, never blanks mid-flight, ≤2 displayed-minute changes after the
+  window is full despite ±10 kt oscillation.
+- **Follow-up fix:** on the x10 bench, derive.c's teleport rejection reports
+  gs=0 (each fix step implies ~4800 kt > its clamp) — and blending that bogus
+  0 sank the early estimate below the 80 kt floor, hiding the ETA the blend
+  was supposed to surface. Now the instantaneous speed only participates
+  when itself ≥ 80 kt; otherwise the window made-good speed carries the
+  estimate alone (appears ~10-15 s after boot). Regression case in the test
+  (gs_inst=0 throughout).
+
+## 2026-07-09 — Feed blip = location RECEIVED; devkit LED scheme v2
+
+- **`pos_fix_seq()`** (pos.c): counter bumped on every valid fix written
+  (real or emulator). The display feed icon and the LED magenta blip now
+  watch it — the old `adbp_push_seq()` trigger only fired on ADBP *sends*,
+  so with no EFB subscribed the feed icon stayed gray forever (user report).
+- **Devkit WS2812 scheme v2** (statusled.c): slow red = no Wi-Fi, fast
+  orange = scanning, steady orange = connected/no internet, steady yellow =
+  connected+internet weak signal (−70 ±3 hysteresis), steady green =
+  connected+internet strong, magenta 250 ms blip = location received (any
+  steady state). The blue data-sent blip is gone — superseded by magenta
+  fix-received per user spec.
+
+## 2026-07-09 — Screen freeze: LVGL pool exhaustion hangs, doesn't crash
+
+- **Symptom:** display frozen, everything else alive (web, poller, ADBP).
+  **Cause:** `LV_USE_ASSERT_MALLOC=y` + LVGL's default assert handler is
+  `while(1);` — a failed alloc from LVGL's builtin pool silently hangs the
+  render task *while holding the render lock*. No panic, no reboot, no log.
+  The 16 KB pool (set during the black-screen fix when the UI was 6 labels)
+  was ~84% full with today's UI; the trip bar's horizontal gradient allocates
+  its LUT from that pool per draw → eventual alloc failure → freeze.
+- **Fix:** pool 16→24 KB (boot usage now 55%, stable under active gradient
+  rendering; internal heap min 31 KB — still fine for TLS). **Permanent
+  diagnostics** in display_task: 60 s heartbeat with `lv_mem_monitor()`
+  stats into /log, plus a "LVGL lock stuck 2+ s" warning that distinguishes
+  a hung render task from a crashed refresh.
+- Rule of thumb: any new LVGL feature that draws per-frame allocations
+  (gradients, masks) needs a pool-usage check via the /log heartbeat.
+
+## 2026-07-09 — Trip-completion bar on the display
+
+- Second line (below tail/type/flight): `lv_bar` 254×5 px rounded track
+  (portal --line 0x1E2A44), indicator with a horizontal cyan→green gradient
+  (`bg_grad_color` + `LV_GRAD_DIR_HOR` on `LV_PART_INDICATOR`), the generated
+  ➤ route arrowhead riding the fill tip (label repositioned every refresh:
+  tip ≈ 20 px into the glyph box), percentage 16pt right-aligned.
+  Completion = 1 − remaining/(dep→arr great-circle), clamped 0..100 — early
+  off-track legs can make remaining > total, hence the clamp. Hidden until
+  origin+destination resolve and the fix is valid. Local clock 32→24pt
+  (montserrat_28 tried in between; 28 stays enabled in sdkconfig).
+
+## 2026-07-08 — Steady ETA on the distance line (eta.c, host-tested)
+
+- **Naive now+dist/GS is undisplayable**: on a 4000 NM leg a ±10 kt GS wiggle
+  swings it ±10 min, and slow oscillations pass through any reasonable EMA
+  (the first EMA-only implementation failed its own host test). Design that
+  works (`eta.c`, pure): ground speed = **made-good over a 600 s window**
+  (Δdist/Δt from a 5 s-decimated ring — oscillations integrate out exactly),
+  then a light 120 s EMA on the arrival epoch, then the displayed minute only
+  moves past a ±90 s hysteresis band. Estimate appears only after 240 s of
+  history (deliberate blank warm-up), resyncs instantly past a 30 min gap,
+  resets on a distance teleport (>700 kt-equivalent step = new destination).
+- **Subtle bug the host test caught**: clearing the smoothed state on an NCD
+  blip made recovery reseed from the instantaneous raw value — at long range
+  a seconds-long position stall bends made-good speed enough to jump whole
+  minutes. Blips must blank the display but keep ALL estimator state.
+- UI: distance line is now spans — `4300` amber + `NM` grayed 14pt; ETA
+  `12:50` amber + `z` grayed centered on the same line (BOTTOM_MID, -34).
+- Bench note: ETA needs ≥80 kt made-good for 4+ min — a moving feed
+  (flightsrv.py-style), not the fixed emulator, to see it.
+- **x10-speed bench feeds tripped the teleport guard**: the dest-change
+  detector's slack was +5 NM, but a x10 replay closes ~7 NM between 5 s
+  samples → ring reset every sample, ETA never appeared. Slack raised to
+  25 NM (`ETA_JUMP_SLACK_NM`) — real destination changes jump hundreds of NM
+  and still trip; regression case added to the host test.
+- **Adding a new Kconfig symbol to a live `sdkconfig` by inserting a line
+  does NOT work** if the file already contains `# CONFIG_X is not set`
+  further down — regeneration keeps the not-set entry and drops the insert.
+  Replace the `is not set` line itself (plus sdkconfig.defaults.<target> for
+  fresh configs). Cost one failed build chasing `lv_font_montserrat_28
+  undeclared`. Local clock is now 28pt (was 32).
+
+## 2026-07-08 — Identity is now RAM-only (supersedes the NVS persistence)
+
+- **Reboot forgets identity, by design** (user decision): ac_tail/ac_type are
+  never loaded from or saved to NVS anymore — empty on every boot, the display
+  shows its splash row, and the live feed refills identity within one poll.
+  Older firmware's stored ac_tail/ac_type NVS keys are silently ignored (no
+  migration needed). Supersedes the "persists so a reboot mid-flight keeps
+  it" behavior from earlier today, and makes the F-XXXX migration moot.
+- **Hardened /dfu confirmed working on its first real cycle**: with
+  `usb_ncm_stop()` in the running firmware, the ROM downloader enumerated
+  cleanly (cu.usbmodem101) right after the /dfu click — no BOOT+RST needed.
+
+## 2026-07-08 — No-identity splash row + auto-incrementing build number
+
+- **Display splash row** (display.c): until a tail is known (live or NVS
+  last-known), the top row shows the portal-hero mirror instead of
+  tail/type/flight — "AIDlink" logo (portal colors #22d3ee/#34d399), build
+  number center (muted #8aa0c0), AID IP right in a badge-style framed pill
+  (LVGL label with border+radius+padding). refresh() swaps visibility with
+  LV_OBJ_FLAG_HIDDEN. Legacy NVS placeholder tail "F-XXXX" is migrated to
+  empty on config load (it was a config default, not fed identity — it would
+  have defeated the splash forever).
+- **Build number** (`FW_BUILDNUM`): `tools/bump_buildnum.py` bumps
+  `firmware-idf/buildnum.txt` (committed, shared by both targets) and emits
+  `buildnum.h` into the build dir on EVERY build via an always-run CMake
+  custom target (`add_dependencies(${COMPONENT_LIB} buildnum)`). Shown on
+  the splash row, in the portal hero center (badge margin-left:auto zeroed
+  inline so margin:0 auto centers it), and inside fw_build() ("… b12 …").
+  Note: each target's build bumps the shared counter, so numbers are unique
+  per build, not consecutive per device.
+- The hardened /dfu (clean TinyUSB detach) wasn't in the *running* firmware
+  for this cycle, yet the downloader enumerated anyway — wedge is a coin
+  flip; the fix gets its first real test on the next update cycle.
+
+## 2026-07-08 — Identity from the feed only + /dfu clean-detach fix
+
+- **Aircraft identity card removed from the portal.** `ac_tail`/`ac_type` are
+  now feed-tracked last-known values (persisted to NVS once per change in
+  poller.c apply_fix), never user-set. Defaults are empty → ADBP answers NCD
+  and the display stays blank until the feed provides identity. Existing
+  units keep whatever NVS already holds as the starting last-known.
+- **AID Web API version is code, not config:** `AID_API_VERSION "3.1"` in
+  config.h (documented: protocol surface, EFB detection depends on it, never
+  per-aircraft). `api_ver` removed from cfg/NVS/portal.
+- **Type-from-feed plumbing:** parsers gained an `actype` out-param — Viasat
+  `aircraftType`, Panasonic `td_id_airframe_model` — but NEITHER pinned live
+  capture carries a type field; the keys are best-effort guesses to confirm
+  against a future capture. Host test updated (asserts actype empty on the
+  real capture).
+- **/dfu wedge root-caused-ish + fixed:** 3 of 5 soft-DFU attempts left macOS
+  holding the stale TinyUSB NCM device (0x303A:0x4000) with no downloader
+  port — recovery was physical BOOT+RST. dfu_task now calls `usb_ncm_stop()`
+  (`tinyusb_driver_uninstall()`) + 400 ms before forcing download boot, so
+  the host sees a real detach. Verify over the next few /dfu cycles.
+
+## 2026-07-08 — Status icon row v2: signal bars, internet globe, feed flash
+
+- **Wi-Fi fan is now 3 discrete signal bars**: three concentric `lv_arc`
+  quarter-fans (225..315°, diameters 8/14/20) + a 4 px dot, individually
+  colorable — a font glyph can't do per-bar coloring. Weak = 1 orange bar,
+  medium = 2 yellow, strong = 3 green (unlit bars dimmed 0x3A3A3A); bands at
+  −70/−60 dBm with ±3 dB hysteresis each. Scanning/no-connection keep the
+  fast-orange/slow-red all-bar blinks. lv_arc needs knob removed
+  (`lv_obj_remove_style(a, NULL, LV_PART_KNOB)`) + indicator arc opa transp
+  or it draws a slider.
+- **Internet ≠ uplink: frugal active probe** (`netcore.c inet_task`): a bare
+  TCP handshake to 1.1.1.1:53 / 8.8.8.8:53 alternating (SYN/SYN-ACK/RST,
+  ~200 bytes, no payload, no DNS query — onboard data is metered). 30 s
+  cadence while reachable, 15 s while not, prompt probe on STA-got-IP,
+  false immediately on STA disconnect. **Accepted false-green:** captive
+  portals usually pass/intercept port 53 pre-auth, so the globe can show
+  green behind an unauthenticated hotspot; the content-validated fix (HTTP
+  generate_204 → 204=internet / other=captive / timeout=none, ~700 B) was
+  proposed 2026-07-08 and declined — cheap handshake is the deliberate choice.
+  Globe icon = generated single-glyph font (`tools/gen_globe_font.py` →
+  `font_globe.c`, U+1F310, ring+equator+meridian drawn programmatically like
+  the arrow); built-in Montserrat has no globe.
+- **Feed activity icon**: `LV_SYMBOL_UPLOAD`, magenta for 180 ms on each
+  `adbp_push_seq()` change (same trigger as the LED blue-flash), dimmed idle.
+- This round's `/dfu` soft-entry re-enumerated fine — the earlier wedge is
+  intermittent, not deterministic. Keep autoflash running before triggering.
+
+## 2026-07-08 — Display Wi-Fi indicator + T-Display /dfu re-enumeration gotcha
+
+- **Wi-Fi indicator on the flight display** (display.c `wifi_indicator()`):
+  `LV_SYMBOL_WIFI` label (16pt, built-in Montserrat fonts carry the FA symbols)
+  below the tail, top-left second line. Slow red blink ≈0.8 Hz = no uplink,
+  fast orange ≈3 Hz = scanning, steady green = connected RSSI ≥ −70 dBm,
+  steady orange = connected but weak — ±3 dB hysteresis (−67/−73) so a
+  hovering RSSI can't flicker the color. New `netcore_sta_rssi()`. The display
+  task now ticks at 100 ms (blink cadence) and runs the heavier content
+  `refresh()` every 5th tick — same 500 ms cadence as before.
+- **Which board is on the cable? Check ARP, not assumptions:** the NCM
+  host-side entry for 172.20.1.1 shows base-MAC+1 (`d0:cf:13:32:2f:49` =
+  T-Display, `e8:3d:c1:f7:a2:5b`-side = devkit). Mid-session the devkit was
+  swapped for the T-Display and the Mac interface silently moved en18→en12.
+- **T-Display /dfu soft-entry can wedge:** after `/dfu` (FORCE_DOWNLOAD_BOOT +
+  esp_restart) the ROM downloader sometimes never re-enumerates — macOS keeps
+  the stale TinyUSB NCM identity (0x303A:0x4000 "Espressif Device"), no
+  cu.usbmodem port, network dead. Recovery: hold BOOT + tap RST (or replug
+  holding BOOT); `tools/autoflash-idf.sh` then catches the port. This flash
+  booted straight into the app afterwards — the download-mode re-latch did
+  not occur this time.
+
+## 2026-07-08 — Hardware card in portal + password-less reflash path
+
+- **New 🔩 Hardware card** at the top of the config page (web.c
+  `send_hw_card()`): board profile (name + peripherals from `board_get()`),
+  chip model/rev, cores + CPU MHz, radio features, physical flash size
+  (`esp_flash_get_physical_size` — reports the real 16 MB even with an 8 MB
+  config), PSRAM (heap-visible; "not enabled" while SPIRAM stays off), eFuse
+  base MAC, ESP-IDF version, internal heap free/min, uptime + last reset
+  reason. Rendered as a plain `.ctbl` table (`.hwt` label styling), NOT form
+  fields — boxed inputs suggest editable data (user feedback). Use
+  `ESP_IDF_VERSION_*` macros, not `esp_get_idf_version()`: the runtime string
+  is a bare commit hash when the IDF checkout isn't on a release tag.
+- Portal sessions are single-token: any new login mints a new token and
+  silently logs out every other session (curl scripts vs browser).
+- **Devkit reflash needs no portal auth:** the S3 devkit's CH343 UART port
+  has the DTR/RTS auto-download circuit, so `tools/autoflash-idf.sh` +
+  esptool `--before default_reset` enters the bootloader by itself — /dfu
+  (and the portal password) is only required on the single-port T-Display-S3.
+  This unit's portal password is NOT the default admin/password.
+- **Dual-target check without clobbering the s3 build dir:**
+  `idf.py -B build-esp32 -DIDF_TARGET=esp32 -DSDKCONFIG=$PWD/build-esp32/sdkconfig build`.
+- The Mac's Wi-Fi being on 172.20.4.x/20 overlaps the AID subnet; the /26 on
+  the NCM interface should win the route, but curl to 172.20.1.1 only behaved
+  with an explicit `--interface en18` — use it in scripts.
+
 ## 2026-07-08 — In-flight round 2: GS/track derivation, EFB data quality
 
 - **Derived GS flapped 0↔1500 kt, track swung wildly** (visible in the portal;

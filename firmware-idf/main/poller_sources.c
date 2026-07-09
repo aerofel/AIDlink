@@ -50,7 +50,7 @@ static bool viasat_str(const cJSON *root, const char *key, char *out, size_t cap
 
 bool poller_parse_viasat(const char *json, double *lat, double *lon, double *alt,
                          double *gs, double *track, bool *have_track, uint64_t *utc_ms,
-                         char *flight, char *tail, char *orig, char *dest) {
+                         char *flight, char *tail, char *orig, char *dest, char *actype) {
     cJSON *root = cJSON_Parse(json);
     if (!root) return false;
     bool ok = false;
@@ -65,6 +65,9 @@ bool poller_parse_viasat(const char *json, double *lat, double *lon, double *alt
         viasat_str(root, "tail_number", tail, 12);
         viasat_str(root, "originCode", orig, 8);
         viasat_str(root, "destinationCode", dest, 8);
+        // best-effort: neither pinned live capture carries a type field; this
+        // key follows the feed's camelCase style in case a variant serves one
+        viasat_str(root, "aircraftType", actype, 8);
         char ts[40];
         *utc_ms = viasat_str(root, "current_time", ts, sizeof ts) ? iso_to_epoch_ms(ts) : 0;
     }
@@ -84,7 +87,7 @@ static const char *pan_str(const cJSON *root, const char *key) {
 
 bool poller_parse_panasonic(const char *json, double *lat, double *lon, double *alt,
                             double *gs, double *track, bool *have_track, uint64_t *utc_ms,
-                            char *flight, char *tail, char *orig, char *dest) {
+                            char *flight, char *tail, char *orig, char *dest, char *actype) {
     cJSON *root = cJSON_Parse(json);
     if (!root) return false;
     bool ok = false;
@@ -99,6 +102,7 @@ bool poller_parse_panasonic(const char *json, double *lat, double *lon, double *
         else { *track = 0; *have_track = false; }
         if ((s = pan_str(root, "td_id_fltdata_flight_number"))) strncpy(flight, s, 15);
         if ((s = pan_str(root, "td_id_airframe_tail_number"))) strncpy(tail, s, 11);
+        if ((s = pan_str(root, "td_id_airframe_model"))) strncpy(actype, s, 7);   // best-effort key
         if ((s = pan_str(root, "td_id_fltdata_departure_id"))) strncpy(orig, s, 7);
         if ((s = pan_str(root, "td_id_fltdata_destination_id"))) strncpy(dest, s, 7);
         *utc_ms = 0;   // Panasonic has no time field

@@ -39,13 +39,18 @@
 #include "geo.h"
 #include "airports.h"
 #include "tzdb.h"
+#include "netcore.h"
 #include "log.h"
+#include "buildnum.h"
+#include "eta.h"
 #include "esp_heap_caps.h"
 
 static const char *TAG = "disp";
 
 // single-glyph U+27A4 arrowhead font (font_arrow.c, generated)
 LV_FONT_DECLARE(font_arrow);
+// single-glyph U+1F310 globe font (font_globe.c, generated)
+LV_FONT_DECLARE(font_globe);
 
 // Bring-up evidence into the /log ring buffer: this board has no serial console
 // (TinyUSB owns the only USB port), so the web /log endpoint is the only way to
@@ -72,9 +77,25 @@ LV_FONT_DECLARE(font_arrow);
 #define COL_AMBER   0xFFB300
 #define COL_GREEN   0x34D399
 #define COL_MAGENTA 0xFF55FF
+#define COL_RED     0xFF3B30
+#define COL_YELLOW  0xFFEB3B
+#define COL_DIMMED  0x3A3A3A   // unlit signal bars / idle feed icon
+// portal palette (web.c CSS vars) for the no-identity splash row
+#define COL_LOGO_CY 0x22D3EE   // --cy: "AID"
+#define COL_LOGO_GR 0x34D399   // --gr: "link"
+#define COL_MUTED   0x8AA0C0   // --mut: build number
 
 static const aidlink_cfg_t *CFG;
-static lv_obj_t *s_tail, *s_actype, *s_nm, *s_tz, *s_clock;       // single-color labels
+static lv_obj_t *s_tail, *s_actype, *s_tz, *s_clock;              // single-color labels
+static lv_obj_t *s_wifi_arc[3], *s_wifi_dot;                      // Wi-Fi fan (signal bars)
+static lv_obj_t *s_globe, *s_feed;                                // internet + feed activity
+static lv_obj_t *sg_brand, *s_build, *s_ip;                       // no-identity splash row
+static lv_span_t *sp_br_aid, *sp_br_link;                         // AID | link
+static lv_obj_t *s_trip, *s_trip_arrow, *s_trip_pct;              // trip-completion bar
+static lv_obj_t *sg_nm, *sg_eta;                                  // distance + steady ETA line
+static lv_span_t *sp_nm_v, *sp_nm_u;                              // 4300 | NM
+static lv_span_t *sp_eta_t, *sp_eta_z;                            // 12:50 | z
+static eta_state_t s_eta;                                         // steady-ETA estimator state
 static lv_obj_t *sg_flight, *sg_route, *sg_line, *sg_alt, *sg_utc; // multi-color spangroups
 static lv_span_t *sp_fl_pre, *sp_fl_num;                      // ACI | 330
 static lv_span_t *sp_ro_o, *sp_ro_ar, *sp_ro_d;               // NWWW | small arrow | NFFN
@@ -187,6 +208,37 @@ static void build_ui(lv_display_t *disp) {
 
     s_tail   = mklabel(scr, &lv_font_montserrat_20, COL_CYAN,  LV_ALIGN_TOP_LEFT,      8,   6);
 
+    // status icon row: bottom line center, between the UTC readout (left) and
+    // the local clock (right) —
+    // Wi-Fi fan (3 signal bars) · globe (internet) · upload (feed activity)
+    const int wcx = 137, wcy = 156;            // Wi-Fi fan center = the dot
+    for (int i = 0; i < 3; i++) {
+        int d = 8 + i * 6;                     // arc diameters 8 / 14 / 20
+        lv_obj_t *a = lv_arc_create(scr);
+        lv_obj_set_size(a, d, d);
+        lv_obj_set_pos(a, wcx - d / 2, wcy - d / 2);
+        lv_arc_set_bg_angles(a, 225, 315);     // top-quarter fan
+        lv_obj_remove_style(a, NULL, LV_PART_KNOB);
+        lv_obj_set_style_arc_opa(a, LV_OPA_TRANSP, LV_PART_INDICATOR);
+        lv_obj_set_style_arc_width(a, 2, LV_PART_MAIN);
+        lv_obj_set_style_arc_rounded(a, true, LV_PART_MAIN);
+        lv_obj_set_style_bg_opa(a, LV_OPA_TRANSP, LV_PART_MAIN);
+        s_wifi_arc[i] = a;
+    }
+    s_wifi_dot = lv_obj_create(scr);
+    lv_obj_set_size(s_wifi_dot, 4, 4);
+    lv_obj_set_pos(s_wifi_dot, wcx - 2, wcy - 2);
+    lv_obj_set_style_radius(s_wifi_dot, LV_RADIUS_CIRCLE, 0);
+    lv_obj_set_style_border_width(s_wifi_dot, 0, 0);
+    lv_obj_set_style_bg_color(s_wifi_dot, lv_color_hex(COL_DIMMED), 0);
+    lv_obj_clear_flag(s_wifi_dot, LV_OBJ_FLAG_SCROLLABLE);
+
+    s_globe = mklabel(scr, &font_globe, COL_RED, LV_ALIGN_TOP_LEFT, 157, 144);
+    lv_label_set_text(s_globe, "\xF0\x9F\x8C\x90");        // U+1F310
+
+    s_feed = mklabel(scr, &lv_font_montserrat_16, COL_DIMMED, LV_ALIGN_TOP_LEFT, 180, 142);
+    lv_label_set_text(s_feed, LV_SYMBOL_UPLOAD);
+
     // aircraft type, top-center
     s_actype = mklabel(scr, &lv_font_montserrat_20, COL_WHITE, LV_ALIGN_TOP_MID,       0,   6);
 
@@ -194,6 +246,50 @@ static void build_ui(lv_display_t *disp) {
     sg_flight = mkspangroup(scr, LV_ALIGN_TOP_RIGHT, -8, 6);
     sp_fl_pre = addspan(sg_flight, &lv_font_montserrat_20, COL_GREY);
     sp_fl_num = addspan(sg_flight, &lv_font_montserrat_20, COL_WHITE);
+
+    // no-identity splash row (shown until the feed provides a tail; refresh()
+    // swaps it with tail/type/flight): AIDlink logo · build number · AID IP,
+    // mirroring the portal hero (same colors, badge-framed IP)
+    char buf[24];
+    sg_brand   = mkspangroup(scr, LV_ALIGN_TOP_LEFT, 8, 6);
+    sp_br_aid  = addspan(sg_brand, &lv_font_montserrat_20, COL_LOGO_CY);
+    sp_br_link = addspan(sg_brand, &lv_font_montserrat_20, COL_LOGO_GR);
+    lv_span_set_text(sp_br_aid, "AID");
+    lv_span_set_text(sp_br_link, "link");
+    lv_spangroup_refresh(sg_brand);
+
+    s_build = mklabel(scr, &lv_font_montserrat_20, COL_MUTED, LV_ALIGN_TOP_MID, 0, 6);
+    snprintf(buf, sizeof buf, "b%d", FW_BUILDNUM);
+    lv_label_set_text(s_build, buf);
+
+    s_ip = mklabel(scr, &lv_font_montserrat_16, COL_LOGO_CY, LV_ALIGN_TOP_RIGHT, -8, 4);
+    lv_obj_set_style_border_width(s_ip, 1, 0);
+    lv_obj_set_style_border_color(s_ip, lv_color_hex(COL_LOGO_CY), 0);
+    lv_obj_set_style_border_opa(s_ip, LV_OPA_40, 0);
+    lv_obj_set_style_radius(s_ip, 10, 0);
+    lv_obj_set_style_pad_hor(s_ip, 7, 0);
+    lv_obj_set_style_pad_ver(s_ip, 3, 0);
+    lv_label_set_text(s_ip, CFG->ap_ip);
+
+    // trip-completion bar (second line): thin rounded track, cyan->green
+    // gradient fill, the route arrowhead riding the tip, percentage right
+    #define TRIP_X 8
+    #define TRIP_W 254
+    s_trip = lv_bar_create(scr);
+    lv_obj_set_size(s_trip, TRIP_W, 5);
+    lv_obj_set_pos(s_trip, TRIP_X, 38);
+    lv_bar_set_range(s_trip, 0, 1000);
+    lv_obj_set_style_bg_color(s_trip, lv_color_hex(0x1E2A44), LV_PART_MAIN);   // portal --line
+    lv_obj_set_style_bg_opa(s_trip, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_radius(s_trip, LV_RADIUS_CIRCLE, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(s_trip, lv_color_hex(COL_LOGO_CY), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_grad_color(s_trip, lv_color_hex(COL_LOGO_GR), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_grad_dir(s_trip, LV_GRAD_DIR_HOR, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(s_trip, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(s_trip, LV_RADIUS_CIRCLE, LV_PART_INDICATOR);
+    s_trip_arrow = mklabel(scr, &font_arrow, COL_WHITE, LV_ALIGN_TOP_LEFT, -20, 32);
+    lv_label_set_text(s_trip_arrow, "\xE2\x9E\xA4");
+    s_trip_pct = mklabel(scr, &lv_font_montserrat_16, COL_WHITE, LV_ALIGN_TOP_RIGHT, -8, 32);
 
     // route line: 32pt ICAO codes joined by a smaller arrow, centered;
     // remaining distance rides the same line, pinned right (16pt so a 4-digit
@@ -203,8 +299,14 @@ static void build_ui(lv_display_t *disp) {
     sp_ro_ar = addspan(sg_route, &font_arrow, COL_WHITE);
     sp_ro_d  = addspan(sg_route, &lv_font_montserrat_32, COL_WHITE);
     // remaining distance sits above the UTC readout, mirroring the zone label
-    // that sits above the local clock on the right
-    s_nm     = mklabel(scr, &lv_font_montserrat_16, COL_AMBER, LV_ALIGN_BOTTOM_LEFT, 8, -34);
+    // that sits above the local clock on the right; unit grayed like alt's "ft"
+    sg_nm    = mkspangroup(scr, LV_ALIGN_BOTTOM_LEFT, 8, -34);
+    sp_nm_v  = addspan(sg_nm, &lv_font_montserrat_16, COL_AMBER);
+    sp_nm_u  = addspan(sg_nm, &lv_font_montserrat_14, COL_GREY);
+    // steady estimated arrival time (UTC), centered on the distance line
+    sg_eta   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, 0, -34);
+    sp_eta_t = addspan(sg_eta, &lv_font_montserrat_16, COL_AMBER);
+    sp_eta_z = addspan(sg_eta, &lv_font_montserrat_14, COL_GREY);
 
     // data line: coordinates full left, altitude full right, same 16pt
     sg_line  = mkspangroup(scr, LV_ALIGN_LEFT_MID, 8, 16);
@@ -217,7 +319,7 @@ static void build_ui(lv_display_t *disp) {
     sp_alt_u = addspan(sg_alt, &lv_font_montserrat_14, COL_GREY);
 
     s_tz     = mklabel(scr, &lv_font_montserrat_16, COL_GREY,  LV_ALIGN_BOTTOM_RIGHT, -8, -34);
-    s_clock  = mklabel(scr, &lv_font_montserrat_32, COL_WHITE, LV_ALIGN_BOTTOM_RIGHT, -8,  -2);
+    s_clock  = mklabel(scr, &lv_font_montserrat_24, COL_WHITE, LV_ALIGN_BOTTOM_RIGHT, -8,  -2);
 
     // UTC bottom-left: magenta time, grayed 'z'
     sg_utc   = mkspangroup(scr, LV_ALIGN_BOTTOM_LEFT, 8, -4);
@@ -225,11 +327,68 @@ static void build_ui(lv_display_t *disp) {
     sp_utc_z = addspan(sg_utc, &lv_font_montserrat_20, COL_GREY);
 }
 
+// Status icon row, updated every task tick (blinking needs a faster cadence
+// than the content refresh).
+//
+// Wi-Fi fan — signal bars, weakest arc innermost:
+//   slow red blink (all bars)   = no uplink connection
+//   fast orange blink (all)     = scanning
+//   1 bar orange / 2 dimmed     = connected, weak    (RSSI < -70 dBm)
+//   2 bars yellow / 1 dimmed    = connected, medium  (-70 .. -60)
+//   3 bars green                = connected, strong  (>= -60)
+// Globe: green = internet reachable (netcore's frugal TCP probe), red = not.
+// Upload: magenta flash whenever a location is RECEIVED from the feed
+// (pos_fix_seq — not ADBP sends: with no EFB subscribed it never moved).
+static void icons_update(void) {
+    uint32_t now = now_ms();
+    uint32_t lit;
+    int nlit = 3;
+    bool show = true;
+    if (netcore_scanning()) {
+        lit = COL_AMBER; show = (now / 150) % 2;          // fast, ~3 Hz
+    } else if (netcore_sta_up(NULL)) {
+        // banded level with 3 dB hysteresis per boundary so a hovering RSSI
+        // doesn't flicker between colors
+        static bool ge_med, ge_str;
+        int rssi = netcore_sta_rssi();
+        if (rssi >= -67) ge_med = true; else if (rssi <= -73) ge_med = false;
+        if (rssi >= -57) ge_str = true; else if (rssi <= -63) ge_str = false;
+        nlit = ge_str ? 3 : (ge_med ? 2 : 1);
+        lit  = ge_str ? COL_GREEN : (ge_med ? COL_YELLOW : COL_AMBER);
+    } else {
+        lit = COL_RED; show = (now / 600) % 2;            // slow red, ~0.8 Hz
+    }
+    for (int i = 0; i < 3; i++) {
+        lv_obj_set_style_arc_color(s_wifi_arc[i], lv_color_hex(i < nlit ? lit : COL_DIMMED), LV_PART_MAIN);
+        lv_obj_set_style_opa(s_wifi_arc[i], show ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+    }
+    lv_obj_set_style_bg_color(s_wifi_dot, lv_color_hex(lit), 0);
+    lv_obj_set_style_opa(s_wifi_dot, show ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
+
+    lv_obj_set_style_text_color(s_globe, lv_color_hex(netcore_inet_up() ? COL_GREEN : COL_RED), 0);
+
+    static uint32_t feed_seq, feed_until;
+    uint32_t seq = pos_fix_seq();
+    if (seq != feed_seq) { feed_seq = seq; feed_until = now + 180; }
+    lv_obj_set_style_text_color(s_feed, lv_color_hex(now < feed_until ? COL_MAGENTA : COL_DIMMED), 0);
+}
+
 // ---- 1 Hz content refresh ------------------------------------------------
+
+static void vis(lv_obj_t *o, bool on) {
+    if (on) lv_obj_clear_flag(o, LV_OBJ_FLAG_HIDDEN);
+    else    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
+}
 
 static void refresh(void) {
     pos_state_t p; pos_get(&p);
     char buf[48];
+
+    // Top row: until the feed has provided an identity (live or last-known),
+    // show the splash row (AIDlink · build · IP) instead of tail/type/flight.
+    bool have_id = p.tail[0] || CFG->ac_tail[0];
+    vis(s_tail, have_id); vis(s_actype, have_id); vis(sg_flight, have_id);
+    vis(sg_brand, !have_id); vis(s_build, !have_id); vis(s_ip, !have_id);
 
     lv_label_set_text(s_tail, p.tail[0] ? p.tail : CFG->ac_tail);
     lv_label_set_text(s_actype, CFG->ac_type);
@@ -285,16 +444,38 @@ static void refresh(void) {
     lv_spangroup_refresh(sg_line);
     lv_spangroup_refresh(sg_alt);
 
-    double alat, alon;
-    if (p.valid && p.dest[0] && airports_lookup(p.dest, &alat, &alon)) {
-        int nm = (int)lround(geo_dist_nm(p.lat, p.lon, alat, alon));
-        snprintf(buf, sizeof buf, "%dNM", nm);
-        lv_label_set_text(s_nm, buf);
-    } else if (p.valid && p.simulated) {
-        lv_label_set_text(s_nm, "SIM");
-    } else {
-        lv_label_set_text(s_nm, "");
+    double alat, alon, dist_nm = -1;
+    if (p.valid && p.dest[0] && airports_lookup(p.dest, &alat, &alon))
+        dist_nm = geo_dist_nm(p.lat, p.lon, alat, alon);
+
+    // trip completion: remaining vs the dep->arr great-circle total
+    double olat, olon, tot_nm = -1;
+    if (dist_nm >= 0 && p.orig[0] && airports_lookup(p.orig, &olat, &olon))
+        tot_nm = geo_dist_nm(olat, olon, alat, alon);
+    bool trip = tot_nm > 10;
+    vis(s_trip, trip); vis(s_trip_arrow, trip); vis(s_trip_pct, trip);
+    if (trip) {
+        double pct = (1.0 - dist_nm / tot_nm) * 100.0;
+        if (pct < 0) pct = 0;
+        if (pct > 100) pct = 100;
+        lv_bar_set_value(s_trip, (int)lround(pct * 10), LV_ANIM_OFF);
+        // arrow tip rides the end of the fill (glyph tip ~20 px into the label box)
+        lv_obj_set_pos(s_trip_arrow, TRIP_X + (int)(pct / 100.0 * TRIP_W) - 20, 32);
+        snprintf(buf, sizeof buf, "%d%%", (int)lround(pct));
+        lv_label_set_text(s_trip_pct, buf);
     }
+    if (dist_nm >= 0) {
+        snprintf(buf, sizeof buf, "%d", (int)lround(dist_nm));
+        lv_span_set_text(sp_nm_v, buf);
+        lv_span_set_text(sp_nm_u, "NM");
+    } else if (p.valid && p.simulated) {
+        lv_span_set_text(sp_nm_v, "SIM");
+        lv_span_set_text(sp_nm_u, "");
+    } else {
+        lv_span_set_text(sp_nm_v, "");
+        lv_span_set_text(sp_nm_u, "");
+    }
+    lv_spangroup_refresh(sg_nm);
 
     // UTC: prefer the system clock (SNTP / HTTP-Date disciplined, see poller.c),
     // else tick the last fix's UTC timestamp forward.
@@ -335,6 +516,20 @@ static void refresh(void) {
     }
     lv_span_set_text(sp_utc_z, "z");
     lv_spangroup_refresh(sg_utc);
+
+    // steady arrival estimate, center of the distance line ("12:50z")
+    long eta_min = eta_update(&s_eta, dist_nm, p.gs_kt, utc ? utc / 1000.0 : 0);
+    if (eta_min > 0) {
+        time_t et = (time_t)eta_min * 60;
+        gmtime_r(&et, &tm);
+        snprintf(buf, sizeof buf, "%02d:%02d", tm.tm_hour, tm.tm_min);
+        lv_span_set_text(sp_eta_t, buf);
+        lv_span_set_text(sp_eta_z, "z");
+    } else {
+        lv_span_set_text(sp_eta_t, "");
+        lv_span_set_text(sp_eta_z, "");
+    }
+    lv_spangroup_refresh(sg_eta);
     if (utc && have_off) {
         time_t local = (time_t)(utc / 1000) + (time_t)off_min * 60;
         gmtime_r(&local, &tm);
@@ -347,13 +542,32 @@ static void refresh(void) {
 
 static void display_task(void *arg) {
     bool first = true;
-    for (;;) {
+    // 100 ms tick: the Wi-Fi indicator blinks every tick, the (heavier)
+    // content refresh keeps its former 500 ms cadence.
+    // Diagnostics (2026-07-09 freeze hunt): LV_USE_ASSERT_MALLOC's default
+    // handler is while(1) — a failed LVGL pool alloc silently hangs the render
+    // task while it holds the lock, freezing the screen with the device alive.
+    // The heartbeat below surfaces pool usage in /log; the stuck-lock warning
+    // distinguishes "render task hung" from "our refresh crashed".
+    int lockfail = 0;
+    for (int tick = 0;; tick++) {
         if (lvgl_port_lock(100)) {
-            refresh();
+            lockfail = 0;
+            if (tick % 5 == 0) refresh();
+            icons_update();
+            if (tick % 600 == 0) {   // ~60 s heartbeat with LVGL pool stats
+                lv_mem_monitor_t m;
+                lv_mem_monitor(&m);
+                DLOG("hb tick=%d lv used=%d%% frag=%d%% free=%u biggest=%u",
+                     tick, m.used_pct, m.frag_pct,
+                     (unsigned)m.free_size, (unsigned)m.free_biggest_size);
+            }
             lvgl_port_unlock();
             if (first) { first = false; DLOG("task alive, first refresh done"); }
+        } else if (++lockfail == 20) {
+            DLOG("LVGL lock stuck 2+ s — render task hung (pool exhausted?)");
         }
-        vTaskDelay(pdMS_TO_TICKS(500));
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 

@@ -6,7 +6,7 @@ set(srcs "aidlink_main.c" "config.c" "config_util.c"
          "adbp.c" "adbp_frame.c"
          "poller.c" "poller_sources.c" "geo.c" "services.c" "log.c"
          "statusled.c" "board.c" "display.c" "airports.c"
-         "tzdb.c" "tzdb_data.c" "derive.c" "font_arrow.c")
+         "tzdb.c" "tzdb_data.c" "derive.c" "eta.c" "font_arrow.c" "font_globe.c")
 set(reqs nvs_flash esp_wifi esp_netif esp_event lwip
          esp_http_server esp_http_client esp-tls json
          mbedtls esp_timer esp_app_format mdns)
@@ -23,3 +23,15 @@ endif()
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "."
                        REQUIRES ${reqs})
+
+# Auto-incrementing firmware build number: bump ../buildnum.txt (committed,
+# shared by both targets) and regenerate buildnum.h on EVERY build. Shown on
+# the display splash row and the portal hero/status strip.
+idf_build_get_property(python PYTHON)
+set(BUILDNUM_H ${CMAKE_CURRENT_BINARY_DIR}/buildnum.h)
+add_custom_target(buildnum ALL
+    COMMAND ${python} ${COMPONENT_DIR}/../../tools/bump_buildnum.py
+            ${COMPONENT_DIR}/../buildnum.txt ${BUILDNUM_H}
+    BYPRODUCTS ${BUILDNUM_H})
+add_dependencies(${COMPONENT_LIB} buildnum)
+target_include_directories(${COMPONENT_LIB} PRIVATE ${CMAKE_CURRENT_BINARY_DIR})

@@ -38,7 +38,8 @@ static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 // Apply a live fix. gs<0 or track unknown -> derive from the previous fix.
 static void apply_fix(double lat, double lon, double alt, double gs, double track,
                       bool have_track, uint64_t utc_ms, bool sim,
-                      const char *flight, const char *tail, const char *orig, const char *dest) {
+                      const char *flight, const char *tail, const char *orig, const char *dest,
+                      const char *actype) {
     pos_state_t p; pos_get(&p);
     uint32_t t = now_ms();
 
@@ -58,12 +59,17 @@ static void apply_fix(double lat, double lon, double alt, double gs, double trac
     if (dest) strlcpy(p.dest, dest, sizeof p.dest);
     pos_set(&p);
 
-    // A live tail number is the truth: replace the configured aircraft identity
-    // (placeholder F-XXXX or a previous airframe) and persist it. Once per change.
+    // The live feed is the single source of truth for aircraft identity (the
+    // portal has no identity card). RAM-only, deliberately NOT persisted:
+    // every boot starts with an empty identity (the display shows its splash
+    // row) until the feed provides one.
     if (!sim && tail && tail[0] && strcmp(tail, CFG->ac_tail) != 0) {
-        ESP_LOGI(TAG, "aircraft identity: %s -> %s (from live data)", CFG->ac_tail, tail);
+        ESP_LOGI(TAG, "aircraft tail: %s -> %s (from live data)", CFG->ac_tail, tail);
         strlcpy(CFG->ac_tail, tail, sizeof CFG->ac_tail);
-        cfg_save(CFG);
+    }
+    if (!sim && actype && actype[0] && strcmp(actype, CFG->ac_type) != 0) {
+        ESP_LOGI(TAG, "aircraft type: %s -> %s (from live data)", CFG->ac_type, actype);
+        strlcpy(CFG->ac_type, actype, sizeof CFG->ac_type);
     }
 }
 
@@ -143,10 +149,10 @@ static int http_get(const char *url, char *out, int cap, long *date_out) {
 // forward decl — source parsers live in poller_sources.c
 bool poller_parse_viasat(const char *json, double *lat, double *lon, double *alt,
                          double *gs, double *track, bool *have_track, uint64_t *utc_ms,
-                         char *flight, char *tail, char *orig, char *dest);
+                         char *flight, char *tail, char *orig, char *dest, char *actype);
 bool poller_parse_panasonic(const char *json, double *lat, double *lon, double *alt,
                             double *gs, double *track, bool *have_track, uint64_t *utc_ms,
-                            char *flight, char *tail, char *orig, char *dest);
+                            char *flight, char *tail, char *orig, char *dest, char *actype);
 
 static void poll_once(void) {
     const char *url;
@@ -173,13 +179,13 @@ static void poll_once(void) {
     }
 
     double lat, lon, alt = 0, gs = -1, track = 0; bool have_track = false; uint64_t utc = 0;
-    char flight[16] = "", tail[12] = "", orig[8] = "", dest[8] = "";
+    char flight[16] = "", tail[12] = "", orig[8] = "", dest[8] = "", actype[8] = "";
     bool ok = (CFG->src_type == 1)
-        ? poller_parse_panasonic(body, &lat, &lon, &alt, &gs, &track, &have_track, &utc, flight, tail, orig, dest)
-        : poller_parse_viasat(body, &lat, &lon, &alt, &gs, &track, &have_track, &utc, flight, tail, orig, dest);
+        ? poller_parse_panasonic(body, &lat, &lon, &alt, &gs, &track, &have_track, &utc, flight, tail, orig, dest, actype)
+        : poller_parse_viasat(body, &lat, &lon, &alt, &gs, &track, &have_track, &utc, flight, tail, orig, dest, actype);
     if (!ok) { s_poll_ok = false; strlcpy(s_poll_msg, "parse failed", sizeof s_poll_msg); return; }
 
-    apply_fix(lat, lon, alt, gs, track, have_track, utc, false, flight, tail, orig, dest);
+    apply_fix(lat, lon, alt, gs, track, have_track, utc, false, flight, tail, orig, dest, actype);
     s_poll_ok = true; s_poll_at_ms = now_ms(); strlcpy(s_poll_msg, "ok", sizeof s_poll_msg);
 }
 

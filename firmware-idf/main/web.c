@@ -13,6 +13,7 @@
 #include "airports.h"
 #include "log.h"
 #include "usb_ncm.h"
+#include "board.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,6 +23,11 @@
 #include "esp_log.h"
 #include "esp_system.h"
 #include "esp_app_desc.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_mac.h"
+#include "esp_heap_caps.h"
+#include "esp_idf_version.h"
 #include "soc/soc_caps.h"
 #if SOC_USB_SERIAL_JTAG_SUPPORTED
 #include "soc/rtc_cntl_reg.h"   // FORCE_DOWNLOAD_BOOT for /dfu
@@ -29,15 +35,17 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "buildnum.h"
 
 static const char *TAG = "web";
 static aidlink_cfg_t *CFG;
 static httpd_handle_t s_http;
 
 // Firmware build string shown in the UI (analogous to v9's FW_BUILD).
+// FW_BUILDNUM comes from the generated buildnum.h — increments on every build.
 static const char *fw_build(void) {
     static char b[96];
-    if (!b[0]) snprintf(b, sizeof b, "%s %s %s", esp_app_get_description()->version, __DATE__, __TIME__);
+    if (!b[0]) snprintf(b, sizeof b, "%s b%d %s %s", esp_app_get_description()->version, FW_BUILDNUM, __DATE__, __TIME__);
     return b;
 }
 
@@ -91,6 +99,95 @@ static void ff_num(httpd_req_t *r, const char *lbl, const char *nm, double v, co
 static void ff_tog(httpd_req_t *r, const char *lbl, const char *nm, bool v) {
     chunkf(r, "<div class='f'><label>&nbsp;</label><label class='tog'><input type='checkbox' name='%s' %s><span>%s</span></label></div>",
            nm, v ? "checked" : "", lbl);
+}
+
+// ---- hardware/specs card (top of the config page) ----
+// Read-only info, so plain table rows (like the clients table) — the boxed
+// input look of the form fields would suggest the values are editable.
+static void hw_row(httpd_req_t *r, const char *lbl, const char *val) {
+    chunkf(r, "<tr><td>%s</td><td>", lbl);
+    esc_chunk(r, val);
+    chunk(r, "</td></tr>");
+}
+static void send_hw_card(httpd_req_t *r) {
+    char v[128];
+    esp_chip_info_t ci;
+    esp_chip_info(&ci);
+    const char *model = "ESP32?", *cpu = "Xtensa";
+    switch (ci.model) {
+        case CHIP_ESP32:   model = "ESP32";    cpu = "Xtensa LX6"; break;
+        case CHIP_ESP32S2: model = "ESP32-S2"; cpu = "Xtensa LX7"; break;
+        case CHIP_ESP32S3: model = "ESP32-S3"; cpu = "Xtensa LX7"; break;
+        case CHIP_ESP32C3: model = "ESP32-C3"; cpu = "RISC-V";     break;
+        case CHIP_ESP32C6: model = "ESP32-C6"; cpu = "RISC-V";     break;
+        default: break;
+    }
+    const board_t *b = board_get();
+
+    chunk(r, "<div class='card'><h2>🔩 Hardware</h2><div style='overflow-x:auto'><table class='ctbl hwt'><tbody>");
+
+    snprintf(v, sizeof v, "%s%s%s", b->name,
+             b->has_display ? " · ST7789 320x170 display" : "",
+             b->has_ws2812 ? " · WS2812 status LED" : "");
+    hw_row(r, "Board", v);
+
+    snprintf(v, sizeof v, "%s rev v%d.%d", model, ci.revision / 100, ci.revision % 100);
+    hw_row(r, "Chip", v);
+
+    snprintf(v, sizeof v, "%d× %s @ %d MHz", ci.cores, cpu, CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ);
+    hw_row(r, "CPU", v);
+
+    snprintf(v, sizeof v, "Wi-Fi%s%s",
+             (ci.features & CHIP_FEATURE_BT)  ? " · BT"  : "",
+             (ci.features & CHIP_FEATURE_BLE) ? " · BLE" : "");
+    hw_row(r, "Radio", v);
+
+    uint32_t flash = 0;
+    if (esp_flash_get_physical_size(NULL, &flash) != ESP_OK) flash = 0;
+    snprintf(v, sizeof v, "%lu MB %s", (unsigned long)(flash >> 20),
+             (ci.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
+    hw_row(r, "Flash", v);
+
+    size_t psram = heap_caps_get_total_size(MALLOC_CAP_SPIRAM);
+    if (psram) snprintf(v, sizeof v, "%u MB", (unsigned)(psram >> 20));
+    else       snprintf(v, sizeof v, "not enabled");
+    hw_row(r, "PSRAM", v);
+
+    uint8_t mac[6] = {0};
+    esp_efuse_mac_get_default(mac);
+    snprintf(v, sizeof v, "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+    hw_row(r, "Base MAC (eFuse)", v);
+
+    // ESP_IDF_VERSION_* macros, not esp_get_idf_version(): the runtime string is
+    // a bare commit hash when the IDF checkout isn't exactly on a release tag.
+    snprintf(v, sizeof v, "v%d.%d.%d", ESP_IDF_VERSION_MAJOR, ESP_IDF_VERSION_MINOR, ESP_IDF_VERSION_PATCH);
+    hw_row(r, "ESP-IDF", v);
+
+    snprintf(v, sizeof v, "%u KB free · %u KB min",
+             (unsigned)(esp_get_free_heap_size() >> 10),
+             (unsigned)(esp_get_minimum_free_heap_size() >> 10));
+    hw_row(r, "Heap (internal)", v);
+
+    int64_t up_s = esp_timer_get_time() / 1000000;
+    const char *rr;
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON:   rr = "power-on";   break;
+        case ESP_RST_SW:        rr = "software";   break;
+        case ESP_RST_PANIC:     rr = "panic";      break;
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT:       rr = "watchdog";   break;
+        case ESP_RST_DEEPSLEEP: rr = "deep-sleep"; break;
+        case ESP_RST_BROWNOUT:  rr = "brownout";   break;
+        case ESP_RST_USB:       rr = "USB";        break;
+        case ESP_RST_JTAG:      rr = "JTAG";       break;
+        default:                rr = "other";      break;
+    }
+    snprintf(v, sizeof v, "%lldd %02lld:%02lld:%02lld · last reset: %s",
+             up_s / 86400, (up_s / 3600) % 24, (up_s / 60) % 60, up_s % 60, rr);
+    hw_row(r, "Uptime", v);
+
+    chunk(r, "</tbody></table></div></div>");
 }
 
 // Never let a browser cache a config/login page — a blank page captured during a
@@ -158,7 +255,8 @@ static const char *CSS =
 ".ctbl tr:hover td{background:rgba(34,211,238,.05)}\n"
 ".rssi{display:inline-block;min-width:42px}\n"
 ".empty{color:var(--mut);font-style:italic;padding:.6rem .5rem}\n"
-"code{background:#070d1a;border:1px solid var(--line);border-radius:5px;padding:.05rem .35rem;font-size:.82em}\n";
+"code{background:#070d1a;border:1px solid var(--line);border-radius:5px;padding:.05rem .35rem;font-size:.82em}\n"
+".hwt td:first-child{font-family:inherit;color:var(--mut);font-size:.68rem;text-transform:uppercase;letter-spacing:.1em;white-space:nowrap;width:1%;padding-right:1.4rem}\n";
 
 static void send_hero(httpd_req_t *r, const char *sub_extra) {
     chunk(r, "<div class='hero'><div><div class='logo'><span style='-webkit-text-fill-color:var(--cy);color:var(--cy)'>AID</span><span style='-webkit-text-fill-color:var(--gr);color:var(--gr)'>link</span></div><div class='sub'>");
@@ -184,7 +282,11 @@ static esp_err_t h_root(httpd_req_t *r) {
     esc_chunk(r, c->dev_name);
     chunk(r, " · <b>"); chunk(r, fw_build()); chunk(r, "</b>");
     if (c->auth_enable && c->auth_hash[0]) chunk(r, " · <a href='/logout' style='color:var(--cy)'>log out</a>");
-    chunk(r, "</div></div><span class='badge'>"); chunk(r, c->ap_ip); chunk(r, "</span></div>");
+    // build number front and center (mirrors the display's splash row); the
+    // badge's margin-left:auto is zeroed inline so margin:0 auto centers this
+    chunkf(r, "</div></div><div style='margin:0 auto;align-self:center;font-family:\"SF Mono\",ui-monospace,monospace;"
+              "font-weight:800;font-size:1.05rem;color:var(--mut);z-index:1'>b%d</div>", FW_BUILDNUM);
+    chunk(r, "<span class='badge' style='margin-left:0'>"); chunk(r, c->ap_ip); chunk(r, "</span></div>");
 
     // status strip (8 tiles)
     chunk(r, "<div class='status' id='st'><div class='s'><div class='k'>Uplink</div><div class='v' id='sta'>…</div></div>"
@@ -197,6 +299,9 @@ static esp_err_t h_root(httpd_req_t *r) {
              "<div class='s'><div class='k'>Firmware</div><div class='v' style='font-size:.8rem' title='version · date & time flashed'>");
     esc_chunk(r, fw_build());
     chunk(r, "</div></div></div>");
+
+    // hardware / ESP32 specs
+    send_hw_card(r);
 
     // clients table
     chunk(r, "<div class='card'><h2>🖧 Connected clients <span id='clic' class='text-muted' style='font-weight:400;font-size:.7rem'></span></h2>"
@@ -240,14 +345,8 @@ static esp_err_t h_root(httpd_req_t *r) {
     ff_tog(r, "Hidden SSID", "apHidden", c->ap_hidden);
     chunk(r, "</div><div class='note'>For lab compatibility testing, set the AP SSID (and Hidden flag) that your EFB client expects.</div></div>");
 
-    // 🆔 Aircraft identity
-    chunk(r, "<div class='card'><h2>🆔 Aircraft identity</h2><div class='grid'>");
-    ff_text(r, "Aircraft tail / registration", "acTail", c->ac_tail, "text", false);
-    ff_text(r, "Aircraft type", "acType", c->ac_type, "text", false);
-    ff_text(r, "Web API version", "apiVer", c->api_ver, "text", false);
-    chunk(r, "</div><div class='note'><code>getAPIVersion</code> → ");
-    esc_chunk(r, c->api_ver);
-    chunk(r, " (AID = 2.0, AID = 3.1). Tail/type are answered over ADBP for params containing TAIL/REG or ACTYPE/MODEL.</div></div>");
+    // (No aircraft-identity card: tail/type are tracked from the live position
+    // feed and the Web API version is fixed in code — AID_API_VERSION.)
 
     // ③ Network / DHCP / AP radio
     chunk(r, "<div class='card'><h2>③ Network · DHCP · AP radio</h2><div class='grid'>");
@@ -488,9 +587,6 @@ static esp_err_t h_save(httpd_req_t *r) {
     if (fld(body, "dsPort", v, sizeof v)) c->ds_port = atoi(v);
     c->napt_enable = fld(body, "napt", v, sizeof v);
     if (fld(body, "devName", v, sizeof v)) strlcpy(c->dev_name, v, sizeof c->dev_name);
-    if (fld(body, "acTail", v, sizeof v)) strlcpy(c->ac_tail, v, sizeof c->ac_tail);
-    if (fld(body, "acType", v, sizeof v)) strlcpy(c->ac_type, v, sizeof c->ac_type);
-    if (fld(body, "apiVer", v, sizeof v)) strlcpy(c->api_ver, v, sizeof c->api_ver);
     c->log_enable = fld(body, "logEnable", v, sizeof v);
     c->auth_enable = fld(body, "authEnable", v, sizeof v);
     if (fld(body, "authUser", v, sizeof v)) strlcpy(c->auth_user, v, sizeof c->auth_user);
@@ -666,7 +762,7 @@ static void api_resp(httpd_req_t *r, const char *cmd, const char *inner) {
     httpd_resp_set_type(r, "text/xml");
     httpd_resp_sendstr(r, buf);
 }
-static esp_err_t h_api_ver(httpd_req_t *r) { char x[80]; snprintf(x,sizeof x,"<APIVersion APIVersion=\"%s\"/>", CFG->api_ver); api_resp(r,"getAPIVersion",x); return ESP_OK; }
+static esp_err_t h_api_ver(httpd_req_t *r) { api_resp(r,"getAPIVersion","<APIVersion APIVersion=\"" AID_API_VERSION "\"/>"); return ESP_OK; }
 static esp_err_t h_api_wifi(httpd_req_t *r) { api_resp(r,"getWiFiAPStatus","<WiFiAP WiFiAPStatus=\"ACTIVE\"/>"); return ESP_OK; }
 static esp_err_t h_api_aoip(httpd_req_t *r) { api_resp(r,"getAoIPStatus","<AoIPStatus AoIPAvailability=\"DISABLED\" ATSUStatus=\"NORMAL\" IpLinkStatus=\"DISCONNECTED\" VPNUsed=\"AoIP-VPN\" AoIPServerFQDN=\"\" AoIPServerIP=\"\"><ListOfAuthorizedChannels/></AoIPStatus>"); return ESP_OK; }
 static esp_err_t h_api_acars(httpd_req_t *r) { api_resp(r,"getAcarsStatus","<AcarsStatus ATSUStatus=\"NORMAL\" AcarsForEFBAvailability=\"DISABLED\" AcarsLinkStatus=\"DISCONNECTED\"/>"); return ESP_OK; }
@@ -680,6 +776,8 @@ static esp_err_t h_api_reboot(httpd_req_t *r) { api_resp(r,"cmdReboot",""); retu
 static void dfu_task(void *arg) {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(500));   // let the HTTP response flush
+    usb_ncm_stop();                   // clean USB detach: rebooting with the host
+    vTaskDelay(pdMS_TO_TICKS(400));   // still attached wedged re-enumeration
     REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
     esp_restart();
 }
