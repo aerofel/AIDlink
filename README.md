@@ -4,6 +4,14 @@
 for bench and interoperability testing.**
 
 <p align="center">
+  <img src="docs/flight-display.png" alt="AIDlink flight display on a LilyGO T-Display-S3" width="760">
+  <br>
+  <sub><i>The onboard flight display (ESP32-S3 T-Display) live in flight-test: tail &amp; flight number,
+  trip-progress bar, route, position &amp; altitude, distance to go, steady ETA, UTC and local time at the
+  aircraft position — plus Wi-Fi / internet / feed status icons.</i></sub>
+</p>
+
+<p align="center">
   <img src="docs/aidlink-dashboard.png" alt="AIDlink on-device web dashboard" width="760">
   <br>
   <sub><i>The built-in web dashboard — live status, connected clients, Wi-Fi scan, and configuration.</i></sub>
@@ -192,6 +200,25 @@ Discovered by testing against a real EFB and reading its integration log. These 
 Other observations: unsupported (NCD) parameters log harmlessly as "not supported"; ground speed should be
 internally consistent with the position motion (AIDlink derives GS from successive fixes and clamps it to a
 sane range, then dead-reckons the pushed position at 1 Hz so it advances smoothly between source updates).
+
+---
+
+## Flight display (ESP32-S3 with LCD)
+
+On boards with a screen (LilyGO **T-Display-S3**, auto-detected by MAC), the ESP-IDF firmware drives a
+320×170 flight display fed entirely by the live position source:
+
+| Row | Shows |
+|-----|-------|
+| **Top** | Tail registration (cyan) · aircraft type · flight number — all live from the feed. Until the first fix arrives, an **AIDlink · build · IP** splash row shows instead. |
+| **Progress** | Trip-completion bar (cyan→green gradient) with the ➤ aircraft marker riding the fill, and percentage — remaining vs. the dep→arr great-circle. |
+| **Route** | Departure ➤ arrival as ICAO codes. |
+| **Data** | Live coordinates (green) · altitude. |
+| **To go** | Distance to destination (NM) · **steady estimated arrival time** (`12:50z`) — made-good-speed based, immune to short-term speed oscillations. |
+| **Bottom** | UTC (magenta) · status icons (Wi-Fi signal bars · internet globe · feed-activity blip) · UTC offset and **local time at the aircraft position** (embedded IANA-derived timezone grid, DST-aware, works fully offline). |
+
+Display-less boards show the equivalent state on the onboard RGB LED (red = no Wi-Fi, orange = scanning
+or no internet, yellow/green = internet with weak/strong signal, magenta blip = location received).
 
 ---
 
