@@ -125,6 +125,12 @@ carried over from eta.c v3: distance-jump guard (>700 kt-equivalent + 25 NM
 slack → full reset, incl. bias), clock-step-back → reset, NCD blip → blank
 display but keep all state, GS < 80 kt → blank.
 
+The engine also outputs **`tod_epoch`** — time at top of descent, i.e. `now +
+remaining_s_to(covered = climb_d + cruise_d)` (the point where
+`dist_to_go = desc_d + 60`). It shares the cruise bias and the same
+EMA + minute-hysteresis conditioning, and is reported as "passed" once
+`covered` enters the descent segment.
+
 ## 6. Display changes (display.c)
 
 - **ETA source dispatch**: legacy `eta_update()` keeps running every refresh
@@ -141,6 +147,12 @@ display but keep all state, GS < 80 kt → blank.
   splash/trip contexts), show the gazetteer row's IATA when non-empty, else
   ICAO (e.g. `NOU→NRT` instead of `NWWW→RJAA`). ADBP/`/status`/logs keep ICAO
   (protocol surfaces, not display).
+- **Top of descent, left of the ETA**: on the bottom line, between the
+  distance (left) and the ETA (center), a `TOD` element — small grey `TOD`
+  label + `HH:MM` amber + grey `z`, mirroring the ETA span styling. Fed by
+  `tod_epoch` (§5.3). Shown only while the profile ETA is active AND TOD is
+  ahead; hidden once past TOD and in legacy mode. The bottom line's span
+  offsets are re-tuned so distance/TOD/ETA/UTC fit 320 px.
 
 ## 7. Edge cases
 
@@ -163,7 +175,9 @@ display but keep all state, GS < 80 kt → blank.
   constant real wind: displayed ETA drifts ≤3 min from first cruise minute to
   end of cruise, final ETA within a few min of simulated arrival; bias ramps
   with `p` and converges when actual GS is 3 % off theory; NCD blip keeps
-  state; destination change resets; winds on/off produce the expected split.
+  state; destination change resets; winds on/off produce the expected split;
+  TOD time is steady through cruise, consistent with `desc_d + 60` NM to go,
+  and flips to "passed" when the flight enters the descent segment.
 - Legacy `test_eta.c` unchanged and still passing.
 
 ## 9. Budget
