@@ -14,6 +14,14 @@ static int idx(const eta_state_t *st, int back) {   // back=0 -> newest sample
     return (st->head - 1 - back + 2 * ETA_N) % ETA_N;
 }
 
+double eta_made_good_kt(const eta_state_t *st) {
+    if (st->count < 2) return -1;
+    int oldest = idx(st, st->count - 1), newest = idx(st, 0);
+    double span = st->ts[newest] - st->ts[oldest];
+    if (span < ETA_MIN_SPAN_S) return -1;
+    return (st->ds[oldest] - st->ds[newest]) / span * 3600.0;
+}
+
 long eta_update(eta_state_t *st, double dist_nm, double gs_inst_kt, double now_s) {
     if (dist_nm < 0 || now_s <= 0) {
         // invalid fix / no clock: blank the display but keep ALL state (ring,

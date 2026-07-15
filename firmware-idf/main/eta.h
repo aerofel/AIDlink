@@ -54,3 +54,9 @@ void eta_reset(eta_state_t *st);
 // are decimated internally. Returns the arrival epoch to DISPLAY in minutes,
 // or 0 when no estimate is available.
 long eta_update(eta_state_t *st, double dist_nm, double gs_inst_kt, double now_s);
+
+// Window made-good ground speed (kt) straight from the sample ring, or -1
+// while the ring spans under ETA_MIN_SPAN_S. This is the oscillation-proof
+// measured speed the theoretical-profile estimator (eta_profile.c) compares
+// against its predicted cruise speed.
+double eta_made_good_kt(const eta_state_t *st);
