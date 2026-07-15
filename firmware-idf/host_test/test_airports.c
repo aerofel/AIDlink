@@ -2,6 +2,7 @@
 // Copyright 2026 AIDlink contributors
 #include <assert.h>
 #include <stdio.h>
+#include <string.h>
 #include <math.h>
 #include "airports.h"
 #include "geo.h"
@@ -34,6 +35,16 @@ int main(void) {
     assert(airports_lookup("PPT", &pla, &plo));
     d = geo_dist_nm(nla, nlo, pla, plo);
     assert(d > 2400 && d < 2700);
+
+    // elevation + IATA accessors (values from the Offto airport DB)
+    int elev = -1;
+    assert(airports_lookup_ex("NWWW", &la, &lo, &elev) && elev == 52);
+    assert(airports_lookup_ex("NRT", NULL, NULL, &elev) && elev == 141);   // by IATA
+    assert(airports_lookup_ex("YMML", NULL, NULL, &elev) && elev == 434);
+    assert(!airports_lookup_ex("ZZZZ", NULL, NULL, &elev));
+    assert(airports_iata("RJAA") && strcmp(airports_iata("RJAA"), "NRT") == 0);
+    assert(airports_iata("nou") && strcmp(airports_iata("nou"), "NOU") == 0);
+    assert(airports_iata("ZZZZ") == NULL);
 
     printf("test_airports: PASS\n");
     return 0;
