@@ -87,7 +87,7 @@ LV_FONT_DECLARE(font_eta);
 #define COL_YELLOW  0xFFEB3B
 #define COL_DIMMED  0x3A3A3A   // unlit signal bars / idle feed icon
 // estimator palette (user-specified)
-#define COL_ETA     0xDFEBEB   // ETA times, UTC + destination-local (+ ◎ icon)
+#define COL_ETA     0xA8D1D1   // ETA times, UTC + destination-local (+ ◎ icon)
 #define COL_DIST    0xFFCBCB   // remaining-distance value
 #define COL_TOD     0xF1F7B5   // top-of-descent icon + time
 #define COL_INET    0x9EA1D4   // cloud icon when the internet is reachable
@@ -316,14 +316,14 @@ static void build_ui(lv_display_t *disp) {
     sp_ro_d  = addspan(sg_route, &lv_font_montserrat_32, COL_WHITE);
     // ETA in the DESTINATION's local timezone, right of the route line in a
     // rounded badge; the small green L marks it as local (vs the z UTC times)
-    sg_leta  = mkspangroup(scr, LV_ALIGN_RIGHT_MID, -6, -18);
+    sg_leta  = mkspangroup(scr, LV_ALIGN_RIGHT_MID, -6, -17);
     lv_obj_set_style_border_width(sg_leta, 1, 0);
     lv_obj_set_style_border_color(sg_leta, lv_color_hex(COL_GREEN), 0);
     lv_obj_set_style_border_opa(sg_leta, LV_OPA_40, 0);
     lv_obj_set_style_radius(sg_leta, 8, 0);
     lv_obj_set_style_pad_hor(sg_leta, 6, 0);
     lv_obj_set_style_pad_ver(sg_leta, 2, 0);
-    sp_leta_t = addspan(sg_leta, &lv_font_montserrat_24, COL_ETA);
+    sp_leta_t = addspan(sg_leta, &lv_font_montserrat_28, COL_ETA);
     sp_leta_l = addspan(sg_leta, &lv_font_montserrat_14, COL_GREEN);
     // remaining distance sits above the UTC readout, mirroring the zone label
     // that sits above the local clock on the right; unit grayed like alt's "ft"
