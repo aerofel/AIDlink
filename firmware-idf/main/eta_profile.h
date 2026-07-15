@@ -38,6 +38,12 @@
 #define ETAP_MAX_JUMP_KT   700.0   // teleport / destination-change guard
 #define ETAP_JUMP_SLACK_NM 25.0    //   (same rationale + values as eta.c)
 
+// cumulative (distance-from-origin, time) breakpoint table — ~1.3 KB, so it
+// lives inside the caller-owned state, NOT on the calling task's stack (the
+// display task runs on a small stack; a stack-local table panicked the S3)
+#define ETAP_MAX_BP 80
+typedef struct { double d[ETAP_MAX_BP], t[ETAP_MAX_BP]; int n; } etap_table_t;
+
 typedef struct {
     double r_ema;                  // cruise bias ratio (1.0 = on-profile)
     bool   r_init;
@@ -45,6 +51,7 @@ typedef struct {
     double eta_s, tod_s;           // smoothed epochs, seconds
     long   shown_eta_min, shown_tod_min;
     double last_now, last_dist;    // jump/clock guards
+    etap_table_t tb;               // per-update scratch (rebuilt every call)
 } etap_state_t;
 
 typedef struct {

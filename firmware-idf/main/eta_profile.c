@@ -8,8 +8,8 @@
 
 #define D2R (M_PI / 180.0)
 #define EARTH_NM 3440.065
-#define MAX_BP 80                  // 4 climb + 2 cruise splits + 24 wind segs
-                                   // + 40 descent steps + 5 approach stages
+// ETAP_MAX_BP capacity: 4 climb + 2 cruise splits + 24 wind segments
+// + 40 descent steps + 5 approach stages (+ margin)
 
 void etap_reset(etap_state_t *st) {
     st->r_ema = 1.0; st->r_init = false;
@@ -60,17 +60,14 @@ static void gc_slerp(double lat1, double lon1, double lat2, double lon2, double 
     *lon = atan2(y, x) / D2R;
 }
 
-// cumulative (distance-from-origin, time) breakpoint table
-typedef struct { double d[MAX_BP], t[MAX_BP]; int n; } table_t;
-
-static void push(table_t *tb, double len_nm, double dur_s) {
-    if (len_nm <= 0 || tb->n >= MAX_BP) return;
+static void push(etap_table_t *tb, double len_nm, double dur_s) {
+    if (len_nm <= 0 || tb->n >= ETAP_MAX_BP) return;
     tb->d[tb->n] = tb->d[tb->n - 1] + len_nm;
     tb->t[tb->n] = tb->t[tb->n - 1] + dur_s;
     tb->n++;
 }
 
-static double interp(const table_t *tb, double x) {
+static double interp(const etap_table_t *tb, double x) {
     if (x <= tb->d[0]) return tb->t[0];
     for (int i = 1; i < tb->n; i++)
         if (x <= tb->d[i]) {
@@ -164,16 +161,18 @@ etap_out_t etap_update(etap_state_t *st, const perf_ac_t *ac,
     double bias = 1.0 + (st->r_ema - 1.0) * p;         // scaled by cruise flown
 
     // ---- breakpoint table (dist-from-origin -> cumulative time) ------------
-    table_t tb = { .d = { 0 }, .t = { 0 }, .n = 1 };
-    push(&tb, d1, t1);
-    push(&tb, d2, t2);
-    push(&tb, d3, t3);
+    // scratch lives in the state struct: too big for a small task stack
+    etap_table_t *tb = &st->tb;
+    tb->d[0] = 0; tb->t[0] = 0; tb->n = 1;
+    push(tb, d1, t1);
+    push(tb, d2, t2);
+    push(tb, d3, t3);
 
     // flown cruise at plain TAS (cancels out of every remaining-time
     // difference — only segments ahead of `covered` shape the output)
     double rem_from = covered > climb_d ? covered : climb_d;
     if (rem_from > tod_d) rem_from = tod_d;
-    push(&tb, rem_from - climb_d, (rem_from - climb_d) / tas * 3600.0);
+    push(tb, rem_from - climb_d, (rem_from - climb_d) / tas * 3600.0);
 
     // remaining cruise, wind-segmented along the pos->arr great circle
     double rem_cruise = tod_d - rem_from;
@@ -195,7 +194,7 @@ etap_out_t etap_update(etap_state_t *st, const perf_ac_t *ac,
                 gs = wind_gs(tas, geo_bearing_deg(mlat, mlon, alat, alon), wdir, wspd);
             }
             gs *= bias;
-            push(&tb, seglen, seglen / gs * 3600.0);
+            push(tb, seglen, seglen / gs * 3600.0);
         }
     }
 
@@ -207,7 +206,7 @@ etap_out_t etap_update(etap_state_t *st, const perf_ac_t *ac,
         double ias = agl > 10000.0 ? 290.0
                    : agl > 4000.0  ? 180.0 + (agl - 4000.0) / 6000.0 * 70.0
                                    : 140.0 + agl / 4000.0 * 40.0;
-        push(&tb, desc_d / 40.0, desc_d / 40.0 / ias_to_tas(ias, alt) * 3600.0);
+        push(tb, desc_d / 40.0, desc_d / 40.0 / ias_to_tas(ias, alt) * 3600.0);
     }
 
     // approach: staged speeds over the last 60 NM, single arrival wind
@@ -224,20 +223,20 @@ etap_out_t etap_update(etap_state_t *st, const perf_ac_t *ac,
     static const double as[5] = { 390, 280, 220, 180, 140 };
     for (int i = 0; i < 5; i++) {
         double sp = winds ? wind_gs(as[i], acrs, awdir, awspd) : as[i];
-        push(&tb, ab[i] - ab[i + 1], (ab[i] - ab[i + 1]) / sp * 3600.0);
+        push(tb, ab[i] - ab[i + 1], (ab[i] - ab[i + 1]) / sp * 3600.0);
     }
 
     // whole-profile floor (Offto parity: never faster than 0.8 x direct)
-    double t_end = tb.t[tb.n - 1];
+    double t_end = tb->t[tb->n - 1];
     double t_floor = 0.8 * tot_nm / tas * 3600.0;
     double scale = (t_end > 0 && t_end < t_floor) ? t_floor / t_end : 1.0;
 
     // ---- outputs ------------------------------------------------------------
-    double at_cov = interp(&tb, covered);
+    double at_cov = interp(tb, covered);
     out.eta_min = condition(now_s + (t_end - at_cov) * scale, dt,
                             &st->eta_s, &st->have_eta, &st->shown_eta_min);
     if (covered < tod_d - 1.0 && cruise_d > 0.5) {
-        out.tod_min = condition(now_s + (interp(&tb, tod_d) - at_cov) * scale, dt,
+        out.tod_min = condition(now_s + (interp(tb, tod_d) - at_cov) * scale, dt,
                                 &st->tod_s, &st->have_tod, &st->shown_tod_min);
     } else {
         st->have_tod = false;                          // TOD passed: hide, stay 0

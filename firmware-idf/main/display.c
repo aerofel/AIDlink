@@ -53,6 +53,8 @@ static const char *TAG = "disp";
 LV_FONT_DECLARE(font_arrow);
 // single-glyph U+1F310 globe font (font_globe.c, generated)
 LV_FONT_DECLARE(font_globe);
+// single-glyph U+2198 top-of-descent icon (font_tod.c, generated)
+LV_FONT_DECLARE(font_tod);
 
 // Bring-up evidence into the /log ring buffer: this board has no serial console
 // (TinyUSB owns the only USB port), so the web /log endpoint is the only way to
@@ -307,15 +309,15 @@ static void build_ui(lv_display_t *disp) {
     sg_nm    = mkspangroup(scr, LV_ALIGN_BOTTOM_LEFT, 8, -34);
     sp_nm_v  = addspan(sg_nm, &lv_font_montserrat_16, COL_AMBER);
     sp_nm_u  = addspan(sg_nm, &lv_font_montserrat_14, COL_GREY);
-    // steady estimated arrival time (UTC) + top-of-descent just left of it,
-    // sharing the distance line (dist | TOD | ETA | zone label at 320 px)
-    sg_eta   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, 48, -34);
-    sp_eta_t = addspan(sg_eta, &lv_font_montserrat_16, COL_AMBER);
-    sp_eta_z = addspan(sg_eta, &lv_font_montserrat_14, COL_GREY);
-    sg_tod   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, -48, -34);
-    sp_tod_l = addspan(sg_tod, &lv_font_montserrat_14, COL_GREY);
+    // top-of-descent (icon + time) and arrival estimate, centered together on
+    // the distance line: dist left | ↘TOD · ETA centered | zone label right
+    sg_tod   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, -44, -34);
+    sp_tod_l = addspan(sg_tod, &font_tod, COL_GREY);           // ↘ icon
     sp_tod_t = addspan(sg_tod, &lv_font_montserrat_16, COL_AMBER);
     sp_tod_z = addspan(sg_tod, &lv_font_montserrat_14, COL_GREY);
+    sg_eta   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, 36, -34);
+    sp_eta_t = addspan(sg_eta, &lv_font_montserrat_16, COL_AMBER);
+    sp_eta_z = addspan(sg_eta, &lv_font_montserrat_14, COL_GREY);
 
     // data line: coordinates full left, altitude full right, same 16pt
     sg_line  = mkspangroup(scr, LV_ALIGN_LEFT_MID, 8, 16);
@@ -564,7 +566,7 @@ static void refresh(void) {
         time_t tt = (time_t)tod_min * 60;
         gmtime_r(&tt, &tm);
         snprintf(buf, sizeof buf, "%02d:%02d", tm.tm_hour, tm.tm_min);
-        lv_span_set_text(sp_tod_l, "TOD ");
+        lv_span_set_text(sp_tod_l, "\xE2\x86\x98");   // U+2198 TOD icon
         lv_span_set_text(sp_tod_t, buf);
         lv_span_set_text(sp_tod_z, "z");
     } else {
@@ -658,7 +660,11 @@ void display_start(const aidlink_cfg_t *cfg) {
     vTaskDelay(pdMS_TO_TICKS(120));
     gpio_set_level(PIN_BL, 1);
 
-    xTaskCreate(display_task, "display", 3072, NULL, 3, NULL);
+    // 4 KB stack: refresh() now walks the theoretical-profile estimator
+    // (deep double math + gmtime/snprintf); 3 KB panicked once the first
+    // valid fix arrived — the profile table itself already lives in the
+    // etap_state_t, NOT on this stack.
+    xTaskCreate(display_task, "display", 4096, NULL, 3, NULL);
     DLOG("display up (320x170, i80 @ %d MHz)", LCD_PCLK_HZ / 1000000);
 }
 
