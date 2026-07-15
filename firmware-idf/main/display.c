@@ -86,6 +86,10 @@ LV_FONT_DECLARE(font_eta);
 #define COL_RED     0xFF3B30
 #define COL_YELLOW  0xFFEB3B
 #define COL_DIMMED  0x3A3A3A   // unlit signal bars / idle feed icon
+// estimator palette (user-specified)
+#define COL_ETA     0xDFEBEB   // ETA times, UTC + destination-local (+ ◎ icon)
+#define COL_DIST    0xFFCBCB   // remaining-distance value
+#define COL_TOD     0xF1F7B5   // top-of-descent icon + time
 // portal palette (web.c CSS vars) for the no-identity splash row
 #define COL_LOGO_CY 0x22D3EE   // --cy: "AID"
 #define COL_LOGO_GR 0x34D399   // --gr: "link"
@@ -304,30 +308,37 @@ static void build_ui(lv_display_t *disp) {
     // route line: 32pt ICAO codes joined by a smaller arrow, centered;
     // remaining distance rides the same line, pinned right (16pt so a 4-digit
     // NM clears the centered route at 320 px).
-    sg_route = mkspangroup(scr, LV_ALIGN_CENTER, 0, -18);
+    // route sits slightly left of center: the local-ETA badge owns the right
+    sg_route = mkspangroup(scr, LV_ALIGN_CENTER, -24, -18);
     sp_ro_o  = addspan(sg_route, &lv_font_montserrat_32, COL_WHITE);
     sp_ro_ar = addspan(sg_route, &font_arrow, COL_WHITE);
     sp_ro_d  = addspan(sg_route, &lv_font_montserrat_32, COL_WHITE);
-    // ETA in the DESTINATION's local timezone, pinned right of the route line;
-    // the small green L marks it as local (vs the z-suffixed UTC times below)
-    sg_leta  = mkspangroup(scr, LV_ALIGN_RIGHT_MID, -8, -18);
-    sp_leta_t = addspan(sg_leta, &lv_font_montserrat_16, COL_AMBER);
+    // ETA in the DESTINATION's local timezone, right of the route line in a
+    // rounded badge; the small green L marks it as local (vs the z UTC times)
+    sg_leta  = mkspangroup(scr, LV_ALIGN_RIGHT_MID, -6, -18);
+    lv_obj_set_style_border_width(sg_leta, 1, 0);
+    lv_obj_set_style_border_color(sg_leta, lv_color_hex(COL_GREEN), 0);
+    lv_obj_set_style_border_opa(sg_leta, LV_OPA_40, 0);
+    lv_obj_set_style_radius(sg_leta, 8, 0);
+    lv_obj_set_style_pad_hor(sg_leta, 6, 0);
+    lv_obj_set_style_pad_ver(sg_leta, 2, 0);
+    sp_leta_t = addspan(sg_leta, &lv_font_montserrat_24, COL_ETA);
     sp_leta_l = addspan(sg_leta, &lv_font_montserrat_14, COL_GREEN);
     // remaining distance sits above the UTC readout, mirroring the zone label
     // that sits above the local clock on the right; unit grayed like alt's "ft"
     sg_nm    = mkspangroup(scr, LV_ALIGN_BOTTOM_LEFT, 8, -34);
-    sp_nm_v  = addspan(sg_nm, &lv_font_montserrat_16, COL_AMBER);
+    sp_nm_v  = addspan(sg_nm, &lv_font_montserrat_16, COL_DIST);
     sp_nm_u  = addspan(sg_nm, &lv_font_montserrat_14, COL_GREY);
     // top-of-descent (icon + time) and arrival estimate share ONE spangroup
     // pinned to the line's center, so the pair is always perfectly centered
     // (and a lone ETA self-centers when TOD is hidden):
     //   dist left | ↘11:42z  12:50z centered | zone label right
     sg_eta   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, 0, -34);
-    sp_tod_l = addspan(sg_eta, &font_tod, COL_GREY);           // ↘ icon
-    sp_tod_t = addspan(sg_eta, &lv_font_montserrat_16, COL_AMBER);
+    sp_tod_l = addspan(sg_eta, &font_tod, COL_TOD);            // ↘ icon
+    sp_tod_t = addspan(sg_eta, &lv_font_montserrat_16, COL_TOD);
     sp_tod_z = addspan(sg_eta, &lv_font_montserrat_14, COL_GREY);   // "z" + gap
-    sp_eta_i = addspan(sg_eta, &font_eta, COL_GREY);           // ◎ icon
-    sp_eta_t = addspan(sg_eta, &lv_font_montserrat_16, COL_AMBER);
+    sp_eta_i = addspan(sg_eta, &font_eta, COL_ETA);            // ◎ icon
+    sp_eta_t = addspan(sg_eta, &lv_font_montserrat_16, COL_ETA);
     sp_eta_z = addspan(sg_eta, &lv_font_montserrat_14, COL_GREY);
 
     // data line: coordinates full left, altitude full right, same 16pt
@@ -588,20 +599,20 @@ static void refresh(void) {
         lv_span_set_text(sp_eta_t, "");
         lv_span_set_text(sp_eta_z, "");
     }
-    // destination-local ETA on the route line (timezone AT the arrival
-    // airport, evaluated at the arrival epoch so DST lands correctly)
-    if (eta_min > 0 && dist_nm >= 0) {
+    // destination-local ETA badge on the route line (timezone AT the arrival
+    // airport, evaluated at the arrival epoch so DST lands correctly); the
+    // whole group hides with the estimate — an empty framed badge would linger
+    bool leta = eta_min > 0 && dist_nm >= 0;
+    vis(sg_leta, leta);
+    if (leta) {
         time_t el = (time_t)eta_min * 60
                   + (time_t)tzdb_offset_min(alat, alon, (uint32_t)(eta_min * 60)) * 60;
         gmtime_r(&el, &tm);
         snprintf(buf, sizeof buf, "%02d:%02d", tm.tm_hour, tm.tm_min);
         lv_span_set_text(sp_leta_t, buf);
         lv_span_set_text(sp_leta_l, "L");
-    } else {
-        lv_span_set_text(sp_leta_t, "");
-        lv_span_set_text(sp_leta_l, "");
+        lv_spangroup_refresh(sg_leta);
     }
-    lv_spangroup_refresh(sg_leta);
     lv_spangroup_refresh(sg_eta);
     if (tod_min > 0) {
         time_t tt = (time_t)tod_min * 60;
