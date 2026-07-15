@@ -404,9 +404,10 @@ static esp_err_t h_root(httpd_req_t *r) {
     }
     chunk(r, "</select></div><div class='f'><label>Aircraft type</label><select id='perfType' name='perfType'><option value=''>— (GS estimator)</option>");
     for (int i = 0; i < perfdb_count(); i++) {
+        // full list as no-JS fallback; perfBuild() rewrites it filtered by make
         const perf_ac_t *a = perfdb_get(i);
-        chunkf(r, "<option value='%s' data-make='%s'%s>%s (%s)</option>", a->type,
-               a->make, perf_cur == a ? " selected" : "", a->model, a->type);
+        chunkf(r, "<option value='%s'%s>%s (%s)</option>", a->type,
+               perf_cur == a ? " selected" : "", a->model, a->type);
     }
     chunk(r, "</select></div>");
     ff_tog(r, "Statistical winds (position)", "windsEn", c->winds_enable);
@@ -465,11 +466,22 @@ static esp_err_t h_root(httpd_req_t *r) {
              "else if(t=='1'){u.value='http://services.inflightpanasonic.aero/inflight/services/flightdata/v1/flightdata';u.disabled=true;}"
              "else{u.disabled=false;if(u.value.indexOf('viasat.com')>=0||u.value.indexOf('inflightpanasonic')>=0)u.value=_customUrl;u.focus();}}"
              "srcSel();"
-             "function perfSel(){var m=document.getElementById('perfMake').value,s=document.getElementById('perfType'),cur=s.value,ok=false;"
-             "for(var i=0;i<s.options.length;i++){var o=s.options[i];var h=!!(m&&o.value&&o.getAttribute('data-make')!=m);o.hidden=h;o.disabled=h;if(!h&&o.value==cur)ok=true;}"
-             "if(!ok)s.value='';}"
-             "(function(){var s=document.getElementById('perfType'),o=s.options[s.selectedIndex];"
-             "var mk=o?o.getAttribute('data-make'):null;if(mk)document.getElementById('perfMake').value=mk;perfSel();})();"
+             );
+    chunk(r, "var _perf=[");
+    for (int i = 0; i < perfdb_count(); i++) {
+        const perf_ac_t *a = perfdb_get(i);
+        chunkf(r, "%s[\"%s\",\"%s\",\"%s\"]", i ? "," : "", a->type, a->make, a->model);
+    }
+    chunkf(r, "];var _perfSel=\"%s\";", perf_cur ? perf_cur->type : "");
+    chunk(r,
+             "function perfBuild(){var m=document.getElementById('perfMake').value,s=document.getElementById('perfType');"
+             "var h=\"<option value=''>\\u2014 (GS estimator)</option>\";"
+             "for(var i=0;i<_perf.length;i++)if(!m||_perf[i][1]==m)h+=\"<option value='\"+_perf[i][0]+\"'>\"+_perf[i][2]+\" (\"+_perf[i][0]+\")</option>\";"
+             "s.innerHTML=h;s.value=_perfSel;if(s.value!=_perfSel){s.value='';_perfSel='';}}"
+             "function perfSel(){perfBuild();}"
+             "(function(){var s=document.getElementById('perfType');s.onchange=function(){_perfSel=this.value;};"
+             "for(var i=0;i<_perf.length;i++)if(_perf[i][0]==_perfSel){document.getElementById('perfMake').value=_perf[i][1];break;}"
+             "perfBuild();})();"
              "async function ul(){try{let r=await fetch('/log');let t=await r.text();var b=document.getElementById('logbox');"
              "if(b){var bot=b.scrollTop+b.clientHeight>=b.scrollHeight-24;b.value=t;if(bot)b.scrollTop=b.scrollHeight;}}catch(e){}}"
              "function copyLog(){var b=document.getElementById('logbox');b.focus();b.select();b.setSelectionRange(0,999999);var d=false;"

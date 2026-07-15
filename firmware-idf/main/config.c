@@ -63,6 +63,9 @@ void cfg_load(aidlink_cfg_t *c) {
     c->perf_type[0] = 0; c->winds_enable = true;
     c->src_type = 0;
     strcpy(c->vs_url, "http://192.168.4.2:8080/flight/info");
+    // emulator preset: en-route BKK->SGN (airway M765-ish), FL360, eastbound
+    c->sim_lat = 12.54; c->sim_lon = 103.11;
+    c->sim_trk = 82; c->sim_gs = 526; c->sim_alt = 36000;
     c->poll_ms = 1000; c->stale_ms = 30000;   // default 1 s poll; 30 s stale —
     // the live cabin Wi-Fi drops fetch bursts >15 s, which NCD-blipped the feed
     c->auth_enable = true; strcpy(c->auth_user, "admin");

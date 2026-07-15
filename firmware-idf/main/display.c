@@ -96,10 +96,10 @@ static lv_obj_t *s_globe, *s_feed;                                // internet + 
 static lv_obj_t *sg_brand, *s_build, *s_ip;                       // no-identity splash row
 static lv_span_t *sp_br_aid, *sp_br_link;                         // AID | link
 static lv_obj_t *s_trip, *s_trip_arrow, *s_trip_pct;              // trip-completion bar
-static lv_obj_t *sg_nm, *sg_eta, *sg_tod;                         // distance + TOD + ETA line
+static lv_obj_t *sg_nm, *sg_eta;                                  // distance + TOD·ETA line
 static lv_span_t *sp_nm_v, *sp_nm_u;                              // 4300 | NM
+static lv_span_t *sp_tod_l, *sp_tod_t, *sp_tod_z;                 // ↘ | 11:42 | z·gap
 static lv_span_t *sp_eta_t, *sp_eta_z;                            // 12:50 | z
-static lv_span_t *sp_tod_l, *sp_tod_t, *sp_tod_z;                 // TOD | 11:42 | z
 static eta_state_t s_eta;                                         // made-good estimator (fallback + ring)
 static etap_state_t s_etap;                                       // theoretical-profile estimator
 static lv_obj_t *sg_flight, *sg_route, *sg_line, *sg_alt, *sg_utc; // multi-color spangroups
@@ -309,13 +309,14 @@ static void build_ui(lv_display_t *disp) {
     sg_nm    = mkspangroup(scr, LV_ALIGN_BOTTOM_LEFT, 8, -34);
     sp_nm_v  = addspan(sg_nm, &lv_font_montserrat_16, COL_AMBER);
     sp_nm_u  = addspan(sg_nm, &lv_font_montserrat_14, COL_GREY);
-    // top-of-descent (icon + time) and arrival estimate, centered together on
-    // the distance line: dist left | ↘TOD · ETA centered | zone label right
-    sg_tod   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, -44, -34);
-    sp_tod_l = addspan(sg_tod, &font_tod, COL_GREY);           // ↘ icon
-    sp_tod_t = addspan(sg_tod, &lv_font_montserrat_16, COL_AMBER);
-    sp_tod_z = addspan(sg_tod, &lv_font_montserrat_14, COL_GREY);
-    sg_eta   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, 36, -34);
+    // top-of-descent (icon + time) and arrival estimate share ONE spangroup
+    // pinned to the line's center, so the pair is always perfectly centered
+    // (and a lone ETA self-centers when TOD is hidden):
+    //   dist left | ↘11:42z  12:50z centered | zone label right
+    sg_eta   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, 0, -34);
+    sp_tod_l = addspan(sg_eta, &font_tod, COL_GREY);           // ↘ icon
+    sp_tod_t = addspan(sg_eta, &lv_font_montserrat_16, COL_AMBER);
+    sp_tod_z = addspan(sg_eta, &lv_font_montserrat_14, COL_GREY);   // "z" + gap
     sp_eta_t = addspan(sg_eta, &lv_font_montserrat_16, COL_AMBER);
     sp_eta_z = addspan(sg_eta, &lv_font_montserrat_14, COL_GREY);
 
@@ -568,13 +569,13 @@ static void refresh(void) {
         snprintf(buf, sizeof buf, "%02d:%02d", tm.tm_hour, tm.tm_min);
         lv_span_set_text(sp_tod_l, "\xE2\x86\x98");   // U+2198 TOD icon
         lv_span_set_text(sp_tod_t, buf);
-        lv_span_set_text(sp_tod_z, "z");
+        lv_span_set_text(sp_tod_z, "z  ");            // trailing gap to the ETA
     } else {
         lv_span_set_text(sp_tod_l, "");
         lv_span_set_text(sp_tod_t, "");
         lv_span_set_text(sp_tod_z, "");
     }
-    lv_spangroup_refresh(sg_tod);
+    lv_spangroup_refresh(sg_eta);
     if (utc && have_off) {
         time_t local = (time_t)(utc / 1000) + (time_t)off_min * 60;
         gmtime_r(&local, &tm);
