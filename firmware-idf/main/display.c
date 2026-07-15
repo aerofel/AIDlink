@@ -251,7 +251,9 @@ static void build_ui(lv_display_t *disp) {
     s_globe = mklabel(scr, &font_cloud, COL_RED, LV_ALIGN_TOP_LEFT, 156, 144);
     lv_label_set_text(s_globe, "\xE2\x98\x81");            // U+2601 cloud
 
-    s_feed = mklabel(scr, &lv_font_montserrat_16, COL_DIMMED, LV_ALIGN_TOP_LEFT, 180, 142);
+    // x chosen so the cloud→feed gap matches the Wi-Fi fan→cloud gap (~11 px;
+    // the cloud glyph is wider than the globe it replaced)
+    s_feed = mklabel(scr, &lv_font_montserrat_16, COL_DIMMED, LV_ALIGN_TOP_LEFT, 186, 142);
     lv_label_set_text(s_feed, LV_SYMBOL_UPLOAD);
 
     // aircraft type (resolved perf-DB code), top-center, avionics yellow
@@ -316,14 +318,17 @@ static void build_ui(lv_display_t *disp) {
     sp_ro_d  = addspan(sg_route, &lv_font_montserrat_32, COL_WHITE);
     // ETA in the DESTINATION's local timezone, right of the route line in a
     // rounded badge; the small green L marks it as local (vs the z UTC times)
-    sg_leta  = mkspangroup(scr, LV_ALIGN_RIGHT_MID, -6, -17);
+    sg_leta  = mkspangroup(scr, LV_ALIGN_RIGHT_MID, -6, -18);
     lv_obj_set_style_border_width(sg_leta, 1, 0);
     lv_obj_set_style_border_color(sg_leta, lv_color_hex(COL_GREEN), 0);
     lv_obj_set_style_border_opa(sg_leta, LV_OPA_40, 0);
     lv_obj_set_style_radius(sg_leta, 8, 0);
     lv_obj_set_style_pad_hor(sg_leta, 6, 0);
-    lv_obj_set_style_pad_ver(sg_leta, 2, 0);
-    sp_leta_t = addspan(sg_leta, &lv_font_montserrat_28, COL_ETA);
+    // digits have no descenders, so the font's descender gap leaves dead space
+    // at the frame bottom — asymmetric padding re-centers the glyphs optically
+    lv_obj_set_style_pad_top(sg_leta, 5, 0);
+    lv_obj_set_style_pad_bottom(sg_leta, 1, 0);
+    sp_leta_t = addspan(sg_leta, &lv_font_montserrat_24, COL_ETA);
     sp_leta_l = addspan(sg_leta, &lv_font_montserrat_14, COL_GREEN);
     // remaining distance sits above the UTC readout, mirroring the zone label
     // that sits above the local clock on the right; unit grayed like alt's "ft"
