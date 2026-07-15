@@ -106,7 +106,7 @@ static lv_obj_t *sg_flight, *sg_route, *sg_line, *sg_alt, *sg_utc; // multi-colo
 static lv_span_t *sp_fl_pre, *sp_fl_num;                      // ACI | 330
 static lv_span_t *sp_ro_o, *sp_ro_ar, *sp_ro_d;               // NWWW | small arrow | NFFN
 static lv_span_t *sp_lat_h, *sp_lat_v, *sp_lon_h, *sp_lon_v;  // N | 22°34.12 | E | 110°10.23
-static lv_span_t *sp_alt_v, *sp_alt_u;                        // 31000 | ft
+static lv_span_t *sp_alt_v, *sp_alt_v2, *sp_alt_u;            // 310 | 00 | ft
 static lv_span_t *sp_utc_t, *sp_utc_z;                        // 13:02:45 | z
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
@@ -327,8 +327,11 @@ static void build_ui(lv_display_t *disp) {
     sp_lon_h = addspan(sg_line, &lv_font_montserrat_16, COL_GREY);
     sp_lon_v = addspan(sg_line, &lv_font_montserrat_16, COL_GREEN);
     sg_alt   = mkspangroup(scr, LV_ALIGN_RIGHT_MID, -8, 16);
-    sp_alt_v = addspan(sg_alt, &lv_font_montserrat_16, COL_WHITE);
-    sp_alt_u = addspan(sg_alt, &lv_font_montserrat_14, COL_GREY);
+    sp_alt_v  = addspan(sg_alt, &lv_font_montserrat_16, COL_WHITE);
+    // tens+units dimmed halfway toward the unit grey: the bright leading
+    // digits read directly as the flight level while the full altitude stays
+    sp_alt_v2 = addspan(sg_alt, &lv_font_montserrat_16, 0xCECECE);
+    sp_alt_u  = addspan(sg_alt, &lv_font_montserrat_14, COL_GREY);
 
     s_tz     = mklabel(scr, &lv_font_montserrat_16, COL_GREY,  LV_ALIGN_BOTTOM_RIGHT, -8, -34);
     s_clock  = mklabel(scr, &lv_font_montserrat_24, COL_WHITE, LV_ALIGN_BOTTOM_RIGHT, -8,  -2);
@@ -450,14 +453,25 @@ static void refresh(void) {
         lv_span_set_text(sp_lon_h, p.lon >= 0 ? " E" : " W");
         snprintf(buf, sizeof buf, "%03d\xC2\xB0%05.2f", (int)av, (av - (int)av) * 60.0);
         lv_span_set_text(sp_lon_v, buf);
-        // altitude rounded to 10 ft — raw feet jitter isn't information
+        // altitude rounded to 10 ft — raw feet jitter isn't information.
+        // Leading digits bright (= the flight level), last two dimmed.
         snprintf(buf, sizeof buf, "%d", (int)(lround(p.alt_ft / 10.0) * 10));
-        lv_span_set_text(sp_alt_v, buf);
+        size_t bl = strlen(buf);
+        if (bl > 2) {
+            char lead[16];
+            memcpy(lead, buf, bl - 2); lead[bl - 2] = 0;
+            lv_span_set_text(sp_alt_v, lead);
+            lv_span_set_text(sp_alt_v2, buf + bl - 2);
+        } else {
+            lv_span_set_text(sp_alt_v, buf);
+            lv_span_set_text(sp_alt_v2, "");
+        }
         lv_span_set_text(sp_alt_u, "ft");
     } else {
         lv_span_set_text(sp_lat_h, ""); lv_span_set_text(sp_lat_v, "");
         lv_span_set_text(sp_lon_h, ""); lv_span_set_text(sp_lon_v, "");
-        lv_span_set_text(sp_alt_v, ""); lv_span_set_text(sp_alt_u, "");
+        lv_span_set_text(sp_alt_v, ""); lv_span_set_text(sp_alt_v2, "");
+        lv_span_set_text(sp_alt_u, "");
     }
     lv_spangroup_refresh(sg_line);
     lv_spangroup_refresh(sg_alt);
