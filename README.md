@@ -210,15 +210,38 @@ On boards with a screen (LilyGO **T-Display-S3**, auto-detected by MAC), the ESP
 
 | Row | Shows |
 |-----|-------|
-| **Top** | Tail registration (cyan) · aircraft type · flight number — all live from the feed. Until the first fix arrives, an **AIDlink · build · IP** splash row shows instead. |
+| **Top** | Tail registration (cyan) · **aircraft type (yellow — the resolved performance-profile code**, never the raw feed string) · flight number. Until the first fix arrives, an **AIDlink · build · IP** splash row shows instead. |
 | **Progress** | Trip-completion bar (cyan→green gradient) with the ➤ aircraft marker riding the fill, and percentage — remaining vs. the dep→arr great-circle. |
-| **Route** | Departure ➤ arrival as ICAO codes. |
+| **Route** | Departure ➤ arrival, **IATA preferred** (`NOU ➤ NRT`), ICAO fallback. |
 | **Data** | Live coordinates (green) · altitude. |
-| **To go** | Distance to destination (NM) · **steady estimated arrival time** (`12:50z`) — made-good-speed based, immune to short-term speed oscillations. |
+| **To go** | Distance to destination (NM) left · centered **↘ top-of-descent time** and **estimated arrival time** (`↘11:42z 12:50z`) — theoretical-profile based (see below), falling back to the made-good-speed estimator when no aircraft profile is selected. |
 | **Bottom** | UTC (magenta) · status icons (Wi-Fi signal bars · internet globe · feed-activity blip) · UTC offset and **local time at the aircraft position** (embedded IANA-derived timezone grid, DST-aware, works fully offline). |
 
 Display-less boards show the equivalent state on the onboard RGB LED (red = no Wi-Fi, orange = scanning
 or no internet, yellow/green = internet with weak/strong signal, magenta blip = location received).
+
+### Theoretical ETA & TOD (FMS-steady)
+
+A naive `now + distance/GS` ETA is undisplayable — and even a windowed made-good estimator can only
+*react*. Like a real FMS, AIDlink instead **predicts the whole remaining flight** from an aircraft
+performance profile and only nudges that prediction with small measured deviations:
+
+- **Aircraft profiles** (30 types) and a **seasonal ERA5 wind climatology** (250 hPa, 5°×60° boxes) are
+  generated at build time from the Offto app's database — read-only, single source of truth
+  (`tools/gen_perfdb.py` → `perfdb_data.c`, ~5 KB flash).
+- **Profile**: 3-segment climb from DB minutes (280/380/Mach·593.7 kt) · cruise at DB TAS with a
+  per-segment wind-triangle over the climatology · descent distance = ceiling/300 NM integrated over the
+  290 → 250 kt @10 000 ft-above-airport → 180 → 140 IAS schedule (airport-elevation aware) · staged
+  approach over the last 60 NM.
+- **The only adaptive term**: measured made-good speed vs. predicted cruise speed, EMA'd (τ 600 s),
+  clamped ±10 %, applied to the remaining cruise **scaled by the fraction of cruise already flown** —
+  zero at top of climb, full (still slight) by end of cruise.
+- Configured in the portal's **✈ ETA — aircraft performance** card (manufacturer → type, statistical-winds
+  switch); a type reported by the position feed **auto-selects** the matching profile. With no profile
+  selected, the plain made-good estimator remains.
+
+Host-simulated result: **0 displayed-minute drift across an entire cruise** under ±25 kt speed
+oscillation, arrival within seconds of truth; the winter Pacific jet correctly costs ~+21 min NOU→NRT.
 
 ---
 

@@ -172,10 +172,14 @@ clang -Imain -I$CJ -o /tmp/t host_test/test_poller_sources.c main/poller_sources
 | `statusled.*` | onboard RGB status LED (boards that have one) |
 | `board.*` | board identity by eFuse MAC → per-board hardware (LED, display) |
 | `display.*` | T-Display-S3 flight display (esp_lcd i80 ST7789 + LVGL) |
-| `airports.*` | embedded IATA/ICAO → lat/lon gazetteer (host-tested) |
+| `airports.*` | embedded IATA/ICAO → lat/lon/elevation gazetteer (host-tested) |
 | `tzdb.*` / `tzdb_data.c` | 1° world timezone grid + offset transitions, generated from IANA data (host-tested; regenerate ~2028) |
 | `derive.*` | GS/track from successive fixes: movement-gated, filtered, wrap-safe (host-tested) |
+| `eta.*` | made-good arrival estimator: 600 s window + EMA + minute hysteresis (host-tested; fallback + ring provider) |
+| `eta_profile.*` | theoretical-profile ETA/TOD: Offto-parity climb/cruise/descent/approach, wind triangle, cruise bias (host-tested) |
+| `perfdb.*` / `perfdb_data.c` | aircraft performance + seasonal 250/300 hPa wind climatology, generated READ-ONLY from the Offto app DB (`tools/gen_perfdb.py`; host-tested) |
 | `font_arrow.c` | generated single-glyph ➤ font for the display route line (`tools/gen_arrow_font.py`) |
+| `font_tod.c` | generated single-glyph ↘ top-of-descent icon (`tools/gen_tod_font.py`) |
 
 ## Relationship to the Arduino sketch
 
