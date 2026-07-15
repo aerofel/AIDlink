@@ -55,6 +55,8 @@ LV_FONT_DECLARE(font_arrow);
 LV_FONT_DECLARE(font_globe);
 // single-glyph U+2198 top-of-descent icon (font_tod.c, generated)
 LV_FONT_DECLARE(font_tod);
+// single-glyph U+25CE ETA bullseye icon (font_eta.c, generated)
+LV_FONT_DECLARE(font_eta);
 
 // Bring-up evidence into the /log ring buffer: this board has no serial console
 // (TinyUSB owns the only USB port), so the web /log endpoint is the only way to
@@ -99,7 +101,9 @@ static lv_obj_t *s_trip, *s_trip_arrow, *s_trip_pct;              // trip-comple
 static lv_obj_t *sg_nm, *sg_eta;                                  // distance + TOD·ETA line
 static lv_span_t *sp_nm_v, *sp_nm_u;                              // 4300 | NM
 static lv_span_t *sp_tod_l, *sp_tod_t, *sp_tod_z;                 // ↘ | 11:42 | z·gap
-static lv_span_t *sp_eta_t, *sp_eta_z;                            // 12:50 | z
+static lv_span_t *sp_eta_i, *sp_eta_t, *sp_eta_z;                 // ◎ | 12:50 | z
+static lv_obj_t *sg_leta;                                         // dest-local ETA
+static lv_span_t *sp_leta_t, *sp_leta_l;                          // 23:50 | L
 static eta_state_t s_eta;                                         // made-good estimator (fallback + ring)
 static etap_state_t s_etap;                                       // theoretical-profile estimator
 static lv_obj_t *sg_flight, *sg_route, *sg_line, *sg_alt, *sg_utc; // multi-color spangroups
@@ -304,6 +308,11 @@ static void build_ui(lv_display_t *disp) {
     sp_ro_o  = addspan(sg_route, &lv_font_montserrat_32, COL_WHITE);
     sp_ro_ar = addspan(sg_route, &font_arrow, COL_WHITE);
     sp_ro_d  = addspan(sg_route, &lv_font_montserrat_32, COL_WHITE);
+    // ETA in the DESTINATION's local timezone, pinned right of the route line;
+    // the small green L marks it as local (vs the z-suffixed UTC times below)
+    sg_leta  = mkspangroup(scr, LV_ALIGN_RIGHT_MID, -8, -18);
+    sp_leta_t = addspan(sg_leta, &lv_font_montserrat_16, COL_AMBER);
+    sp_leta_l = addspan(sg_leta, &lv_font_montserrat_14, COL_GREEN);
     // remaining distance sits above the UTC readout, mirroring the zone label
     // that sits above the local clock on the right; unit grayed like alt's "ft"
     sg_nm    = mkspangroup(scr, LV_ALIGN_BOTTOM_LEFT, 8, -34);
@@ -317,6 +326,7 @@ static void build_ui(lv_display_t *disp) {
     sp_tod_l = addspan(sg_eta, &font_tod, COL_GREY);           // ↘ icon
     sp_tod_t = addspan(sg_eta, &lv_font_montserrat_16, COL_AMBER);
     sp_tod_z = addspan(sg_eta, &lv_font_montserrat_14, COL_GREY);   // "z" + gap
+    sp_eta_i = addspan(sg_eta, &font_eta, COL_GREY);           // ◎ icon
     sp_eta_t = addspan(sg_eta, &lv_font_montserrat_16, COL_AMBER);
     sp_eta_z = addspan(sg_eta, &lv_font_montserrat_14, COL_GREY);
 
@@ -570,12 +580,28 @@ static void refresh(void) {
         time_t et = (time_t)eta_min * 60;
         gmtime_r(&et, &tm);
         snprintf(buf, sizeof buf, "%02d:%02d", tm.tm_hour, tm.tm_min);
+        lv_span_set_text(sp_eta_i, "\xE2\x97\x8E");   // U+25CE arrival bullseye
         lv_span_set_text(sp_eta_t, buf);
         lv_span_set_text(sp_eta_z, "z");
     } else {
+        lv_span_set_text(sp_eta_i, "");
         lv_span_set_text(sp_eta_t, "");
         lv_span_set_text(sp_eta_z, "");
     }
+    // destination-local ETA on the route line (timezone AT the arrival
+    // airport, evaluated at the arrival epoch so DST lands correctly)
+    if (eta_min > 0 && dist_nm >= 0) {
+        time_t el = (time_t)eta_min * 60
+                  + (time_t)tzdb_offset_min(alat, alon, (uint32_t)(eta_min * 60)) * 60;
+        gmtime_r(&el, &tm);
+        snprintf(buf, sizeof buf, "%02d:%02d", tm.tm_hour, tm.tm_min);
+        lv_span_set_text(sp_leta_t, buf);
+        lv_span_set_text(sp_leta_l, "L");
+    } else {
+        lv_span_set_text(sp_leta_t, "");
+        lv_span_set_text(sp_leta_l, "");
+    }
+    lv_spangroup_refresh(sg_leta);
     lv_spangroup_refresh(sg_eta);
     if (tod_min > 0) {
         time_t tt = (time_t)tod_min * 60;

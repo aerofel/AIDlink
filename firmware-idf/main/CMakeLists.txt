@@ -6,7 +6,7 @@ set(srcs "aidlink_main.c" "config.c" "config_util.c"
          "adbp.c" "adbp_frame.c"
          "poller.c" "poller_sources.c" "geo.c" "services.c" "log.c"
          "statusled.c" "board.c" "display.c" "airports.c"
-         "tzdb.c" "tzdb_data.c" "derive.c" "eta.c" "font_arrow.c" "font_globe.c" "font_tod.c"
+         "tzdb.c" "tzdb_data.c" "derive.c" "eta.c" "font_arrow.c" "font_globe.c" "font_tod.c" "font_eta.c"
          "perfdb.c" "perfdb_data.c" "eta_profile.c")
 set(reqs nvs_flash esp_wifi esp_netif esp_event lwip
          esp_http_server esp_http_client esp-tls json

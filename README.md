@@ -212,9 +212,9 @@ On boards with a screen (LilyGO **T-Display-S3**, auto-detected by MAC), the ESP
 |-----|-------|
 | **Top** | Tail registration (cyan) · **aircraft type (yellow — the resolved performance-profile code**, never the raw feed string) · flight number. Until the first fix arrives, an **AIDlink · build · IP** splash row shows instead. |
 | **Progress** | Trip-completion bar (cyan→green gradient) with the ➤ aircraft marker riding the fill, and percentage — remaining vs. the dep→arr great-circle. |
-| **Route** | Departure ➤ arrival, **IATA preferred** (`NOU ➤ NRT`), ICAO fallback. |
-| **Data** | Live coordinates (green) · altitude. |
-| **To go** | Distance to destination (NM) left · centered **↘ top-of-descent time** and **estimated arrival time** (`↘11:42z 12:50z`) — theoretical-profile based (see below), falling back to the made-good-speed estimator when no aircraft profile is selected. |
+| **Route** | Departure ➤ arrival, **IATA preferred** (`NOU ➤ NRT`), ICAO fallback · **ETA in the destination's local time** pinned right (`23:50L`, green `L`), DST-aware via the embedded timezone grid. |
+| **Data** | Live coordinates (green) · altitude with the tens/units dimmed so the **flight level** reads at a glance (`310`&#8202;`00 ft`). |
+| **To go** | Distance to destination (NM) left · centered **↘ top-of-descent** and **◎ estimated arrival** times (`↘11:42z ◎12:50z`) — theoretical-profile based (see below), falling back to the made-good-speed estimator when no aircraft profile is selected. |
 | **Bottom** | UTC (magenta) · status icons (Wi-Fi signal bars · internet globe · feed-activity blip) · UTC offset and **local time at the aircraft position** (embedded IANA-derived timezone grid, DST-aware, works fully offline). |
 
 Display-less boards show the equivalent state on the onboard RGB LED (red = no Wi-Fi, orange = scanning
