@@ -148,6 +148,7 @@ clang -Imain -o /tmp/t host_test/test_airports.c        main/airports.c main/geo
 clang -Imain -o /tmp/t host_test/test_tzdb.c            main/tzdb.c main/tzdb_data.c -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_derive.c          main/derive.c main/geo.c -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_eta.c             main/eta.c        -lm && /tmp/t
+clang -Imain -o /tmp/t host_test/test_perfdb.c          main/perfdb.c main/perfdb_data.c -lm && /tmp/t
 clang -Imain -I$CJ -o /tmp/t host_test/test_poller_sources.c main/poller_sources.c $CJ/cJSON.c -lm && /tmp/t
 ```
 
