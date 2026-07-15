@@ -51,8 +51,8 @@ static const char *TAG = "disp";
 
 // single-glyph U+27A4 arrowhead font (font_arrow.c, generated)
 LV_FONT_DECLARE(font_arrow);
-// single-glyph U+1F310 globe font (font_globe.c, generated)
-LV_FONT_DECLARE(font_globe);
+// single-glyph U+2601 cloud font (font_cloud.c, generated) — internet icon
+LV_FONT_DECLARE(font_cloud);
 // single-glyph U+2198 top-of-descent icon (font_tod.c, generated)
 LV_FONT_DECLARE(font_tod);
 // single-glyph U+25CE ETA bullseye icon (font_eta.c, generated)
@@ -90,6 +90,7 @@ LV_FONT_DECLARE(font_eta);
 #define COL_ETA     0xDFEBEB   // ETA times, UTC + destination-local (+ ◎ icon)
 #define COL_DIST    0xFFCBCB   // remaining-distance value
 #define COL_TOD     0xF1F7B5   // top-of-descent icon + time
+#define COL_INET    0x9EA1D4   // cloud icon when the internet is reachable
 // portal palette (web.c CSS vars) for the no-identity splash row
 #define COL_LOGO_CY 0x22D3EE   // --cy: "AID"
 #define COL_LOGO_GR 0x34D399   // --gr: "link"
@@ -247,8 +248,8 @@ static void build_ui(lv_display_t *disp) {
     lv_obj_set_style_bg_color(s_wifi_dot, lv_color_hex(COL_DIMMED), 0);
     lv_obj_clear_flag(s_wifi_dot, LV_OBJ_FLAG_SCROLLABLE);
 
-    s_globe = mklabel(scr, &font_globe, COL_RED, LV_ALIGN_TOP_LEFT, 157, 144);
-    lv_label_set_text(s_globe, "\xF0\x9F\x8C\x90");        // U+1F310
+    s_globe = mklabel(scr, &font_cloud, COL_RED, LV_ALIGN_TOP_LEFT, 156, 144);
+    lv_label_set_text(s_globe, "\xE2\x98\x81");            // U+2601 cloud
 
     s_feed = mklabel(scr, &lv_font_montserrat_16, COL_DIMMED, LV_ALIGN_TOP_LEFT, 180, 142);
     lv_label_set_text(s_feed, LV_SYMBOL_UPLOAD);
@@ -401,7 +402,7 @@ static void icons_update(void) {
     lv_obj_set_style_bg_color(s_wifi_dot, lv_color_hex(lit), 0);
     lv_obj_set_style_opa(s_wifi_dot, show ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
 
-    lv_obj_set_style_text_color(s_globe, lv_color_hex(netcore_inet_up() ? COL_GREEN : COL_RED), 0);
+    lv_obj_set_style_text_color(s_globe, lv_color_hex(netcore_inet_up() ? COL_INET : COL_RED), 0);
 
     static uint32_t feed_seq, feed_until;
     uint32_t seq = pos_fix_seq();
