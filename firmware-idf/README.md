@@ -153,6 +153,11 @@ clang -Imain -o /tmp/t host_test/test_eta_profile.c     main/eta_profile.c main/
 clang -Imain -I$CJ -o /tmp/t host_test/test_poller_sources.c main/poller_sources.c $CJ/cJSON.c -lm && /tmp/t
 ```
 
+Beyond unit tests, `host_test/replay_eta.c` replays a REAL cached flight
+through the whole ETA pipeline; `../tools/replay_flight.py` is its driver
+(step-by-step comparison against the actual track and touchdown time).
+See `../docs/eta-estimator.md`.
+
 ## Source layout (`main/`)
 
 | File | Responsibility |

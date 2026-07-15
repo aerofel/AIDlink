@@ -20,6 +20,14 @@ const perf_ac_t *perfdb_find(const char *type_or_model) {
     for (int i = 0; i < PERFDB_NAC; i++)
         if (strcasecmp(type_or_model, PERFDB_AC[i].model) == 0)
             return &PERFDB_AC[i];
+    // neo-family ICAO codes the feed may send for which the DB has no exact
+    // row yet: resolve to the nearest ceo profile rather than nothing (a miss
+    // demotes the display to the reactive fallback for the whole flight).
+    // Exact rows above always win — adding a real A21N row retires its alias.
+    static const char *ALIAS[][2] = { { "A19N", "A319" }, { "A21N", "A320" } };
+    for (unsigned i = 0; i < sizeof ALIAS / sizeof ALIAS[0]; i++)
+        if (strcasecmp(type_or_model, ALIAS[i][0]) == 0)
+            return perfdb_find(ALIAS[i][1]);
     return 0;
 }
 

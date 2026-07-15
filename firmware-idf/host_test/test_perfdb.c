@@ -10,8 +10,8 @@
 #include <math.h>
 
 int main(void) {
-    assert(perfdb_count() == 30);
-    assert(perfdb_get(-1) == 0 && perfdb_get(30) == 0 && perfdb_get(0) != 0);
+    assert(perfdb_count() == 31);
+    assert(perfdb_get(-1) == 0 && perfdb_get(31) == 0 && perfdb_get(0) != 0);
 
     // type-code match, case-insensitive
     const perf_ac_t *a = perfdb_find("A339");
@@ -26,6 +26,18 @@ int main(void) {
     assert(perfdb_find("ZZZZ") == 0);
     assert(perfdb_find("") == 0);
     assert(perfdb_find(0) == 0);
+
+    // Aircalin A320neo: real row measured from the 2026-07-14 ACI141 flight
+    // (before it existed, the feed's "A20N" matched nothing and the display
+    // fell back to the reactive estimator for the whole flight)
+    const perf_ac_t *neo = perfdb_find("A20N");
+    assert(neo && neo->cruise_kt == 445 && neo->ceiling_ft == 39000);
+    assert(strcmp(neo->make, "Aircalin") == 0);
+    // other neo family codes alias to the nearest ceo row (defense: exact
+    // rows always win over the alias table)
+    assert(perfdb_find("a19n") == perfdb_find("A319"));
+    assert(perfdb_find("A21N") == perfdb_find("A320"));  // no A321 row: nearest
+    assert(perfdb_find("A339")->cruise_kt == 460);       // aliases shadow nothing
 
     // winter Pacific jet: DJF, band 35..40, sector 120..180 -> u ~ +57 m/s
     double u, v;

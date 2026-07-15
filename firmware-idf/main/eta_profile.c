@@ -78,8 +78,15 @@ static double interp(const etap_table_t *tb, double x) {
     return tb->t[tb->n - 1];
 }
 
-// EMA + minute hysteresis, shared by the arrival and TOD epochs
-static long condition(double raw, double dt, double *sm, bool *have, long *shown) {
+// EMA + minute hysteresis, shared by the arrival and TOD epochs.
+// Two conditioning rules from the 2026-07-15 real-flight replay:
+//  - hysteresis grows with time-to-go (the estimate hours out is model-
+//    limited to tens of minutes; walking every wiggle wastes attention),
+//  - the shown minute CREEPS by 1 toward the smoothed epoch instead of
+//    re-rounding (ETAP_HYST_S > 60 s made every lround change a 2-min jump).
+// Resyncs (first estimate, destination change) still snap directly.
+static long condition(double raw, double dt, double now_s,
+                      double *sm, bool *have, long *shown) {
     if (!*have || fabs(raw - *sm) > ETAP_RESYNC_S) {
         *have = true;
         *sm = raw;
@@ -87,8 +94,12 @@ static long condition(double raw, double dt, double *sm, bool *have, long *shown
     } else {
         double a = 1.0 - exp(-dt / ETAP_OUT_TAU_S);
         *sm += (raw - *sm) * a;
-        if (fabs(*sm - *shown * 60.0) > ETAP_HYST_S)
-            *shown = lround(*sm / 60.0);
+        double hyst = ETAP_HYST_S;
+        double tte_h = (*sm - now_s) / 3600.0;
+        if (tte_h > 1.0) hyst += (tte_h - 1.0) * ETAP_HYST_SLOPE;
+        if (hyst > ETAP_HYST_CAP_S) hyst = ETAP_HYST_CAP_S;
+        if (fabs(*sm - *shown * 60.0) > hyst)
+            *shown += (*sm > *shown * 60.0) ? 1 : -1;
     }
     return *shown;
 }
@@ -233,10 +244,10 @@ etap_out_t etap_update(etap_state_t *st, const perf_ac_t *ac,
 
     // ---- outputs ------------------------------------------------------------
     double at_cov = interp(tb, covered);
-    out.eta_min = condition(now_s + (t_end - at_cov) * scale, dt,
+    out.eta_min = condition(now_s + (t_end - at_cov) * scale, dt, now_s,
                             &st->eta_s, &st->have_eta, &st->shown_eta_min);
     if (covered < tod_d - 1.0 && cruise_d > 0.5) {
-        out.tod_min = condition(now_s + (interp(tb, tod_d) - at_cov) * scale, dt,
+        out.tod_min = condition(now_s + (interp(tb, tod_d) - at_cov) * scale, dt, now_s,
                                 &st->tod_s, &st->have_tod, &st->shown_tod_min);
     } else {
         st->have_tod = false;                          // TOD passed: hide, stay 0

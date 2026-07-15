@@ -20,20 +20,28 @@
 //   approach last 60 NM staged 390/280/220/180/140 kt
 //
 // The ONLY adaptive term is a cruise bias: measured made-good speed vs the
-// predicted cruise speed, EMA'd (τ 600 s), clamped ±10 %, and applied to the
-// remaining cruise scaled by the fraction of cruise already flown — zero
-// correction at top of climb, full (still slight) by end of cruise.
+// predicted cruise speed, EMA'd (τ 45 min — real-flight replay showed the
+// original 10 min chased wind gusts and tripled the displayed churn),
+// clamped ±10 %, and applied to the remaining cruise scaled by the fraction
+// of cruise already flown — zero correction at top of climb, full (still
+// slight) by end of cruise. The p-scaling is LEVERAGE control, not just
+// confidence: replacing it with an observation-time ramp extrapolated local
+// deviations over hours of remaining cruise and doubled the error span
+// (tested and rejected, see docs/superpowers/specs/
+// 2026-07-15-eta-stability-replay.md).
 #pragma once
 #include <stdbool.h>
 #include "perfdb.h"
 
 #define ETAP_MIN_GS_KT     80.0    // below this (taxi) no estimate
 #define ETAP_APPROACH_NM   60.0    // staged-approach reserve (Offto parity)
-#define ETAP_BIAS_TAU_S    600.0   // cruise bias EMA time constant
+#define ETAP_BIAS_TAU_S    2700.0  // cruise bias EMA: route-average, not gusts
 #define ETAP_BIAS_MIN      0.90    // bias ratio clamp — "very slight" by design
 #define ETAP_BIAS_MAX      1.10
 #define ETAP_OUT_TAU_S     60.0    // output EMA on the arrival/TOD epochs
-#define ETAP_HYST_S        90.0    // displayed-minute hysteresis
+#define ETAP_HYST_S        90.0    // displayed-minute hysteresis at <=1 h to go
+#define ETAP_HYST_SLOPE    60.0    //   +s per hour-to-go beyond 1 h: a minute
+#define ETAP_HYST_CAP_S    420.0   //   flip 8 h out carries no information
 #define ETAP_RESYNC_S      1800.0  // raw vs smoothed gap forcing a resync
 #define ETAP_MAX_JUMP_KT   700.0   // teleport / destination-change guard
 #define ETAP_JUMP_SLACK_NM 25.0    //   (same rationale + values as eta.c)

@@ -3,10 +3,10 @@
 //
 // GENERATED FILE — do not edit. Regenerate with tools/gen_perfdb.py
 // Source: /Users/looping/Sites/Swift/Offto/Resources/offto.sqlite (read-only)
-// Generated: 2026-07-15 — 30 aircraft, 4x37x6 wind boxes @250+300 hPa
+// Generated: 2026-07-15 — 31 aircraft, 4x37x6 wind boxes @250+300 hPa
 #include "perfdb.h"
 
-const int PERFDB_NAC = 30;
+const int PERFDB_NAC = 31;
 const perf_ac_t PERFDB_AC[] = {
     { "Airbus", "A318 Elite", "A318", 430, 7.0f, 9.0f, 21.0f, 0.82f, 41000 },
     { "Airbus", "A319 Corporate Jet", "A319", 440, 8.0f, 9.0f, 21.0f, 0.82f, 41000 },
@@ -16,6 +16,7 @@ const perf_ac_t PERFDB_AC[] = {
     { "Airbus", "A340-300", "A343", 470, 8.0f, 9.0f, 21.0f, 0.82f, 41000 },
     { "Airbus", "A350-900", "A359", 470, 6.4f, 9.0f, 24.0f, 0.84f, 43000 },
     { "Airbus", "A380-800", "A380", 470, 7.0f, 10.0f, 24.0f, 0.83f, 43000 },
+    { "Aircalin", "A320neo", "A20N", 445, 7.5f, 4.8f, 13.0f, 0.78f, 39000 },
     { "Aircalin", "A330-900", "A339", 460, 6.5f, 9.0f, 25.0f, 0.82f, 41000 },
     { "Boeing", "B787-8 Dreamliner", "B788", 488, 6.4f, 9.0f, 24.0f, 0.84f, 43000 },
     { "Boeing", "BBJ1", "B737", 450, 7.0f, 9.0f, 21.0f, 0.82f, 41000 },

@@ -1,5 +1,59 @@
 # AIDlink — Learning Journal
 
+## 2026-07-15 — ETA corrections shipped: τ2700, 1-min creep, far-out hyst, A20N row
+
+- **Implemented + host-tested** (all 12 tests green, TDD): `ETAP_BIAS_TAU_S`
+  600→2700; `condition()` hysteresis +60 s/h-to-go beyond 1 h (cap 420 s)
+  and shown-minute creeps ±1 instead of `lround` (the 90 s hyst made every
+  change a 2-min jump). Replay before→after: flips 10→3, span 31.8→25.6 min,
+  cumulative displayed movement 108→49 min, landing accuracy unchanged.
+- **A20N added to the Offto DB itself** (user call: real row, not an alias):
+  measured from 2026-07-14 ACI141 — cruise 445 kt (GS 486 − climatology
+  tailwind, corrected for that route's measured climatology bias), climb
+  7.5/4.8/13.0 min, M0.78, ceiling 39000. `sqlite3` INSERT into `airplanes`
+  (dynamic typing stores 7.5 in the "integer" climb column fine — A339 row
+  already does), backup at `~/Sites/Swift/Offto/offto.sqlite.backup-20260715`,
+  picture blobs left NULL (Offto UI will show no image until one is added).
+  Regen `tools/gen_perfdb.py` → 31 aircraft. A20N flight: 173 changes/295-min
+  span → 12/6. `perfdb_find()` now also aliases A19N→A319, A21N→A320.
+- **τ change moved a test spec**: with τ2700 the bias has deliberately NOT
+  converged 20 min into cruise (r≈1.00 — also the seed is contaminated
+  high by climb-Mach samples still in the made-good window at cruise entry);
+  test now samples r at +40 min. Docs: `docs/eta-estimator.md`.
+
+## 2026-07-15 — ETA replay on 12 real flights: NOT stable; bias EMA + drift diagnosed
+
+- **Replay harness** (`host_test/replay_eta.c` + `tools/extract_track.py`)
+  runs the cached AeroAPI flights (`~/.cache/onboard-ip-mock/`) through the
+  exact firmware pipeline in virtual time. Verdict on 11 A339 long-hauls:
+  26–95 displayed changes/flight, ±20–44 min mid-flight envelope, final
+  error −2…+1 min. The synthetic host test's "0 drift" was true but its
+  simulated speeds matched the model by construction — real winds don't.
+- **The ±10 % cruise bias (τ 600 s) *adds* instability on real flights**:
+  freezing it cuts changes 3×; r_ema saturates a clamp 4–18 % of the flight.
+  Validated fix: τ→2700 s + far-out hysteresis (+60 s/h beyond 1 h-to-go,
+  cap 420 s) + creep shown minute ±1 (never `lround` — stock hyst 90 s > 60 s
+  means every change is a 2-min jump). Result: flips 10→3, span 31.8→25.6 min.
+- **Two traps tested and rejected**: confidence-ramp bias weight (local
+  deviation ≠ remaining-route deviation → span ×2–3; the stock p-scaling is
+  *leverage control*, keep it) and cumulative route-stretch (route excess is
+  front-loaded → overestimates remaining, span up to 93 min).
+- **A20N is missing from perfdb** — Aircalin A320neo flights fall back to the
+  reactive estimator (173 changes, 295-min span on 2.4 h; with A320 profile:
+  6 changes, 6-min span). Alias neo types or regen from Offto DB.
+- **A339 error budget** (reciprocal-pair TAS + wind_probe + oracle replay):
+  perf DB cruise 460 kt vs real ~498 (BKK/NOU) / ~465 (CDG) — route-dependent,
+  one constant can't fit both; climatology wind error −21…+22 kt with
+  day-to-day sign flips (±3–30 min, not correctable offline); CDG legs are
+  dominated by +300 NM route-vs-GC geometry (even oracle winds leave 38–46 min
+  span). Errors CANCEL pairwise (slow TAS masked headwinds; wind error masks
+  geometry) — never tune one parameter judged on one flight; use
+  `tools/replay_flight.py` over the whole cached set.
+- Full analysis + correction plan:
+  `docs/superpowers/specs/2026-07-15-eta-stability-replay.md`.
+- Gotcha: zsh does NOT word-split unquoted `$var` — `set -- $f` and
+  `clang $FLAGS` silently pass one giant arg; use `${=var}`.
+
 ## 2026-07-15 — ETA v4: theoretical profile (FMS-steady) + TOD, perfdb from Offto
 
 - **Design shift:** the made-good estimator can only react; the FMS is steady

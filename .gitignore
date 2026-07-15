@@ -1,5 +1,7 @@
 # build artifacts
 build/
+build-host/
+__pycache__/
 *.bin
 *.elf
 *.map

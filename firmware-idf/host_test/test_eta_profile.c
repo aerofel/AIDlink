@@ -77,6 +77,8 @@ static void slerp(double f, double *lat, double *lon) {   // dep->arr
     *lon = atan2(y, x) * 180 / M_PI;
 }
 
+static long g_max_step;          // largest displayed-ETA jump seen in a fly()
+
 // full simulated flight; ratio scales the true speed vs the model (0.96 = a
 // slow day), wiggle_kt adds a slow multiplicative oscillation in cruise
 static void fly(const perf_ac_t *ac, bool winds, double ratio, double wiggle_amp,
@@ -98,8 +100,9 @@ static void fly(const perf_ac_t *ac, bool winds, double ratio, double wiggle_amp
     double t_true = expected_total_s(ac, tot, AELEV) / ratio;
 
     double covered = 0, t = 0;
-    long eta_min_lo = 0, eta_min_hi = 0, tod_lo = 0, tod_hi = 0;
+    long eta_min_lo = 0, eta_min_hi = 0, tod_lo = 0, tod_hi = 0, eta_prev = 0;
     double first_show = -1;
+    g_max_step = 0;
     *tod_after_pass = 0; *r_after_20min = -1;
     *err_q1 = -1; *err_q3 = -1; *final_err_s = -1;
     double cruise_t_enter = -1;
@@ -119,6 +122,9 @@ static void fly(const perf_ac_t *ac, bool winds, double ratio, double wiggle_amp
                                    gs_true, eta_made_good_kt(&ring),
                                    t0 + t, 1, winds);
         if (o.eta_min && first_show < 0) first_show = t;
+        if (o.eta_min && eta_prev && labs(o.eta_min - eta_prev) > g_max_step)
+            g_max_step = labs(o.eta_min - eta_prev);
+        if (o.eta_min) eta_prev = o.eta_min;
         if (covered > climb_d && cruise_t_enter < 0) cruise_t_enter = t;
         // steadiness window: 15 min after entering cruise .. TOD
         if (cruise_t_enter > 0 && t > cruise_t_enter + 900 && covered < tod_d && o.eta_min) {
@@ -130,7 +136,9 @@ static void fly(const perf_ac_t *ac, bool winds, double ratio, double wiggle_amp
             if (o.tod_min > tod_hi) tod_hi = o.tod_min;
         }
         if (covered > tod_d + 5 && o.tod_min) (*tod_after_pass)++;
-        if (cruise_t_enter > 0 && *r_after_20min < 0 && t > cruise_t_enter + 1200)
+        // τ 2700 s: 40 min into cruise the bias has learned the trend but is
+        // deliberately far from converged (τ 600 chased gusts — 2026-07-15)
+        if (cruise_t_enter > 0 && *r_after_20min < 0 && t > cruise_t_enter + 2400)
             *r_after_20min = st.r_ema;
         double pc = cruise_d > 0 ? (covered - climb_d) / cruise_d : 0;
         if (*err_q1 < 0 && pc >= 0.25 && o.eta_min)
@@ -197,11 +205,40 @@ int main(void) {
 
     // --- bias: a 4 %-slow day; correction ramps with cruise fraction ---
     fly(ac, false, 0.96, 0.0, &ferr, &crange, &trange, &tod_late, &eq1, &eq3, &r20);
-    printf("  bias:   r(+20min)=%.3f err@25%%=%.0fs err@75%%=%.0fs final=%.0fs\n",
-           r20, eq1, eq3, ferr);
+    printf("  bias:   r(+40min)=%.3f err@25%%=%.0fs err@75%%=%.0fs final=%.0fs max_step=%ld\n",
+           r20, eq1, eq3, ferr, g_max_step);
     assert(r20 > 0 && r20 < 0.99);                       // learned we're slow
     assert(eq3 <= eq1 + 30.0);                           // error shrinks with p
     assert(ferr >= 0 && ferr <= 300.0);
+    // display creeps one minute at a time even while the estimate drifts
+    // (the old 90 s hysteresis + lround re-round made every change a 2-min
+    // jump; replay of 11 real flights, 2026-07-15)
+    assert(g_max_step <= 1);
+
+    // --- far-out hysteresis: a ~3 min estimate shift hours before landing
+    // must NOT move the display (hysteresis grows with time-to-go) ---
+    {
+        eta_state_t r2; eta_reset(&r2);
+        etap_state_t s2; etap_reset(&s2);
+        double cov = tot * 0.45, tt = 0;                 // mid-cruise, ~4.5 h to go
+        etap_out_t oo = { 0, 0 };
+        for (int i = 0; i < 400; i++) {                  // settle
+            cov += 460.0 * 5 / 3600; tt += 5;
+            double la, lo; slerp(cov / tot, &la, &lo);
+            oo = etap_update(&s2, ac, la, lo, ALAT, ALON, AELEV, tot, tot - cov,
+                             460, -1, t0 + tt, 1, false);
+        }
+        long settled = oo.eta_min;
+        assert(settled > 0);
+        cov -= 24.0;                                     // fall 24 NM behind plan
+        for (int i = 0; i < 720; i++) {                  // (+~3 min raw, 1 h hold)
+            cov += 460.0 * 5 / 3600; tt += 5;
+            double la, lo; slerp(cov / tot, &la, &lo);
+            oo = etap_update(&s2, ac, la, lo, ALAT, ALON, AELEV, tot, tot - cov,
+                             460, -1, t0 + tt, 1, false);
+            assert(oo.eta_min == settled);               // display holds steady
+        }
+    }
 
     // --- NCD blip keeps state; teleport resets ---
     eta_state_t ring; eta_reset(&ring);
