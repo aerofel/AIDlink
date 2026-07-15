@@ -1,5 +1,41 @@
 # AIDlink — Learning Journal
 
+## 2026-07-15 — ETA v4: theoretical profile (FMS-steady) + TOD, perfdb from Offto
+
+- **Design shift:** the made-good estimator can only react; the FMS is steady
+  because it *predicts* the whole remaining flight and only nudges the
+  prediction. `eta_profile.c` ports Offto's profile (climb 280/380/M·593.7 kt
+  with DB minutes, cruise TAS + seasonal ERA5 250 hPa winds via the wind
+  triangle per 5°×60° box, descent = ceiling/300 NM integrated over the
+  290/250@10k-AGL/180/140 IAS schedule with airport elevation, staged 60 NM
+  approach, 0.8× floor). Only adaptive term: made-good vs predicted cruise GS,
+  EMA τ600 s, clamped ±10 %, weighted by fraction of cruise flown. Host sim:
+  **0 displayed-minute drift across a whole cruise** under ±25 kt oscillation,
+  final error 26 s; the winter Pacific jet costs +21 min NOU→NRT (sign-checked).
+- **Single DB, two projects:** `tools/gen_perfdb.py` reads the Offto app's
+  SQLite **read-only** (`file:…?mode=ro`, canonical:
+  `~/Sites/Swift/Offto/Resources/offto.sqlite` — the root-level copy is a
+  0-byte stub) and emits committed `perfdb_data.c` (30 aircraft + int8 wind
+  grids, ~5 KB). Regenerate manually when Offto's DB changes. Python float
+  formatting gotcha: `f"{7.0:g}f"` yields `7f` which is NOT a C literal —
+  guarantee a decimal point.
+- **Feed pre-select:** poller's `apply_fix` matches the feed's type string
+  against perfdb (exact type, then model, case-insensitive) and persists
+  `perf_type` (NVS, unlike RAM-only identity). Viasat `aircraftType` lands in
+  `char[8]` — "A330-900" would truncate to 7 chars and match nothing; type
+  codes ("A339") are what work. Display shows the resolved DB code (yellow,
+  line-1 center), never the feed string; route line prefers IATA (`NOU➤NRT`).
+- **`sdkconfig` drift:** the default build dir had silently become a classic
+  esp32 config (no Montserrat fonts, wrong target) — regenerated the S3 config
+  from `sdkconfig.defaults*` (which carry everything: fonts, TLS-insecure,
+  NCM). Check `CONFIG_IDF_TARGET` in `sdkconfig` before flashing.
+- **Soft-reboot after a /dfu-flash cycle can wedge USB:** flash via /dfu +
+  autoflash booted the app cleanly (portal answered), but the very next
+  `/save` reboot (`esp_restart`) left macOS with a stale NCM interface, no
+  downloader port, AP still beaconing — the app runs, only USB enumeration is
+  dead. Recovery: replug or one RST tap. Ritual amended: after a /dfu-flash,
+  **tap RST once before doing anything that soft-reboots** (like /save).
+
 ## 2026-07-09 — ETA v3: immediate appearance, blends into steadiness
 
 - The 240 s blank warm-up bothered in practice. `eta_update()` now takes the
