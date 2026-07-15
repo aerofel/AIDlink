@@ -47,6 +47,10 @@ typedef struct {
     // every boot (never loaded from or saved to NVS, never user-set): the feed
     // is the single source of truth and a reboot deliberately forgets it.
     char    ac_tail[12], ac_type[8];
+    // --- theoretical-ETA performance profile (persisted, unlike identity:
+    //     the selection must survive a reboot mid-flight) ---
+    char    perf_type[8];      // perfdb ICAO type code ("" = plain GS estimator)
+    bool    winds_enable;      // statistical winds aloft in the profile
     // --- position source ---
     int      src_type;         // 0=Viasat, 1=Panasonic, 2=custom
     char     vs_url[128];      // custom/test source URL

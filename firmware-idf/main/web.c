@@ -11,6 +11,7 @@
 #include "pos.h"
 #include "poller.h"
 #include "airports.h"
+#include "perfdb.h"
 #include "log.h"
 #include "usb_ncm.h"
 #include "board.h"
@@ -391,6 +392,26 @@ static esp_err_t h_root(httpd_req_t *r) {
     ff_num(r, "Altitude (ft)", "simAlt", c->sim_alt, "any");
     chunk(r, "</div><div class='note'>When <b>enabled</b>, the source feed (the source) is <b>discarded</b> and the EFBs receive a <b>fixed</b> position at the lat/lon above — it does not move. GS/track/alt are sent as set (for display). Uncheck to use the live Source URL.</div></div>");
 
+    // ✈ ETA / performance profile
+    chunk(r, "<div class='card'><h2>✈ ETA — aircraft performance</h2><div class='grid'>");
+    const perf_ac_t *perf_cur = perfdb_find(c->perf_type);
+    chunk(r, "<div class='f'><label>Manufacturer</label><select id='perfMake' onchange='perfSel()'><option value=''>—</option>");
+    for (int i = 0; i < perfdb_count(); i++) {
+        const perf_ac_t *a = perfdb_get(i);
+        if (i && strcmp(a->make, perfdb_get(i - 1)->make) == 0) continue;   // rows are make-sorted
+        chunkf(r, "<option value='%s'%s>%s</option>", a->make,
+               perf_cur && strcmp(perf_cur->make, a->make) == 0 ? " selected" : "", a->make);
+    }
+    chunk(r, "</select></div><div class='f'><label>Aircraft type</label><select id='perfType' name='perfType'><option value=''>— (GS estimator)</option>");
+    for (int i = 0; i < perfdb_count(); i++) {
+        const perf_ac_t *a = perfdb_get(i);
+        chunkf(r, "<option value='%s' data-make='%s'%s>%s (%s)</option>", a->type,
+               a->make, perf_cur == a ? " selected" : "", a->model, a->type);
+    }
+    chunk(r, "</select></div>");
+    ff_tog(r, "Statistical winds (position)", "windsEn", c->winds_enable);
+    chunk(r, "</div><div class='note'>Theoretical ETA + TOD from the selected profile (climb/cruise/descent + seasonal winds aloft, Offto data). The live feed <b>auto-selects</b> a matching type when it reports one. Choose <b>—</b> to keep the plain ground-speed estimator.</div></div>");
+
     // 🔒 Security
     chunk(r, "<div class='card'><h2>🔒 Security (settings login)</h2><div class='grid'>");
     ff_tog(r, "Require login", "authEnable", c->auth_enable);
@@ -444,6 +465,11 @@ static esp_err_t h_root(httpd_req_t *r) {
              "else if(t=='1'){u.value='http://services.inflightpanasonic.aero/inflight/services/flightdata/v1/flightdata';u.disabled=true;}"
              "else{u.disabled=false;if(u.value.indexOf('viasat.com')>=0||u.value.indexOf('inflightpanasonic')>=0)u.value=_customUrl;u.focus();}}"
              "srcSel();"
+             "function perfSel(){var m=document.getElementById('perfMake').value,s=document.getElementById('perfType'),cur=s.value,ok=false;"
+             "for(var i=0;i<s.options.length;i++){var o=s.options[i];var h=!!(m&&o.value&&o.getAttribute('data-make')!=m);o.hidden=h;o.disabled=h;if(!h&&o.value==cur)ok=true;}"
+             "if(!ok)s.value='';}"
+             "(function(){var s=document.getElementById('perfType'),o=s.options[s.selectedIndex];"
+             "var mk=o?o.getAttribute('data-make'):null;if(mk)document.getElementById('perfMake').value=mk;perfSel();})();"
              "async function ul(){try{let r=await fetch('/log');let t=await r.text();var b=document.getElementById('logbox');"
              "if(b){var bot=b.scrollTop+b.clientHeight>=b.scrollHeight-24;b.value=t;if(bot)b.scrollTop=b.scrollHeight;}}catch(e){}}"
              "function copyLog(){var b=document.getElementById('logbox');b.focus();b.select();b.setSelectionRange(0,999999);var d=false;"
@@ -583,6 +609,11 @@ static esp_err_t h_save(httpd_req_t *r) {
     if (fld(body, "simTrk", v, sizeof v)) c->sim_trk = atof(v);
     if (fld(body, "simGs", v, sizeof v)) c->sim_gs = atof(v);
     if (fld(body, "simAlt", v, sizeof v)) c->sim_alt = atof(v);
+    if (fld(body, "perfType", v, sizeof v)) {           // "" clears the profile
+        strlcpy(c->perf_type, v, sizeof c->perf_type);
+        if (c->perf_type[0] && !perfdb_find(c->perf_type)) c->perf_type[0] = 0;
+    }
+    c->winds_enable = fld(body, "windsEn", v, sizeof v);
     if (fld(body, "adbpPort", v, sizeof v)) c->adbp_port = atoi(v);
     if (fld(body, "dsPort", v, sizeof v)) c->ds_port = atoi(v);
     c->napt_enable = fld(body, "napt", v, sizeof v);

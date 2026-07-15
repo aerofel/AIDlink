@@ -8,6 +8,7 @@
 #include "pos.h"
 #include "geo.h"
 #include "derive.h"
+#include "perfdb.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -70,6 +71,20 @@ static void apply_fix(double lat, double lon, double alt, double gs, double trac
     if (!sim && actype && actype[0] && strcmp(actype, CFG->ac_type) != 0) {
         ESP_LOGI(TAG, "aircraft type: %s -> %s (from live data)", CFG->ac_type, actype);
         strlcpy(CFG->ac_type, actype, sizeof CFG->ac_type);
+    }
+    // The feed's type string also pre-selects the theoretical-ETA performance
+    // profile — exact DB match only (type code, then model name), so junk
+    // selects nothing. Persisted (unlike identity): the profile choice must
+    // survive a reboot mid-flight. The display shows the DB code, never the
+    // feed string.
+    if (!sim && actype && actype[0]) {
+        const perf_ac_t *pa = perfdb_find(actype);
+        if (pa && strcmp(pa->type, CFG->perf_type) != 0) {
+            ESP_LOGI(TAG, "perf profile: '%s' -> %s (feed type '%s')",
+                     CFG->perf_type, pa->type, actype);
+            strlcpy(CFG->perf_type, pa->type, sizeof CFG->perf_type);
+            cfg_save(CFG);
+        }
     }
 }
 
