@@ -43,6 +43,8 @@
 #include "log.h"
 #include "buildnum.h"
 #include "eta.h"
+#include "eta_profile.h"
+#include "perfdb.h"
 #include "esp_heap_caps.h"
 
 static const char *TAG = "disp";
@@ -92,10 +94,12 @@ static lv_obj_t *s_globe, *s_feed;                                // internet + 
 static lv_obj_t *sg_brand, *s_build, *s_ip;                       // no-identity splash row
 static lv_span_t *sp_br_aid, *sp_br_link;                         // AID | link
 static lv_obj_t *s_trip, *s_trip_arrow, *s_trip_pct;              // trip-completion bar
-static lv_obj_t *sg_nm, *sg_eta;                                  // distance + steady ETA line
+static lv_obj_t *sg_nm, *sg_eta, *sg_tod;                         // distance + TOD + ETA line
 static lv_span_t *sp_nm_v, *sp_nm_u;                              // 4300 | NM
 static lv_span_t *sp_eta_t, *sp_eta_z;                            // 12:50 | z
-static eta_state_t s_eta;                                         // steady-ETA estimator state
+static lv_span_t *sp_tod_l, *sp_tod_t, *sp_tod_z;                 // TOD | 11:42 | z
+static eta_state_t s_eta;                                         // made-good estimator (fallback + ring)
+static etap_state_t s_etap;                                       // theoretical-profile estimator
 static lv_obj_t *sg_flight, *sg_route, *sg_line, *sg_alt, *sg_utc; // multi-color spangroups
 static lv_span_t *sp_fl_pre, *sp_fl_num;                      // ACI | 330
 static lv_span_t *sp_ro_o, *sp_ro_ar, *sp_ro_d;               // NWWW | small arrow | NFFN
@@ -239,8 +243,8 @@ static void build_ui(lv_display_t *disp) {
     s_feed = mklabel(scr, &lv_font_montserrat_16, COL_DIMMED, LV_ALIGN_TOP_LEFT, 180, 142);
     lv_label_set_text(s_feed, LV_SYMBOL_UPLOAD);
 
-    // aircraft type, top-center
-    s_actype = mklabel(scr, &lv_font_montserrat_20, COL_WHITE, LV_ALIGN_TOP_MID,       0,   6);
+    // aircraft type (resolved perf-DB code), top-center, avionics yellow
+    s_actype = mklabel(scr, &lv_font_montserrat_20, COL_YELLOW, LV_ALIGN_TOP_MID,      0,   6);
 
     // flight number: airline prefix grayed, number+suffix white
     sg_flight = mkspangroup(scr, LV_ALIGN_TOP_RIGHT, -8, 6);
@@ -303,10 +307,15 @@ static void build_ui(lv_display_t *disp) {
     sg_nm    = mkspangroup(scr, LV_ALIGN_BOTTOM_LEFT, 8, -34);
     sp_nm_v  = addspan(sg_nm, &lv_font_montserrat_16, COL_AMBER);
     sp_nm_u  = addspan(sg_nm, &lv_font_montserrat_14, COL_GREY);
-    // steady estimated arrival time (UTC), centered on the distance line
-    sg_eta   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, 0, -34);
+    // steady estimated arrival time (UTC) + top-of-descent just left of it,
+    // sharing the distance line (dist | TOD | ETA | zone label at 320 px)
+    sg_eta   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, 48, -34);
     sp_eta_t = addspan(sg_eta, &lv_font_montserrat_16, COL_AMBER);
     sp_eta_z = addspan(sg_eta, &lv_font_montserrat_14, COL_GREY);
+    sg_tod   = mkspangroup(scr, LV_ALIGN_BOTTOM_MID, -48, -34);
+    sp_tod_l = addspan(sg_tod, &lv_font_montserrat_14, COL_GREY);
+    sp_tod_t = addspan(sg_tod, &lv_font_montserrat_16, COL_AMBER);
+    sp_tod_z = addspan(sg_tod, &lv_font_montserrat_14, COL_GREY);
 
     // data line: coordinates full left, altitude full right, same 16pt
     sg_line  = mkspangroup(scr, LV_ALIGN_LEFT_MID, 8, 16);
@@ -391,7 +400,10 @@ static void refresh(void) {
     vis(sg_brand, !have_id); vis(s_build, !have_id); vis(s_ip, !have_id);
 
     lv_label_set_text(s_tail, p.tail[0] ? p.tail : CFG->ac_tail);
-    lv_label_set_text(s_actype, CFG->ac_type);
+    // resolved performance-DB type code (portal choice or feed pre-select) —
+    // never the raw feed string; blank when no profile is selected
+    const perf_ac_t *perf = perfdb_find(CFG->perf_type);
+    lv_label_set_text(s_actype, perf ? perf->type : "");
 
     // flight number: gray airline prefix (letters), white number + suffix
     const char *fl = p.flight;
@@ -409,9 +421,12 @@ static void refresh(void) {
     lv_style_set_text_color(lv_span_get_style(sp_ro_ar), lv_color_hex(rocol));
     lv_style_set_text_color(lv_span_get_style(sp_ro_d), lv_color_hex(rocol));
     if (p.orig[0] || p.dest[0]) {
-        // show ICAO codes; fall back to the code as received when unknown
-        const char *o = airports_icao(p.orig); if (!o) o = p.orig[0] ? p.orig : "----";
-        const char *d = airports_icao(p.dest); if (!d) d = p.dest[0] ? p.dest : "----";
+        // prefer IATA for display (NOU➤NRT reads better than NWWW➤RJAA at
+        // 320 px); ICAO when the gazetteer has no IATA, code-as-received last
+        const char *o = airports_iata(p.orig); if (!o) o = airports_icao(p.orig);
+        if (!o) o = p.orig[0] ? p.orig : "----";
+        const char *d = airports_iata(p.dest); if (!d) d = airports_icao(p.dest);
+        if (!d) d = p.dest[0] ? p.dest : "----";
         lv_span_set_text(sp_ro_o, o);
         lv_span_set_text(sp_ro_ar, "\xE2\x9E\xA4");   // U+27A4, padding baked into the glyph
         lv_span_set_text(sp_ro_d, d);
@@ -445,7 +460,8 @@ static void refresh(void) {
     lv_spangroup_refresh(sg_alt);
 
     double alat, alon, dist_nm = -1;
-    if (p.valid && p.dest[0] && airports_lookup(p.dest, &alat, &alon))
+    int dest_elev = 0;
+    if (p.valid && p.dest[0] && airports_lookup_ex(p.dest, &alat, &alon, &dest_elev))
         dist_nm = geo_dist_nm(p.lat, p.lon, alat, alon);
 
     // trip completion: remaining vs the dep->arr great-circle total
@@ -517,8 +533,22 @@ static void refresh(void) {
     lv_span_set_text(sp_utc_z, "z");
     lv_spangroup_refresh(sg_utc);
 
-    // steady arrival estimate, center of the distance line ("12:50z")
+    // Arrival estimate on the distance line. The made-good estimator always
+    // runs (it owns the sample ring and is the fallback); when an aircraft
+    // profile is resolved and the route is known, the theoretical-profile
+    // estimator overrides it and adds the TOD readout (see eta_profile.h).
     long eta_min = eta_update(&s_eta, dist_nm, p.gs_kt, utc ? utc / 1000.0 : 0);
+    long tod_min = 0;
+    if (perf && utc && dist_nm >= 0 && tot_nm > 10) {
+        time_t us = (time_t)(utc / 1000);
+        struct tm tmu;
+        gmtime_r(&us, &tmu);
+        etap_out_t po = etap_update(&s_etap, perf, p.lat, p.lon, alat, alon,
+                                    dest_elev, tot_nm, dist_nm, p.gs_kt,
+                                    eta_made_good_kt(&s_eta), utc / 1000.0,
+                                    tmu.tm_mon + 1, CFG->winds_enable);
+        if (po.eta_min > 0) { eta_min = po.eta_min; tod_min = po.tod_min; }
+    }
     if (eta_min > 0) {
         time_t et = (time_t)eta_min * 60;
         gmtime_r(&et, &tm);
@@ -530,6 +560,19 @@ static void refresh(void) {
         lv_span_set_text(sp_eta_z, "");
     }
     lv_spangroup_refresh(sg_eta);
+    if (tod_min > 0) {
+        time_t tt = (time_t)tod_min * 60;
+        gmtime_r(&tt, &tm);
+        snprintf(buf, sizeof buf, "%02d:%02d", tm.tm_hour, tm.tm_min);
+        lv_span_set_text(sp_tod_l, "TOD ");
+        lv_span_set_text(sp_tod_t, buf);
+        lv_span_set_text(sp_tod_z, "z");
+    } else {
+        lv_span_set_text(sp_tod_l, "");
+        lv_span_set_text(sp_tod_t, "");
+        lv_span_set_text(sp_tod_z, "");
+    }
+    lv_spangroup_refresh(sg_tod);
     if (utc && have_off) {
         time_t local = (time_t)(utc / 1000) + (time_t)off_min * 60;
         gmtime_r(&local, &tm);
