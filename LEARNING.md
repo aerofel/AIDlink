@@ -29,12 +29,22 @@
   esp32 config (no Montserrat fonts, wrong target) — regenerated the S3 config
   from `sdkconfig.defaults*` (which carry everything: fonts, TLS-insecure,
   NCM). Check `CONFIG_IDF_TARGET` in `sdkconfig` before flashing.
-- **Soft-reboot after a /dfu-flash cycle can wedge USB:** flash via /dfu +
-  autoflash booted the app cleanly (portal answered), but the very next
-  `/save` reboot (`esp_restart`) left macOS with a stale NCM interface, no
-  downloader port, AP still beaconing — the app runs, only USB enumeration is
-  dead. Recovery: replug or one RST tap. Ritual amended: after a /dfu-flash,
-  **tap RST once before doing anything that soft-reboots** (like /save).
+- **Soft-reboot after a /dfu-flash cycle wedges USB — DETERMINISTIC** (2/2
+  this session): flash via /dfu + autoflash boots the app cleanly (portal
+  answers over the cable), but the FIRST subsequent soft reset (`/save`'s
+  `esp_restart`) leaves macOS with a stale NCM interface, no downloader port,
+  AP still beaconing — the app runs (NVS write landed before the reboot),
+  only USB enumeration is dead. Recovery: replug or one RST tap. Ritual:
+  after every /dfu-flash, **tap RST once before anything that soft-reboots**.
+- **Display-task stack panic (the 1 s-then-reboot loop):** the profile
+  engine's ~1.3 KB breakpoint table lived on the display task's 3 KB stack —
+  first valid fix → `etap_update` → overflow → panic, every boot. Big scratch
+  buffers in pure modules belong inside the caller-owned state struct (BSS);
+  display task stack now 4 KB. Symptom fingerprint: web `/status` looks fine
+  in short windows, hw card shows `uptime 0:00:06 · last reset: panic`.
+- **Safari ignores `hidden`/`disabled` on `<option>`** — the portal's
+  make→type dependent dropdown must REBUILD the option list in JS
+  (innerHTML), not hide options.
 
 ## 2026-07-09 — ETA v3: immediate appearance, blends into steadiness
 
