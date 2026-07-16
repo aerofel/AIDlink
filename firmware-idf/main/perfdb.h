@@ -13,9 +13,13 @@ typedef struct {
     uint16_t cruise_kt;      // cruise TAS, knots (constant, no Mach modeling)
     float    climb1_min;     // surface -> FL100 (avg GS 280 kt)
     float    climb2_min;     // FL100 -> FL200   (avg GS 380 kt)
-    float    climb3_min;     // FL200 -> TOC     (avg GS climb_mach x 593.7 kt)
+    float    climb3_min;     // FL200 -> service ceiling (scaled by level in
+                             //   eta_profile.c; see 2026-07-16 design spec)
     float    climb_mach;
-    uint32_t ceiling_ft;     // cruise altitude MSL; descent dist = ceiling/300
+    uint32_t ceiling_ft;     // SERVICE ceiling MSL — the vertical schedule
+                             //   picks the actual cruise level(s) below it
+    uint16_t max_range_nm;   // operational route distance (airplanes.range);
+                             //   drives the initial-cruise-level heuristic
 } perf_ac_t;
 
 int perfdb_count(void);

@@ -1,5 +1,65 @@
 # AIDlink — Learning Journal
 
+## 2026-07-16 — Orthodromic/vertical ETA rework shipped: 25 chg / 0.9 flips / 20.7 span
+
+- **Implemented the 2026-07-16 spec** (timing fix, vertical schedule +
+  descent overlay, closure-semantics bias, route stretch, proximity-gated
+  altitude latch) and let its own §9.2 isolation matrix pick the defaults.
+  Fleet result (11 A339): 49/3.0/25.6 → **25/0.9/20.7**, final −1.9…0.
+- **The matrix vetoed two spec centerpieces**: uniform route stretch (span
+  25.6→32.2 alone; front-loaded taper also lost) because the slow DB TAS
+  still cancels geometry on BKK/NOU legs — and the applied cruise bias
+  (+1.3 min accuracy for 1.7× churn; spec §6.2 rules that out). Both ship
+  compiled-but-disabled (`ETAP_STRETCH_APPLY 0`, `ETAP_BIAS_APPLY 0`),
+  host-tested in both configurations, ready to flip WITH per-route perf data.
+- **The engines' dt now comes from the monotonic clock** (new `mono_ms`
+  param on `eta_update`/`etap_update`): whole-second epochs at the 2 Hz
+  refresh made every duplicate second count 0.5 s extra → EMAs ran at ~2/3
+  of their advertised τ (codex find, verified). True-2700 beat true-1800 in
+  replay. A τ host test measures one full time constant end-to-end.
+- **Descent overlay**: staged approach overlays the last 60 NM of the 3°
+  descent instead of following it — A339 TOD 197→137 NM-to-go (observed
+  99–162). Altitude latch engaged on 6/11 flights; the review's proximity
+  gate (`dist < 1.5×alt/300 + 60`) kept every mid-cruise ATC descent out.
+- `max_range_nm` now generated from Offto's `airplanes.range` (read-only);
+  vertical anchors: BKK→NOU FL370+2 steps, CDG→BKK FL350+3, SYD→NOU direct
+  FL410 — note the heuristic is calibrated to range=OPERATIONAL distance
+  (5500 for A339), not physical range.
+- Gotcha: a two-phase τ test is mandatory — seeding the bias EMA at the
+  target ratio makes any τ assertion pass vacuously (r0 must differ).
+- **Out-of-sample confirmation**: 8 freshly fetched flights (AeroAPI,
+  Personal tier = fierce 429s, pace ≥20 s + 65 s backoff; a "-schedule-"
+  fa_flight_id means AeroAPI matched a future scheduled instance → cache a
+  track-less JSON that poisons re-runs, delete it) — incl. the never-seen
+  NWWW→SYD route: 37→17 changes, span 17→13, abserr UNCHANGED 7.7→7.8.
+  The worst flight ever recorded (07-15 VTBS→LFPG, 101 changes/7 flips on
+  the old firmware) dropped to 24/1.
+
+## 2026-07-16 — A339 ETA replay audit: route progress and bias semantics dominate
+
+- Current firmware replay over all 12 discoverable cached A339 flights (11 in
+  `onboard-ip-mock`, one in `offto-ip-mock`) gives mean 49.9 displayed changes,
+  3.1 reversals, 25.3-minute error span, and -1.1-minute final error. Freezing
+  cruise bias improves stability to 30.1 changes / 1.8 reversals / 21.3 minutes,
+  while mean absolute accuracy worsens only about 1.0 minute.
+- `eta_made_good_kt()` measures direct-to-destination **closure rate**, not
+  along-track GS, yet `eta_profile.c` compares it with predicted cruise GS.
+  Airway doglegs therefore masquerade as speed/wind error; observed median
+  path-GS minus closure is roughly 6–12 kt on several long-haul tracks.
+- Direct-GC progress omits repeatable route geometry: cached track excess is
+  +209…343 NM on CDG↔BKK, +49…64 NM NOU→BKK, and +101…177 NM BKK→NOU. Use a
+  direction-specific historical route/polyline prior; do not extrapolate the
+  already-rejected cumulative in-flight stretch ratio.
+- Display refresh is 2 Hz but passes whole-second `time()` to both ETA engines;
+  their `dt<=0 ? 0.5` handling counts alternating updates as 1.0+0.5 seconds
+  per wall second. The advertised 2700 s bias and 60 s output EMAs therefore
+  behave near 1800 s and 40 s respectively, reducing intended stability.
+- A339 DB transcription is correct, but semantics are too coarse: 460 kt is a
+  single TAS despite Mach/altitude/route variation, while 41000 ft is a service
+  ceiling used as cruise/descent-start altitude. More important than editing
+  those constants, the model descends to field elevation and then appends a
+  separate 60 NM approach, and it never uses live altitude to re-anchor phase.
+
 ## 2026-07-15 — ETA corrections shipped: τ2700, 1-min creep, far-out hyst, A20N row
 
 - **Implemented + host-tested** (all 12 tests green, TDD): `ETAP_BIAS_TAU_S`

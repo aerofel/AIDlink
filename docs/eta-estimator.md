@@ -12,13 +12,22 @@ Two estimators run side by side in the display task (`display.c`):
    window fills. Always runs; owns the sample ring. Shown only when no
    aircraft profile is resolved.
 2. **Theoretical profile** (`eta_profile.c`) — an FMS-style prediction of the
-   whole remaining flight: DB climb segments, cruise TAS with seasonal
-   250 hPa climatology winds (5°×60° boxes, wind triangle per segment),
-   integrated descent schedule, staged 60 NM approach. One adaptive term: a
-   cruise-bias EMA (measured made-good vs predicted GS, τ 45 min, clamp
-   ±10 %, weighted by fraction of cruise flown). Overrides the fallback and
-   adds the TOD readout whenever `perfdb_find(CFG->perf_type)` resolves and
-   the route is known.
+   whole remaining flight. Since 2026-07-16 (orthodromic + vertical rework,
+   spec + isolation matrix in `superpowers/specs/2026-07-16-…`): vertical
+   schedule from the DB range fraction (semicircular-rule ceiling by initial
+   bearing, up to three 2000 ft step climbs on equal plateaus, altitude-scaled
+   upper-climb time with ISA/Mach-capped speed), cruise TAS with seasonal
+   250 hPa climatology winds, descent as a 3° proxy whose last 60 NM the
+   staged approach OVERLAYS (TOD now ~137 NM out vs observed 99–162; the old
+   shape appended the approach and put TOD at 197), and a proximity-gated
+   live-altitude latch for real early descents. Filter `dt` comes from the
+   monotonic clock (whole-second epochs at 2 Hz used to over-integrate the
+   EMAs ×1.5). Two multipliers exist but **ship disabled by matrix evidence**:
+   route stretch (`ETAP_STRETCH_APPLY 0` — regresses while the DB TAS error
+   cancels geometry) and the cruise bias (`ETAP_BIAS_APPLY 0` — costs 1.7×
+   churn for 1.3 min accuracy; r_ema still learns for diagnostics). Overrides
+   the fallback and adds the TOD readout whenever
+   `perfdb_find(CFG->perf_type)` resolves and the route is known.
 
 Aircraft data comes from the Offto app's SQLite via `tools/gen_perfdb.py`
 (committed as `perfdb_data.c`, 31 aircraft). The feed's `aircraftType`
@@ -75,6 +84,25 @@ step granularity ≤1 min, far-out hold, +40 min bias sampling).
 Tested and **rejected** (don't retry without new evidence): replacing the
 bias p-scaling with an observation-time confidence ramp (span ×2–3), and
 in-flight cumulative route-stretch (front-loaded excess ⇒ overestimates).
+
+## 2026-07-16 rework results
+
+Replay of the 11 A339 flights, 2026-07-15 firmware → orthodromic/vertical
+rework (defaults): **changes 49 → 25, reversals 3.0 → 0.9, error span
+25.6 → 20.7 min**, final error −1.9…0 everywhere; A20N short-haul 7 changes /
+7-min span. Every flight improved except the one with 101-min ADS-B holes.
+
+**Out-of-sample validation (2026-07-16):** 8 freshly fetched flights that
+took no part in any tuning — including 3× ACI140 NWWW→SYD, a route and
+direction the model had never seen — score changes 37 → 17, reversals
+3.0 → 1.2, span 17 → 13 min with mean absolute error UNCHANGED (7.7 → 7.8)
+and finals within ±2 min. The NWWW→SYD legs run 4–9 displayed changes at
+1.1–4.0 min mean error, two of them on the A20N profile that was deduced
+from a single flight. Comparison figure: `eta-rework-replay.png`.
+The isolation matrix (spec §12) is the tuning ledger: uniform route stretch
+and the applied bias both regress the fleet today — their code paths stay
+compiled and host-tested behind `ETAP_STRETCH_APPLY` / `ETAP_BIAS_APPLY` for
+when per-route performance data lands.
 
 ## Residual discrepancy taxonomy (post-fix replay, 2026-07-15)
 

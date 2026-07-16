@@ -79,8 +79,12 @@ def main():
 
     ac = list(cur.execute(
         "SELECT make, model, type, speed, climb_to_fl100_min, "
-        "climb_fl100_to_fl200_min, climb_above_fl200_min, climb_mach, ceiling "
-        "FROM airplanes ORDER BY make, model"))
+        "climb_fl100_to_fl200_min, climb_above_fl200_min, climb_mach, ceiling, "
+        "range FROM airplanes ORDER BY make, model"))
+    for row in ac:
+        rng = row[9]
+        if not (isinstance(rng, (int, float)) and 0 < rng < 20000):
+            sys.exit(f"airplanes.range invalid for {row[2]}: {rng!r}")
     u250, v250 = wind_grid(cur, 250)
     u300, v300 = wind_grid(cur, 300)
     con.close()
@@ -96,9 +100,9 @@ def main():
                 "#include \"perfdb.h\"\n\n")
         f.write(f"const int PERFDB_NAC = {len(ac)};\n")
         f.write("const perf_ac_t PERFDB_AC[] = {\n")
-        for make, model, typ, spd, c1, c2, c3, mach, ceil in ac:
+        for make, model, typ, spd, c1, c2, c3, mach, ceil, rng in ac:
             f.write(f'    {{ "{make}", "{model}", "{typ}", {spd}, '
-                    f"{cf(c1)}, {cf(c2)}, {cf(c3)}, {cf(mach)}, {int(ceil)} }},\n")
+                    f"{cf(c1)}, {cf(c2)}, {cf(c3)}, {cf(mach)}, {int(ceil)}, {int(rng)} }},\n")
         f.write("};\n\n")
         emit_grid(f, "PERFDB_U250", u250)
         emit_grid(f, "PERFDB_V250", v250)

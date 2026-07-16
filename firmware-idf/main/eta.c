@@ -7,7 +7,8 @@
 
 void eta_reset(eta_state_t *st) {
     st->count = 0; st->head = 0;
-    st->have_eta = false; st->shown_min = 0; st->last_s = 0;
+    st->have_eta = false; st->shown_min = 0;
+    st->mono_last = 0; st->mono_have = false;
 }
 
 static int idx(const eta_state_t *st, int back) {   // back=0 -> newest sample
@@ -22,7 +23,8 @@ double eta_made_good_kt(const eta_state_t *st) {
     return (st->ds[oldest] - st->ds[newest]) / span * 3600.0;
 }
 
-long eta_update(eta_state_t *st, double dist_nm, double gs_inst_kt, double now_s) {
+long eta_update(eta_state_t *st, double dist_nm, double gs_inst_kt,
+                double now_s, uint32_t mono_ms) {
     if (dist_nm < 0 || now_s <= 0) {
         // invalid fix / no clock: blank the display but keep ALL state (ring,
         // smoothed epoch, shown minute). Clearing state here would make the
@@ -74,8 +76,11 @@ long eta_update(eta_state_t *st, double dist_nm, double gs_inst_kt, double now_s
     if (gs < ETA_MIN_GS_KT) { st->have_eta = false; return 0; }   // taxi/hold
 
     double raw = now_s + dist_nm / gs * 3600.0;
-    double dt = st->last_s > 0 ? now_s - st->last_s : 0.5;
-    st->last_s = now_s;
+    // dt from the monotonic clock: the epoch has 1 s grain and at a 2 Hz
+    // refresh its duplicate seconds used to be counted as 0.5 s extra —
+    // the EMAs integrated ~1.5 s per wall second (2026-07-16 audit)
+    double dt = st->mono_have ? (mono_ms - st->mono_last) / 1000.0 : 0.5;
+    st->mono_last = mono_ms; st->mono_have = true;
     if (!st->have_eta || fabs(raw - st->eta_s) > ETA_RESYNC_S) {
         st->have_eta = true;
         st->eta_s = raw;

@@ -20,6 +20,7 @@
 // returns instantly when the feed recovers.
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 #define ETA_MIN_GS_KT   80.0    // below this (taxi) no estimate
 #define ETA_WIN_S       600.0   // made-good speed window (full steadiness)
@@ -42,18 +43,24 @@ typedef struct {
     double ts[ETA_N], ds[ETA_N];      // epoch s / distance-to-go NM
     bool   have_eta;
     double eta_s;                     // smoothed arrival epoch, seconds
-    double last_s;                    // time of the previous update (for dt)
+    uint32_t mono_last;               // monotonic ms of the previous update
+    bool   mono_have;                 //   (EMA dt source — NOT the epoch: the
+                                      //   1 s epoch grain at a 2 Hz refresh
+                                      //   integrated ~1.5 s per wall second)
     long   shown_min;                 // displayed arrival epoch, minutes
 } eta_state_t;
 
 void eta_reset(eta_state_t *st);
 
 // Feed one sample: distance to destination (NM, <0 = unknown/invalid fix),
-// instantaneous derived ground speed (kt, used while the window fills), and
-// current UTC epoch (s, 0 = unknown). Call at any cadence >= ~1 Hz; samples
-// are decimated internally. Returns the arrival epoch to DISPLAY in minutes,
-// or 0 when no estimate is available.
-long eta_update(eta_state_t *st, double dist_nm, double gs_inst_kt, double now_s);
+// instantaneous derived ground speed (kt, used while the window fills),
+// current UTC epoch (s, 0 = unknown) and a monotonic millisecond clock
+// (esp_timer on target; drives the filter dt at full resolution while the
+// epoch anchors the displayed arrival time). Call at any cadence >= ~1 Hz;
+// samples are decimated internally. Returns the arrival epoch to DISPLAY in
+// minutes, or 0 when no estimate is available.
+long eta_update(eta_state_t *st, double dist_nm, double gs_inst_kt,
+                double now_s, uint32_t mono_ms);
 
 // Window made-good ground speed (kt) straight from the sample ring, or -1
 // while the ring spans under ETA_MIN_SPAN_S. This is the oscillation-proof

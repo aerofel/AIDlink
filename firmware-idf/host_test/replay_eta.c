@@ -19,7 +19,7 @@
 //
 // Usage: replay_eta track.csv ORIG DEST ACTYPE [--no-winds] [--no-bias] > out.csv
 // track.csv: t_epoch_s,lat,lon,alt_ft (strictly monotonic)
-// out.csv:   t_s,dist_nm,gs_kt,mg_kt,fb_min,etap_min,tod_min,disp_min,r_ema,gt_kt
+// out.csv:   t_s,dist_nm,gs_kt,mg_kt,fb_min,etap_min,tod_min,disp_min,r_ema,gt_kt,alt_ft,stretch,latched
 //   --no-winds  climatology off (CFG->winds_enable = false)
 //   --no-bias   freeze the cruise bias at 1.0 (pass gs_made_good = -1)
 // r_ema = engine's cruise-bias EMA; gt_kt = engine's predicted GS at the
@@ -118,13 +118,13 @@ int main(int argc, char **argv) {
     etap_state_t etap; etap_reset(&etap);
 
     // pos snapshot as the poller leaves it
-    double p_lat = 0, p_lon = 0, p_gs = 0;
+    double p_lat = 0, p_lon = 0, p_gs = 0, p_alt = -1;
     bool have_fix = false;
 
     long long t0_ms = (long long)(T[0] * 1000.0);
     long long tend_ms = (long long)(T[N-1] * 1000.0);
 
-    printf("t_s,dist_nm,gs_kt,mg_kt,fb_min,etap_min,tod_min,disp_min,r_ema,gt_kt\n");
+    printf("t_s,dist_nm,gs_kt,mg_kt,fb_min,etap_min,tod_min,disp_min,r_ema,gt_kt,alt_ft,stretch,latched\n");
     for (long long t_ms = t0_ms; t_ms <= tend_ms; t_ms += 500) {
         long long rel_ms = t_ms - t0_ms;
 
@@ -135,32 +135,36 @@ int main(int argc, char **argv) {
             derive_update(&drv, lat, lon, (uint32_t)rel_ms, -1, 0, false,
                           &gs, &trk, &have_trk);
             if (gs > 1500) gs = 1500;                   // poller.c clamp
-            p_lat = lat; p_lon = lon; p_gs = gs;
+            p_lat = lat; p_lon = lon; p_gs = gs; p_alt = alt;
             have_fix = true;
         }
 
         // display refresh (every 500 ms), utc = whole seconds like time(NULL)
         if (!have_fix) continue;
         uint32_t utc_s = (uint32_t)(t_ms / 1000);
+        uint32_t mono = (uint32_t)rel_ms;
         double dist_nm = geo_dist_nm(p_lat, p_lon, alat, alon);
-        long fb = eta_update(&eta, dist_nm, p_gs, (double)utc_s);
+        long fb = eta_update(&eta, dist_nm, p_gs, (double)utc_s, mono);
         long disp = fb, etap_min = 0, tod_min = 0;
         if (perf && tot_nm > 10) {
             time_t us = (time_t)utc_s;
             struct tm tmu;
             gmtime_r(&us, &tmu);
-            etap_out_t po = etap_update(&etap, perf, p_lat, p_lon, alat, alon,
+            etap_out_t po = etap_update(&etap, perf, p_lat, p_lon, p_alt,
+                                        olat, olon, alat, alon,
                                         aelev, tot_nm, dist_nm, p_gs,
                                         bias ? eta_made_good_kt(&eta) : -1.0,
-                                        (double)utc_s, tmu.tm_mon + 1, winds);
+                                        (double)utc_s, mono,
+                                        tmu.tm_mon + 1, winds);
             etap_min = po.eta_min; tod_min = po.tod_min;
             if (po.eta_min > 0) disp = po.eta_min;
         }
-        printf("%u,%.2f,%.1f,%.1f,%ld,%ld,%ld,%ld,%.4f,%.1f\n",
+        printf("%u,%.2f,%.1f,%.1f,%ld,%ld,%ld,%ld,%.4f,%.1f,%.0f,%.4f,%d\n",
                utc_s, dist_nm, p_gs, eta_made_good_kt(&eta),
                fb, etap_min, tod_min, disp, etap.r_ema,
                perf ? predicted_gs(perf, p_lat, p_lon, alat, alon,
-                                   tmu_month(utc_s), winds) : 0.0);
+                                   tmu_month(utc_s), winds) : 0.0,
+               p_alt, etap.stretch, etap.latched ? 1 : 0);
     }
     return 0;
 }

@@ -33,6 +33,8 @@ int main(void) {
     const perf_ac_t *neo = perfdb_find("A20N");
     assert(neo && neo->cruise_kt == 445 && neo->ceiling_ft == 39000);
     assert(strcmp(neo->make, "Aircalin") == 0);
+    // operational range generated from airplanes.range (vertical schedule)
+    assert(a->max_range_nm == 5500 && neo->max_range_nm == 3500);
     // other neo family codes alias to the nearest ceo row (defense: exact
     // rows always win over the alias table)
     assert(perfdb_find("a19n") == perfdb_find("A319"));

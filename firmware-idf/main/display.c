@@ -581,16 +581,21 @@ static void refresh(void) {
     // runs (it owns the sample ring and is the fallback); when an aircraft
     // profile is resolved and the route is known, the theoretical-profile
     // estimator overrides it and adds the TOD readout (see eta_profile.h).
-    long eta_min = eta_update(&s_eta, dist_nm, p.gs_kt, utc ? utc / 1000.0 : 0);
+    // Epochs anchor the displayed times; the monotonic clock drives the
+    // filter dt (whole-second epochs at 2 Hz over-integrated the EMAs).
+    uint32_t mono = now_ms();
+    long eta_min = eta_update(&s_eta, dist_nm, p.gs_kt, utc ? utc / 1000.0 : 0, mono);
     long tod_min = 0;
     if (perf && utc && dist_nm >= 0 && tot_nm > 10) {
         time_t us = (time_t)(utc / 1000);
         struct tm tmu;
         gmtime_r(&us, &tmu);
-        etap_out_t po = etap_update(&s_etap, perf, p.lat, p.lon, alat, alon,
+        etap_out_t po = etap_update(&s_etap, perf, p.lat, p.lon,
+                                    p.valid ? p.alt_ft : -1,
+                                    olat, olon, alat, alon,
                                     dest_elev, tot_nm, dist_nm, p.gs_kt,
                                     eta_made_good_kt(&s_eta), utc / 1000.0,
-                                    tmu.tm_mon + 1, CFG->winds_enable);
+                                    mono, tmu.tm_mon + 1, CFG->winds_enable);
         if (po.eta_min > 0) { eta_min = po.eta_min; tod_min = po.tod_min; }
     }
     if (eta_min > 0) {
