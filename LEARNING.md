@@ -42,8 +42,11 @@ Live debug on Board 3 (T-Display-S3) over the USB-NCM link, real ACI740 Viasat f
   (egress 161.30.203.47, colo SYD). So the port-53 probe reads "no internet" (red cloud)
   when there IS internet. The 2026-07-08 note worried about the *opposite* (port 53
   passing behind an unauthenticated portal = false positive); this network is the mirror
-  case. Fix direction: probe with an HTTP `generate_204` GET (hostname, ~12 s timeout for
-  satellite RTT) instead of a direct-IP:53 handshake — the "content-validated alternative"
+  case. **Fixed** (`netcore.c http204_probe`): probe with an HTTP `generate_204` GET
+  (`connectivitycheck.gstatic.com`, port 80, 12 s timeout for satellite RTT, body never
+  read), status must be exactly 204. Measured ~0.8 KB/probe; 60 s cadence ≈ 1.2 MB/day —
+  actually *less* than the old stuck port-53 probe (~1 MB/day) and correct. Live result:
+  log shows `internet reachable`, cloud goes blue. The "content-validated alternative"
   previously declined, now justified by this evidence.
 - **Reflash reality (single USB-C):** `/dfu` (auth-gated) forces download-boot, then
   `idf.py flash`, then **one physical RST tap**. Config `/save` also reboots. No

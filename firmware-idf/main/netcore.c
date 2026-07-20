@@ -8,6 +8,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_mac.h"
+#include "esp_http_client.h"
 #include "dhcpserver/dhcpserver.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
@@ -117,53 +118,52 @@ bool netcore_scanning(void) { return s_scanning; }
 
 // ---- internet reachability probe ------------------------------------------
 // An associated uplink says nothing about actual internet (walled gardens).
-// Probe with the cheapest possible exchange: a bare TCP handshake to a public
-// DNS server (SYN / SYN-ACK / RST, ~200 bytes, no payload, no DNS query) —
-// onboard data is metered. 30 s cadence while up, 15 s retry while down,
-// prompt probe when the STA gets an IP.
-// KNOWN LIMITATION (accepted, 2026-07-08): captive portals typically pass or
-// transparently answer port 53 pre-auth, so this can show "internet" behind
-// an unauthenticated hotspot. The content-validated alternative (HTTP
-// generate_204, tri-state captive detection) was proposed and declined —
-// keep the cheap handshake unless that decision changes.
+// Internet reachability = an HTTP generate_204 GET that must return EXACTLY 204.
+// This tells real internet apart from a captive-portal intercept (which answers
+// 200 + HTML or a 3xx redirect) and from no uplink (timeout). The earlier probe
+// was a bare TCP handshake to a public-DNS IP (1.1.1.1:53) — but this Viasat
+// satellite walled garden BLOCKS direct-IP-to-public-DNS on 53 *and* 443 while
+// passing real hostname HTTPS, so the old probe reported "no internet" when there
+// was internet (false red cloud). Measured cost on the metered link: ~127 B of
+// response headers + framing ≈ 0.8 KB/probe; at the 60 s cadence below that is
+// ~1.2 MB/day. Port 80 (no TLS) deliberately — HTTPS would add a ~2.5 KB
+// handshake per probe. The body is never read: a real 204 has none, and a
+// captive 200's HTML must not be downloaded on metered data.
+#define INET_PROBE_URL "http://connectivitycheck.gstatic.com/generate_204"
 static volatile bool s_inet;
 static volatile bool s_inet_probe_now;
 
-static bool tcp_probe(const char *ip, uint16_t port, int timeout_ms) {
-    int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) return false;
-    struct sockaddr_in a = {0};
-    a.sin_family = AF_INET; a.sin_port = htons(port); a.sin_addr.s_addr = inet_addr(ip);
-    int fl = fcntl(s, F_GETFL, 0); fcntl(s, F_SETFL, fl | O_NONBLOCK);
+static bool http204_probe(int timeout_ms) {
+    esp_http_client_config_t c = {
+        .url = INET_PROBE_URL,
+        .timeout_ms = timeout_ms,
+        .disable_auto_redirect = true,   // a captive 3xx must read as "not 204", not be followed
+    };
+    esp_http_client_handle_t h = esp_http_client_init(&c);
+    if (!h) return false;
+    esp_http_client_set_header(h, "User-Agent", "aidlink");
     bool ok = false;
-    if (connect(s, (struct sockaddr *)&a, sizeof a) == 0) ok = true;
-    else if (errno == EINPROGRESS) {
-        fd_set wf; FD_ZERO(&wf); FD_SET(s, &wf);
-        struct timeval tv = { .tv_sec = timeout_ms / 1000, .tv_usec = (timeout_ms % 1000) * 1000 };
-        if (select(s + 1, NULL, &wf, NULL, &tv) == 1) {
-            int err = 0; socklen_t l = sizeof err;
-            getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &l);
-            ok = (err == 0);
-        }
+    if (esp_http_client_open(h, 0) == ESP_OK) {          // GET, no request body
+        esp_http_client_fetch_headers(h);                // read status + headers only,
+        ok = (esp_http_client_get_status_code(h) == 204); // body intentionally left unread
     }
-    close(s);
+    esp_http_client_close(h);
+    esp_http_client_cleanup(h);
     return ok;
 }
 
 static void inet_task(void *arg) {
     (void)arg;
-    int alt = 0;                 // alternate 1.1.1.1 / 8.8.8.8 across failures
     uint32_t wait_ms = 3000;     // first probe shortly after boot
     for (;;) {
         for (uint32_t w = 0; w < wait_ms && !s_inet_probe_now; w += 500)
             vTaskDelay(pdMS_TO_TICKS(500));
         s_inet_probe_now = false;
-        if (!s_sta_up) { s_inet = false; wait_ms = 5000; continue; }
-        bool ok = tcp_probe(alt ? "8.8.8.8" : "1.1.1.1", 53, 3000);
-        if (!ok) alt ^= 1;
+        if (!s_sta_up) { s_inet = false; wait_ms = 60000; continue; }
+        bool ok = http204_probe(12000);   // 12 s tolerates satellite RTT (measured 1-10 s)
         if (ok != s_inet) logln("internet %s", ok ? "reachable" : "unreachable");
         s_inet = ok;
-        wait_ms = ok ? 30000 : 15000;
+        wait_ms = 60000;         // every 60 s (~0.8 KB/probe ~= 1.2 MB/day)
     }
 }
 
