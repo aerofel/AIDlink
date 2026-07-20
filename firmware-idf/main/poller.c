@@ -17,6 +17,8 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_http_client.h"
+#include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "cJSON.h"
@@ -33,6 +35,7 @@ static derive_state_t s_derive;
 static bool s_poll_ok;
 static uint32_t s_poll_at_ms;
 static char s_poll_msg[64] = "no poll yet";
+static uint32_t s_last_heap;   // free heap sampled at the last poll (diagnostics)
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -140,25 +143,55 @@ static esp_err_t http_evt(esp_http_client_event_t *e) {
     return ESP_OK;
 }
 
-// Fetch url into out (cap). Returns body length or -1; *date_out gets the
-// response's Date header as epoch seconds (0 if absent/unparseable).
-static int http_get(const char *url, char *out, int cap, long *date_out) {
-    fetch_t f = { .buf = out, .len = 0, .cap = cap };
+// The position-source URL for the configured src_type.
+static const char *poll_url(void) {
+    switch (CFG->src_type) {
+        case 0:  return "https://wifi.inflight.viasat.com/ac/flight/info";
+        case 1:  return "http://services.inflightpanasonic.aero/inflight/services/flightdata/v1/flightdata";
+        default: return CFG->vs_url;
+    }
+}
+
+// One persistent, keep-alive HTTP client reused for every poll. The previous
+// code re-ran a full TLS handshake every second — allocating and freeing ~20 KB
+// of *internal* SRAM per poll (no PSRAM, no mbedTLS dynamic buffer). Under the
+// steady memory pressure of LVGL + Wi-Fi + USB-NCM + connected clients, the
+// handshake intermittently failed for long stretches, producing bursts of
+// "fetch failed" against a perfectly healthy endpoint. Reusing the TCP+TLS
+// session removes that per-poll churn: one handshake, then cheap GETs.
+static esp_http_client_handle_t s_http;
+static fetch_t s_fetch;
+
+static bool http_client_ensure(void) {
+    if (s_http) return true;
     esp_http_client_config_t c = {
-        .url = url, .event_handler = http_evt, .user_data = &f,
-        .timeout_ms = 5000,
+        .url = poll_url(), .event_handler = http_evt, .user_data = &s_fetch,
+        .timeout_ms = 8000,
         .skip_cert_common_name_check = true,   // mirror v9 setInsecure() for the HTTPS Viasat endpoint
         .crt_bundle_attach = NULL,
         .disable_auto_redirect = true,         // v9 does not follow redirects
+        .keep_alive_enable = true,             // reuse the TCP+TLS session across polls
     };
-    esp_http_client_handle_t h = esp_http_client_init(&c);
-    esp_http_client_set_header(h, "User-Agent", "aidlink");
-    esp_err_t e = esp_http_client_perform(h);
-    int status = esp_http_client_get_status_code(h);
-    esp_http_client_cleanup(h);
-    if (date_out) *date_out = f.date;
-    if (e != ESP_OK || status != 200) return -1;
-    return f.len;
+    s_http = esp_http_client_init(&c);
+    if (!s_http) return false;
+    esp_http_client_set_header(s_http, "User-Agent", "aidlink");
+    return true;
+}
+
+// Fetch the configured URL into out (cap). Returns body length, or -1 with a
+// human reason in err[] (esp_err name, or "HTTP <status>"). *date_out gets the
+// response's Date header as epoch seconds (0 if absent/unparseable).
+static int http_get(char *out, int cap, long *date_out, char *err, size_t errcap) {
+    if (!http_client_ensure()) { strlcpy(err, "client init (no mem)", errcap); return -1; }
+    s_fetch.buf = out; s_fetch.len = 0; s_fetch.cap = cap; s_fetch.date = 0;
+    esp_err_t e = esp_http_client_perform(s_http);
+    int status = esp_http_client_get_status_code(s_http);
+    if (date_out) *date_out = s_fetch.date;
+    // On any error, drop the (possibly half-open) socket so the next poll
+    // reconnects cleanly instead of reusing a wedged keep-alive connection.
+    if (e != ESP_OK)    { esp_http_client_close(s_http); strlcpy(err, esp_err_to_name(e), errcap); return -1; }
+    if (status != 200)  { esp_http_client_close(s_http); snprintf(err, errcap, "HTTP %d", status); return -1; }
+    return s_fetch.len;
 }
 
 // forward decl — source parsers live in poller_sources.c
@@ -170,16 +203,19 @@ bool poller_parse_panasonic(const char *json, double *lat, double *lon, double *
                             char *flight, char *tail, char *orig, char *dest, char *actype);
 
 static void poll_once(void) {
-    const char *url;
-    switch (CFG->src_type) {
-        case 0: url = "https://wifi.inflight.viasat.com/ac/flight/info"; break;
-        case 1: url = "http://services.inflightpanasonic.aero/inflight/services/flightdata/v1/flightdata"; break;
-        default: url = CFG->vs_url; break;
-    }
     static char body[4096];
     long http_date = 0;
-    int n = http_get(url, body, sizeof body, &http_date);
-    if (n <= 0) { s_poll_ok = false; strlcpy(s_poll_msg, "fetch failed", sizeof s_poll_msg); return; }
+    char err[40] = "";
+    s_last_heap = esp_get_free_heap_size();
+    int n = http_get(body, sizeof body, &http_date, err, sizeof err);
+    if (n <= 0) {
+        s_poll_ok = false;
+        snprintf(s_poll_msg, sizeof s_poll_msg, "fetch failed: %s", err[0] ? err : "?");
+        ESP_LOGW(TAG, "poll fail: %s (free heap %u, largest block %u)", err[0] ? err : "?",
+                 (unsigned)esp_get_free_heap_size(),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        return;
+    }
 
     // Discipline the system clock from the response's Date header (1 s grain);
     // SNTP, when it reaches a server, wins by keeping the delta under the gate.
@@ -226,6 +262,8 @@ void poller_status(bool *ok, uint32_t *at_ms, char *msg, unsigned msgcap) {
     if (at_ms) *at_ms = s_poll_at_ms;
     if (msg) strlcpy(msg, s_poll_msg, msgcap);
 }
+
+uint32_t poller_last_heap(void) { return s_last_heap; }
 
 void poller_start(aidlink_cfg_t *cfg) {
     CFG = cfg;

@@ -13,3 +13,7 @@ void poller_start(aidlink_cfg_t *cfg);
 
 // Live poll status for the web /status page. at_ms=0 means "never polled".
 void poller_status(bool *ok, uint32_t *at_ms, char *msg, unsigned msgcap);
+
+// Free heap (bytes) sampled at the last poll — surfaced on /status as a
+// health gauge for the TLS/HTTP fetch path.
+uint32_t poller_last_heap(void);

@@ -17,3 +17,9 @@ CONFIG_HTTPD_MAX_URI_LEN=1024
 # and the poller reports "fetch failed" forever — only visible on a LIVE uplink.
 CONFIG_ESP_TLS_INSECURE=y
 CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY=y
+# The Viasat poll reuses one keep-alive TLS session (poller.c), but the handshake
+# still needs a large transient record buffer. DYNAMIC_BUFFER allocates the
+# mbedTLS RX/TX buffers on demand and shrinks them between records instead of
+# pinning ~16 KB of internal SRAM for the connection's whole life — the memory
+# headroom that stops handshakes failing under LVGL+Wi-Fi+NCM pressure (no PSRAM).
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y

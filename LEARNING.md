@@ -1,5 +1,54 @@
 # AIDlink — Learning Journal
 
+## 2026-07-21 — "fetch failed" bursts in flight = per-poll TLS handshake starving internal SRAM
+
+Live debug on Board 3 (T-Display-S3) over the USB-NCM link, real ACI740 Viasat feed:
+- **Symptom:** position "comes and goes"; `/status` shows `pollmsg:"fetch failed"`
+  in long streaks (pollage climbing 24→68 s = 60+ consecutive 1 Hz polls all
+  failing) then a clean flip to `age=0` and sustained success. Internet/clients
+  fine throughout.
+- **Ruled out the network by NAPT identity:** the AID NAPTs client traffic to the
+  STA IP, so the Mac's probes and the device's own polls hit the aircraft as the
+  *same MAC + same IP* (172.19.128.141). Mac `curl` to the exact Viasat URL: 15/15
+  HTTP 200, full 2293 B, **0.07–0.63 s** total (never near the 5 s timeout). Same
+  identity, opposite result ⇒ failure is **inside the device's own TLS/HTTP stack**,
+  not the endpoint/uplink/captive-portal. This kills the "timeout too short" theory:
+  a too-short timeout gives scattered misses vs a slow server, not a 60 s total
+  blackout against a sub-second server that then goes fully healthy.
+- **Root cause:** `poller.c` did `esp_http_client_init→perform→cleanup` **every
+  second** — a fresh mbedTLS handshake pinning ~20 KB of *internal* SRAM per poll
+  (PSRAM disabled, `MBEDTLS_DYNAMIC_BUFFER` off, `SSL_IN_CONTENT_LEN=16384`).
+  Against steady LVGL+Wi-Fi+NCM+clients pressure, free heap periodically dipped
+  below what a handshake needs → `perform` fails in bursts until memory frees.
+  `"fetch failed"` also collapsed transport-error / timeout / non-200 into one
+  opaque string, hiding which it was.
+- **Fix (low-risk, flight-flashable):** (1) one **persistent keep-alive**
+  `esp_http_client` reused across polls — one handshake, then cheap GETs; close the
+  socket on error so the next poll reconnects clean. (2) `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y`.
+  (3) **Instrumentation** — `"fetch failed: <esp_err | HTTP nnn>"`, `ESP_LOGW` with
+  free heap + largest block, and a new `"heap"` field on `/status`.
+- **PSRAM enabled + validated live (now the S3 default):** Board 3 is ESP32-S3**R8**
+  (8 MB *octal* PSRAM). Enabled `CONFIG_SPIRAM/MODE_OCT/SPEED_80M` in
+  `sdkconfig.defaults.esp32s3` with `SPIRAM_IGNORE_NOTFOUND=y` (boot without PSRAM
+  on init failure, not a loop) and FETCH_INSTRUCTIONS/RODATA **off** (2nd-stage
+  bootloader stays PSRAM-agnostic → app-time init only → low brick risk even flashed
+  in flight). Result on the live unit: `/status` free heap **40 KB → 8.39 MB**,
+  poll 12/12 ok, display/Wi-Fi/NCM all up. The earlier "octal boot-loops, bench
+  only" caution held in theory but the guardrails made an in-flight flash safe.
+- **Internet logo is a FALSE NEGATIVE on this satellite walled-garden.** The reachability
+  probe (`netcore.c inet_task`) does a raw TCP handshake to `1.1.1.1:53` / `8.8.8.8:53`.
+  Aircalin/Viasat satellite **blocks direct-IP-to-public-DNS on both 53 and 443**, yet
+  real internet works: `generate_204` → HTTP 204, `cloudflare.com/cdn-cgi/trace` → 200
+  (egress 161.30.203.47, colo SYD). So the port-53 probe reads "no internet" (red cloud)
+  when there IS internet. The 2026-07-08 note worried about the *opposite* (port 53
+  passing behind an unauthenticated portal = false positive); this network is the mirror
+  case. Fix direction: probe with an HTTP `generate_204` GET (hostname, ~12 s timeout for
+  satellite RTT) instead of a direct-IP:53 handshake — the "content-validated alternative"
+  previously declined, now justified by this evidence.
+- **Reflash reality (single USB-C):** `/dfu` (auth-gated) forces download-boot, then
+  `idf.py flash`, then **one physical RST tap**. Config `/save` also reboots. No
+  zero-disruption change exists; both drop the NCM link briefly.
+
 ## 2026-07-16 — Orthodromic/vertical ETA rework shipped: 25 chg / 0.9 flips / 20.7 span
 
 - **Implemented the 2026-07-16 spec** (timing fix, vertical schedule +
