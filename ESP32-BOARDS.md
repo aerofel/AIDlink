@@ -22,7 +22,7 @@ not assumed._
 | MAC (base) | `44:1d:64:f5:9f:88` | `e8:3d:c1:f7:a2:58` | `d0:cf:13:32:2f:48` | `1c:db:d4:bd:1f:1c` |
 | Attached as | `/dev/cu.usbserial-0001` | `/dev/cu.usbmodem5AE60430151` | `/dev/cu.usbmodem1101` (stock) → **USB-NCM** once AIDlink runs | `/dev/cu.usbmodem1CDBD4BD1F1C1` (factory FW) → `/dev/cu.usbmodem101` in ROM download mode |
 | USB bridge in path | **Silicon Labs CP2102** (VID `0x10C4`) | **WCH CH343** (VID `0x1A86`, PID `0x55D3`) | **none** — native USB-Serial-JTAG (VID `0x303A`, PID `0x1001`) | **none** — native USB (VID `0x303A`, PID `0x1001`, product string `LilyGo TLora_T3S3_V1`) |
-| Current firmware | **AIDlink v9** (huge_app, 3 MB app) | AIDlink ESP-IDF | **AIDlink ESP-IDF + flight display** (flashed 2026-07-06) | **LilyGO factory demo** (Arduino, IDF v4.4.7, built 2024-03-05) — AIDlink not flashed |
+| Current firmware | **AIDlink v9** (huge_app, 3 MB app) | AIDlink ESP-IDF | **AIDlink ESP-IDF + flight display** (flashed 2026-07-06) | **AIDlink ESP-IDF + OLED display** (flashed 2026-07-23, `sdkconfig.t3s3` quad profile) |
 
 ---
 
@@ -186,22 +186,43 @@ eFuse:       PKG_VERSION 0, WAFER v0.2, BLK_VERSION_MINOR 4, FLASH_TYPE quad, PS
   `arduino-lib-builder`, ESP-IDF **v4.4.7**, built **2024-03-05 12:12:53**.
   Its partition table is `nvs 20K / otadata 8K / ota_0 2368K / ota_1 640K / spiffs 1M`.
 
-### ⚠️ AIDlink does not build for this board as-is
+### AIDlink on this board — verified 2026-07-23
 
-Two hard blockers in `firmware-idf/sdkconfig`, both a direct consequence of the
-S3FH4R2 package:
+Built with `idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.t3s3"`.
+Confirmed live over the USB-C cable: quad PSRAM inits (`Found 2MB PSRAM`,
+`SPI SRAM memory test OK`), TinyUSB NCM enumerates as `Espressif Device`
+(PID `0x4000`) and the serial port disappears, the host takes a DHCP lease at
+**172.20.1.2/26**, ICMP to `172.20.1.1` runs 3/3 at 1.9 ms, and the web portal
+answers (`/` → 302 → `/login`, with `/status` and `/log` auth-gated as designed).
 
-| Setting | Current | This board needs |
+Reflashing afterwards needs the **`/dfu`** endpoint or **BOOT + RST**, exactly
+like Board 3 — TinyUSB owns the only USB port once AIDlink runs.
+
+### Why it needed its own build profile
+
+Everything board-specific — display driver, layout, status LED — is chosen at
+**runtime** from the base MAC in `board.c`, so the sources are identical for the
+whole fleet. Two settings cannot be: they are baked in at compile time by
+`sdkconfig.defaults.esp32s3`, which targets the N16R8 boards. Hence
+`firmware-idf/sdkconfig.t3s3`, listed last so it gets the final word:
+
+| Setting | Default (Boards 2/3) | This board (S3FH4R2) |
 |---|---|---|
-| `CONFIG_SPIRAM_MODE_OCT` | **octal** (set for Boards 2/3) | **`CONFIG_SPIRAM_MODE_QUAD`** — octal init fails here |
-| PSRAM size assumed | 8 MB | **2 MB** |
+| `CONFIG_SPIRAM_MODE_*` | **octal** | **`QUAD`** — ESP-IDF picks the quad or octal driver at *compile* time (`esp_psram/CMakeLists.txt`), so no single binary covers both |
+| `CONFIG_ESPTOOLPY_FLASHSIZE` | **16 MB** | **4 MB** — in-package |
 
-`CONFIG_SPIRAM_IGNORE_NOTFOUND=y` means it would still *boot* — silently with **no
-PSRAM at all**, on a board whose internal SRAM budget is already the scarce resource
-(see Board 3's LVGL notes). Flash is fine: the project targets 4 MB
-(`CONFIG_ESPTOOLPY_FLASHSIZE_4MB`) with a single 3 MB `factory` app, which fits.
-`board.c` also keys features off the base MAC, so `1c:db:d4:bd:1f:1c` needs an entry
-there (no WS2812, no ST7789 display) before the display/LED code does the right thing.
+Both failures are silent-ish and worth recognising. Wrong PSRAM mode still
+*boots*, because `CONFIG_SPIRAM_IGNORE_NOTFOUND=y` — just with **no PSRAM at
+all**, on a board whose internal SRAM is already the scarce resource (see Board
+3's LVGL notes). Wrong flash size does not boot: the bootloader announces
+`SPI Flash Size : 16MB` and then `spi_flash` aborts with *"Detected size(4096k)
+smaller than the size in the binary image header(16384k)"* and reboot-loops.
+
+Build:
+```
+idf.py -B build.t3s3 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.t3s3" \
+       -DSDKCONFIG=build.t3s3/sdkconfig build
+```
 
 ---
 

@@ -18,6 +18,33 @@
 - The LoRa variant (SX1276/SX1262/SX1280/LR1121) is **not** host-detectable — read
   the shield silkscreen or probe the radio's SPI ID register.
 
+### AIDlink running on Board 4 (verified over the cable)
+
+- Boots clean on the quad profile: `Found 2MB PSRAM` / `SPI SRAM memory test OK`,
+  TinyUSB NCM enumerates as `Espressif Device` (PID `0x4000`, serial port gone),
+  the Mac's `en12` takes **172.20.1.2/26**, ICMP to 172.20.1.1 is 3/3 at 1.9 ms,
+  and the portal answers `/` → 302 → `/login` (6784 bytes).
+- ⚠️ **`sdkconfig.defaults.<target>` is auto-loaded AFTER `sdkconfig.defaults`.**
+  A per-board profile listed in `SDKCONFIG_DEFAULTS` therefore has to override
+  everything that file sets, not just the one setting you care about. Missing
+  the flash size bootlooped Board 4: bootloader said `SPI Flash Size : 16MB`,
+  then `spi_flash: Detected size(4096k) smaller than the size in the binary
+  image header(16384k). Probe failed.`
+- ⚠️ **Reflashing a bootlooping native-USB board is the hard part.** A chip
+  resetting every ~800 ms tears down its own USB-Serial-JTAG endpoint mid-sync,
+  so *every* esptool mode fails with "No serial data received" — the
+  1200-baud touch included. Read the error text as state:
+    * `No serial data received` + **silent** port → chip wedged; only a full
+      power cycle recovers it (unplug USB **and** the JST battery — a replug is
+      not a power cycle while the battery is attached).
+    * `Invalid head of packet (0x1B)` → 0x1B is ESC from ANSI-coloured
+      `ESP_LOG`: the chip is alive and *talking*, so `--before default_reset`
+      can now drive the strap. This is the state you want; retry immediately.
+- ⚠️ The Mac's Wi-Fi sits on `172.20.0.0/20`, which **contains** the AID's
+  `172.20.1.0/26`. `route -n get 172.20.1.1` reports en0, but the longer-prefix
+  route and the ARP entry both resolve via the cable. Always pin curl with
+  `--interface en12` or you may be talking to the wrong network entirely.
+
 ### Bring-up probe results (flashed to the board, same day)
 
 - **SSD1306 acks at 0x3C on SDA 18 / SCL 17.** Swapped pins ack nothing; QWIIC
