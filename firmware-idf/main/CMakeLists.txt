@@ -7,7 +7,13 @@ set(srcs "aidlink_main.c" "config.c" "config_util.c"
          "poller.c" "poller_sources.c" "geo.c" "services.c" "log.c"
          "statusled.c" "board.c" "display.c" "airports.c"
          "tzdb.c" "tzdb_data.c" "derive.c" "eta.c" "font_arrow.c" "font_cloud.c" "font_tod.c" "font_eta.c"
-         "perfdb.c" "perfdb_data.c" "eta_profile.c")
+         "perfdb.c" "perfdb_data.c" "eta_profile.c"
+         # board-independent view model + the per-board panel/layout drivers
+         "flightview.c"
+         "panel_st7789.c" "layout_tdisplay.c"
+         "panel_ssd1306.c" "layout_oled.c"
+         # 1bpp fonts for the mono OLED (tools/gen_oled_fonts.sh)
+         "font_aid8.c" "font_aid12.c" "font_aid16.c")
 set(reqs nvs_flash esp_wifi esp_netif esp_event lwip
          esp_http_server esp_http_client esp-tls json
          mbedtls esp_timer esp_app_format mdns)

@@ -127,9 +127,10 @@ static void send_hw_card(httpd_req_t *r) {
 
     chunk(r, "<div class='card'><h2>🔩 Hardware</h2><div style='overflow-x:auto'><table class='ctbl hwt'><tbody>");
 
-    snprintf(v, sizeof v, "%s%s%s", b->name,
-             b->has_display ? " · ST7789 320x170 display" : "",
-             b->has_ws2812 ? " · WS2812 status LED" : "");
+    snprintf(v, sizeof v, "%s%s%s%s", b->name,
+             b->disp_desc ? " · " : "", b->disp_desc ? b->disp_desc : "",
+             b->led == LED_WS2812 ? " · WS2812 status LED"
+                                  : (b->led == LED_GPIO ? " · GPIO status LED" : ""));
     hw_row(r, "Board", v);
 
     snprintf(v, sizeof v, "%s rev v%d.%d", model, ci.revision / 100, ci.revision % 100);

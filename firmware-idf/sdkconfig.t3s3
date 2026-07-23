@@ -1,0 +1,30 @@
+# Board 4 — LilyGO T3-S3 (ESP32-S3FH4R2) build profile.
+#
+# The ONLY thing that cannot be selected at runtime is the PSRAM interface:
+# ESP-IDF picks esp_psram_impl_quad.c or esp_psram_impl_octal.c at COMPILE time
+# (esp_psram/CMakeLists.txt), so one binary cannot drive both. Boards 2 and 3
+# carry 8 MB octal PSRAM; this board carries 2 MB QUAD, in-package.
+#
+# Everything else — display, layout, status LED — is chosen at runtime from the
+# eFuse MAC in board.c, so the sources are identical for every unit.
+#
+# Build:
+#   idf.py -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.t3s3" build
+#
+# Verified on hardware 2026-07-23: "PSRAM INIT OK, 2048 KB", 2045 KB SPI heap.
+# Building this board with the octal default instead yields ZERO PSRAM, because
+# CONFIG_SPIRAM_IGNORE_NOTFOUND lets it boot silently without any.
+
+# --- flash -------------------------------------------------------------------
+# sdkconfig.defaults.esp32s3 is auto-loaded per-target AFTER sdkconfig.defaults
+# and sets 16MB for the N16 boards. This file is listed last, so it gets the
+# final word — and it must, because the S3FH4R2 has only 4MB IN PACKAGE.
+# Symptom when this is wrong: the 2nd-stage bootloader reports "SPI Flash Size:
+# 16MB", then spi_flash aborts with "Detected size(4096k) smaller than the size
+# in the binary image header(16384k). Probe failed." and the chip reboot-loops.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# --- PSRAM -------------------------------------------------------------------
+CONFIG_SPIRAM_MODE_QUAD=y
+CONFIG_SPIRAM_SPEED_80M=y

@@ -1,5 +1,59 @@
 # AIDlink — Learning Journal
 
+## 2026-07-23 — Board 4 (LilyGO T3-S3) identified: S3FH4R2, quad 2 MB PSRAM
+
+- New unit is a **LilyGO T3-S3 LoRa** board, not another N16R8: **ESP32-S3FH4R2**
+  = 4 MB flash **and** 2 MB PSRAM *in-package*, both **quad**, MAC `1c:db:d4:bd:1f:1c`.
+- **Getting esptool onto a native-USB board that is running an app:** esptool cannot
+  reset it (`--before default_reset`/`usb_reset` → *"No serial data received"*),
+  because the app's TinyUSB CDC owns the port. **1200-baud touch works**: open the
+  CDC port at 1200 baud with DTR low, close it — the app reboots into the ROM
+  downloader and re-enumerates under a *different* device node (`usbmodem101` here,
+  not the MAC-derived one). Same trick should unstick any TinyUSB board.
+- `ioreg -p IOUSB -w0 -l` is the reliable way to read VID/PID/product string on this
+  Mac — `system_profiler SPUSBDataType` returned nothing.
+- **AIDlink won't run correctly here yet:** `sdkconfig` has `CONFIG_SPIRAM_MODE_OCT`;
+  quad PSRAM fails to init and `CONFIG_SPIRAM_IGNORE_NOTFOUND=y` hides it, so the
+  build boots with *zero* PSRAM. Needs `SPIRAM_MODE_QUAD` + a `board.c` entry.
+- The LoRa variant (SX1276/SX1262/SX1280/LR1121) is **not** host-detectable — read
+  the shield silkscreen or probe the radio's SPI ID register.
+
+### Bring-up probe results (flashed to the board, same day)
+
+- **SSD1306 acks at 0x3C on SDA 18 / SCL 17.** Swapped pins ack nothing; QWIIC
+  (10/21) is empty. A dark OLED at rest is normal — the chip powers up with the
+  display driver off (`0xAE`) and LilyGO's factory demo never inits it.
+- **`CONFIG_SPIRAM_MODE_QUAD` works: `INIT OK, 2048 KB`**, 2045 KB SPI heap +
+  377 KB internal. Confirms the two-build-profile plan (octal for Boards 2/3,
+  quad for Board 4) rather than one binary.
+- ⚠️ **`i2c_master_probe()` hangs forever on this board** — but *only* that call.
+  It spins in `i2c_ll_is_bus_busy()` (`esp_driver_i2c/i2c_master.c:543`) with
+  **no timeout**, so the task never returns and only `task_wdt` on IDLE0 reveals
+  it — the backtrace is identical every 5 s, which is the tell for "blocked in
+  one call" vs "looping". The rest of the `i2c_master` driver is fine: a
+  follow-up probe drove `esp_lcd_new_panel_io_i2c` → `esp_lcd_new_panel_ssd1306`
+  → `esp_lvgl_port` on the same bus with no stall. Avoid `i2c_master_probe`, not
+  the driver.
+- ⚠️ **`esp_lvgl_port`'s mono transform is polarity-inverted for an SSD1306.**
+  `_lvgl_port_transform_monochrome` (`esp_lvgl_port_disp.c:615-619`) writes a
+  **set** bit for BLACK pixels and clears it for lit ones; a set bit lights an
+  SSD1306 pixel, so a black-background UI renders as a fully white screen with
+  unlit text. Fix: `esp_lcd_panel_invert_color(panel, true)` (0xA6/0xA7) right
+  after `esp_lcd_panel_init`, which lets the layout keep the colour board's
+  dark-background / bright-text convention instead of restyling to black-on-white.
+- **Full mono display stack verified on Board 4**: `esp_lvgl_port` with
+  `.monochrome = true` + `LV_COLOR_FORMAT_I1` + full 128×64 buffer works at
+  `LV_COLOR_DEPTH=16`, so one binary can drive both the ST7789 and the SSD1306.
+  Cost measured: **8 KB internal + 20 KB SPI heap** (300→292 KB / 2048→2028 KB).
+- ⚠️ **`printf`/stdout never reaches the USB-Serial-JTAG console here** even with
+  `CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`, while `ESP_LOG` does. Use
+  **`esp_rom_printf`** for bring-up output (simple specifiers only: %d %u %x %s %c).
+- A **bit-banged** GPIO I²C scan is the reliable probe: every wait is bounded, so
+  it reports a result instead of wedging. Worth keeping as the pattern for any
+  future unknown bus.
+- USB-Serial-JTAG console output is dropped while no host is attached — put a
+  ~4 s `vTaskDelay` before the boot banner or you never see it.
+
 ## 2026-07-21 — "fetch failed" bursts in flight = per-poll TLS handshake starving internal SRAM
 
 Live debug on Board 3 (T-Display-S3) over the USB-NCM link, real ACI740 Viasat feed:

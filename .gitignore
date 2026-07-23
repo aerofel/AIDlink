@@ -1,6 +1,8 @@
 # build artifacts
 build/
 build-host/
+# per-board build dirs (e.g. build.t3s3 for the quad-PSRAM profile)
+build.*/
 __pycache__/
 *.bin
 *.elf
