@@ -1,5 +1,53 @@
 # AIDlink — Learning Journal
 
+## 2026-07-24 — In-flight position dropout in Jepp = lwIP socket-pool exhaustion
+
+Confirmed fix on the in-service T-Display-S3 (Board 3), in flight.
+
+- **Symptom:** aircraft position intermittently vanished from Jeppesen FliteDeck;
+  a reboot restored it for ~15 min, then it dropped again.
+- **Diagnostic signature (remember this):** ICMP and NAPT forwarding stayed
+  healthy while BOTH socket servers (httpd :80 and ADBP :24000) failed together
+  — accept then RST / zero bytes. **Socketful services dying while socketless
+  paths survive == socket-pool exhaustion, not CPU or heap.** `/status` showed
+  8.4 MB free heap, which ruled out memory outright.
+- **Root cause:** `CONFIG_LWIP_MAX_SOCKETS=10`, and esp_http_server's default
+  `max_open_sockets=7` is entitled to 7 of the 10 (httpd requires
+  `LWIP_MAX_SOCKETS-3 >= max_open_sockets`), leaving 3 for dnsfwd (2 UDP), the
+  ADBP listener + one push socket PER subscribed EFB, the poller keep-alive TLS,
+  mDNS, and the internet probe. Under load (several Wi-Fi clients + Jepp
+  subscribed) the pool exhausted, ADBP's push `socket()` failed, position gone.
+  The ~15-min recovery window is just how long the pool takes to refill.
+- **Fix (commit 22af8f0):** `LWIP_MAX_SOCKETS` 10→16, cap `hc.max_open_sockets=4`,
+  `MAX_SUBS` 6→4, and a `logln` in `connect_push` when `socket()` fails so the
+  next occurrence is visible in `/log` instead of inferred.
+- **Verified:** an inbound ADBP `getParameters` that RST/0-bytes'd before now
+  returns GPSLAT/GPSLON `validity="1"` + `GNSS_AVAIL=1`; position held past the
+  15-min mark in flight.
+
+### Process lessons (I got two things wrong first)
+
+- **Don't trust TCP-service probes from a dual-homed Mac.** When the Mac had BOTH
+  Wi-Fi (en0) and USB-NCM (en12) on the AID's 172.20.1.0/26, connections to
+  172.20.1.1 RST and latency read ~12 ms — pure routing artifact. Single-homing
+  (Wi-Fi off) dropped latency to ~2 ms and the RSTs that REMAINED were the real
+  ones. Always test the AID from a single path.
+- **My probing consumed the scarce sockets** and hastened the dropout — observer
+  effect. On a 10-socket pool, hammering :80/:24000 is not free. Verify with ONE
+  connection, not a retry loop.
+- I initially theorised "2 MB PSRAM / memory pressure" — wrong board (this is the
+  8 MB T-Display-S3) and wrong resource (heap was 8.4 MB free). The signature,
+  not the guess, is what nailed it.
+
+### Reflashing the in-service T-Display-S3 in flight (worked)
+
+`/dfu` (auth-gated) forces download-boot (`RTC_CNTL_FORCE_DOWNLOAD_BOOT`) and
+restarts — but the ROM port re-enumerates, so poll for whatever `/dev/cu.usbmodem*`
+appears and flash it IMMEDIATELY with `esptool --before no_reset` (it's already
+in download mode; a reset knocks it back to the app). One tight script:
+trigger /dfu → watch for the port → flash. Needs the portal (:80) up first, so if
+the AID is wedged, the user must power-cycle before /dfu is reachable.
+
 ## 2026-07-23 — Board 4 (LilyGO T3-S3) identified: S3FH4R2, quad 2 MB PSRAM
 
 - New unit is a **LilyGO T3-S3 LoRa** board, not another N16R8: **ESP32-S3FH4R2**
