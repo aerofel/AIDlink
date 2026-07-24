@@ -861,6 +861,11 @@ void web_start(aidlink_cfg_t *cfg) {
     hc.max_uri_handlers = 32;
     hc.stack_size = 8192;
     hc.lru_purge_enable = true;
+    // Cap the portal's share of the lwIP socket pool. The default is 7 of the
+    // ~16 total, which starved the ADBP push-to-EFB socket (Jeppesen lost the
+    // aircraft position in flight, 2026-07-24). The portal never needs 7 open
+    // browser sockets; 4 leaves the rest for dnsfwd, ADBP, the poller and mDNS.
+    hc.max_open_sockets = 4;
     if (httpd_start(&s_http, &hc) != ESP_OK) { ESP_LOGE(TAG, "httpd start failed"); return; }
     reg("/", HTTP_GET, h_root);
     reg("/status", HTTP_GET, h_status);

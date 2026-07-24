@@ -7,6 +7,15 @@ CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 # NAT: IDF v5.3 symbols (LWIP_IP_NAPT was the old name). NAPT depends on IP_FORWARD.
 CONFIG_LWIP_IP_FORWARD=y
 CONFIG_LWIP_IPV4_NAPT=y
+# Socket pool. The IDF default of 10 is far too small for this device's mix of
+# concurrent socket consumers: httpd (see web.c: capped at 4), dnsfwd (2 UDP),
+# the ADBP listener + one push socket PER subscribed EFB, the poller's keep-alive
+# TLS session, mDNS, and the internet probe. When the pool exhausts, socket()
+# fails and the socket-based servers die together while ICMP/NAPT keep working —
+# observed in flight 2026-07-24 as the ADBP push to Jeppesen FliteDeck failing,
+# so the aircraft position vanished while the feed and forwarding stayed healthy.
+# 16 is the lwIP maximum; it gives real headroom over the ~13-socket working set.
+CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # Browsers send large Cookie + User-Agent + Accept headers; the 512-byte default
 # makes esp_http_server reject them ("Header fields are too long") -> blank page.

@@ -19,7 +19,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define MAX_SUBS 6
+#define MAX_SUBS 4   // push socket per EFB; the socket pool (16) can't feed more
 static const char *TAG = "adbp";
 
 typedef struct {
@@ -153,7 +153,14 @@ static void handle_request(int cs, uint32_t peer_ip) {
 
 static int connect_push(sub_t *su) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0) return -1;
+    if (s < 0) {
+        // The smoking gun for the in-flight position dropout: the lwIP socket
+        // pool is exhausted, so we cannot open a push socket to the EFB and the
+        // aircraft position silently disappears from Jeppesen. Logged (not
+        // inferred) so /log shows it directly if the pool is ever tight again.
+        logln("[adbp] socket() FAILED — pool exhausted, cannot push to EFB");
+        return -1;
+    }
     struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
     setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
     struct sockaddr_in a = {0};
