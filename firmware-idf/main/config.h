@@ -43,9 +43,13 @@ typedef struct {
     // ADBP push framing (ARINC-834 experiment): frame_len 0=full/1=method/2=omit,
     // frame_delim 0=none/1=CRLF/2=LF/3=NUL, frame_prolog_each = XML prolog every frame.
     int      frame_len, frame_delim; bool frame_prolog_each;
-    // Aircraft identity — RAM-only, filled by the live position feed, empty on
-    // every boot (never loaded from or saved to NVS, never user-set): the feed
-    // is the single source of truth and a reboot deliberately forgets it.
+    // Aircraft identity as reported by the live position feed — RAM-only, empty
+    // on every boot (never loaded from or saved to NVS): the feed is
+    // AUTHORITATIVE and a reboot deliberately forgets what it said.
+    // It is no longer the ONLY source: the id_* fields below are a persisted
+    // fallback used strictly for whatever the feed leaves empty, because GNSS
+    // supplies no identity at all and a GPS-only boot would otherwise have no
+    // tail, flight number or route.
     char    ac_tail[12], ac_type[8];
     // --- theoretical-ETA performance profile (persisted, unlike identity:
     //     the selection must survive a reboot mid-flight) ---
@@ -55,6 +59,12 @@ typedef struct {
     int      src_type;         // 0=Viasat, 1=Panasonic, 2=custom
     char     vs_url[128];      // custom/test source URL
     uint32_t poll_ms, stale_ms;
+    // --- wired GNSS source ---
+    bool     gps_enable;       // allow GPS to be chosen at all
+    int      gps_pref;         // preferred source: 0 = Wi-Fi feed, 1 = GPS
+    // --- manual aircraft identity (persisted fallback, see ac_tail above) ---
+    // Used ONLY for fields the live feed leaves empty; the feed always wins.
+    char     id_tail[12], id_flight[16], id_orig[8], id_dest[8];
     // --- emulator ---
     bool     sim_enable;
     double   sim_lat, sim_lon, sim_trk, sim_gs, sim_alt;

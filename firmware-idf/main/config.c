@@ -61,6 +61,8 @@ void cfg_load(aidlink_cfg_t *c) {
     // (ADBP answers NCD and the display stays blank until identity arrives).
     c->ac_tail[0] = 0; c->ac_type[0] = 0;
     c->perf_type[0] = 0; c->winds_enable = true;
+    c->gps_enable = true; c->gps_pref = 0;   // default = feed: existing units unchanged
+    c->id_tail[0] = c->id_flight[0] = c->id_orig[0] = c->id_dest[0] = 0;
     c->src_type = 0;
     strcpy(c->vs_url, "http://192.168.4.2:8080/flight/info");
     // emulator preset: en-route BKK->SGN (airway M765-ish), FL360, eastbound
@@ -107,6 +109,12 @@ void cfg_load(aidlink_cfg_t *c) {
     // ac_tail/ac_type keys from older firmware are simply ignored.
     get_str(h, "perf_type", c->perf_type, sizeof c->perf_type);
     c->winds_enable = get_bool(h, "winds_en", c->winds_enable);
+    c->gps_enable   = get_bool(h, "gps_en", c->gps_enable);
+    c->gps_pref     = get_i32 (h, "gps_pref", c->gps_pref);
+    get_str(h, "id_tail",   c->id_tail,   sizeof c->id_tail);
+    get_str(h, "id_flight", c->id_flight, sizeof c->id_flight);
+    get_str(h, "id_orig",   c->id_orig,   sizeof c->id_orig);
+    get_str(h, "id_dest",   c->id_dest,   sizeof c->id_dest);
     c->src_type = get_i32(h, "src_type", c->src_type);
     get_str(h, "vs_url", c->vs_url, sizeof c->vs_url);
     c->poll_ms = get_u32(h, "poll_ms", c->poll_ms);
@@ -158,6 +166,12 @@ int cfg_save(const aidlink_cfg_t *c) {
     e |= nvs_set_u8(h, "frame_prolog", c->frame_prolog_each ? 1 : 0);
     e |= nvs_set_str(h, "perf_type", c->perf_type);
     e |= nvs_set_u8(h, "winds_en", c->winds_enable ? 1 : 0);
+    e |= nvs_set_u8 (h, "gps_en",   c->gps_enable ? 1 : 0);
+    e |= nvs_set_i32(h, "gps_pref", c->gps_pref);
+    e |= nvs_set_str(h, "id_tail",   c->id_tail);
+    e |= nvs_set_str(h, "id_flight", c->id_flight);
+    e |= nvs_set_str(h, "id_orig",   c->id_orig);
+    e |= nvs_set_str(h, "id_dest",   c->id_dest);
     e |= nvs_set_i32(h, "src_type", c->src_type);
     e |= nvs_set_str(h, "vs_url", c->vs_url);
     e |= nvs_set_u32(h, "poll_ms", c->poll_ms);
