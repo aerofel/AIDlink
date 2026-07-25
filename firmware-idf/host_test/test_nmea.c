@@ -58,22 +58,51 @@ static void test_gga_3d_fix(void) {
 static void test_gsa_fix_dimension(void) {
     nmea_state_t s;
     nmea_reset(&s);
+    // GGA establishes THAT there is a fix; GSA only refines it to 2D or 3D.
+    assert(nmea_line(&s, "$GNGGA,012952.00,2217.59913,S,16626.35477,E,1,06,1.30,22.3,M,56.6,M,,*66"));
     assert(nmea_line(&s, "$GNGSA,A,3,13,41,08,23,33,,,,,,,,3.36,1.30,3.10,4*0C"));
     assert(s.fix == NMEA_FIX_3D);
     assert(NEAR(s.hdop, 1.30));
 
     nmea_reset(&s);
+    assert(nmea_line(&s, "$GNGGA,012952.00,2217.59913,S,16626.35477,E,1,06,1.30,22.3,M,56.6,M,,*66"));
     assert(nmea_line(&s, "$GNGSA,A,1,,,,,,,,,,,,,99.99,99.99,99.99,4*36"));
-    assert(s.fix == NMEA_FIX_NONE);
+    assert(s.fix == NMEA_FIX_2D);   // GGA still claims a fix, GSA gives no dimension
 
     nmea_reset(&s);
+    assert(nmea_line(&s, "$GNGGA,012952.00,2217.59913,S,16626.35477,E,1,06,1.30,22.3,M,56.6,M,,*66"));
     assert(nmea_line(&s, "$GNGSA,A,2,13,,,,,,,,,,,,5.00,2.00,3.00,1*06"));
     assert(s.fix == NMEA_FIX_2D);
+
+    // GSA alone, with no GGA ever seen, must NOT claim a fix.
+    nmea_reset(&s);
+    assert(nmea_line(&s, "$GNGSA,A,3,13,41,08,23,33,,,,,,,,3.36,1.30,3.10,4*0C"));
+    assert(s.fix == NMEA_FIX_NONE);
+}
+
+// Regression for a bug seen live on Board 3: the receiver reported "3D fix, 0
+// satellites used, HDOP 99.99". Per-constellation GSA dimensions were retained
+// forever, so a constellation that stopped reporting left a stale 3D behind.
+// GGA's quality field is authoritative and now gates the whole thing.
+static void test_stale_3d_cleared_by_gga(void) {
+    nmea_state_t s;
+    nmea_reset(&s);
+    assert(nmea_line(&s, "$GNGGA,012952.00,2217.59913,S,16626.35477,E,1,06,1.30,22.3,M,56.6,M,,*66"));
+    assert(nmea_line(&s, "$GNGSA,A,3,13,41,08,23,33,,,,,,,,3.36,1.30,3.10,4*0C"));
+    assert(s.fix == NMEA_FIX_3D);
+
+    // Signal lost: GGA drops to quality 0 while the stale BeiDou GSA is never
+    // contradicted. The fix must go away regardless.
+    assert(nmea_line(&s, "$GNGGA,,,,,,0,00,99.99,,,,,,*56"));
+    assert(s.fix == NMEA_FIX_NONE);
+    assert(s.sats_used == 0);
+    assert(!s.have_pos);
 }
 
 static void test_gsa_used_per_constellation(void) {
     nmea_state_t s;
     nmea_reset(&s);
+    assert(nmea_line(&s, "$GNGGA,012952.00,2217.59913,S,16626.35477,E,1,06,1.30,22.3,M,56.6,M,,*66"));
 
     // The real bench case: the solution was carried entirely by BeiDou (system
     // id 4, five PRNs) while GPS was visible but contributing nothing.
@@ -100,8 +129,9 @@ static void test_gsa_used_per_constellation(void) {
     assert(s.used_gps == 3);
     assert(s.fix == NMEA_FIX_3D);
 
-    // Everything dropping out finally clears the fix.
+    // Everything dropping out, with GGA agreeing, finally clears the fix.
     assert(nmea_line(&s, "$GNGSA,A,1,,,,,,,,,,,,,99.99,99.99,99.99,1*33"));
+    assert(nmea_line(&s, "$GNGGA,,,,,,0,00,99.99,,,,,,*56"));
     assert(s.fix == NMEA_FIX_NONE);
 }
 
@@ -184,6 +214,7 @@ int main(void) {
     test_gga_3d_fix();
     test_gsa_fix_dimension();
     test_gsa_used_per_constellation();
+    test_stale_3d_cleared_by_gga();
     test_rmc();
     test_gsv_per_constellation();
     test_robustness();

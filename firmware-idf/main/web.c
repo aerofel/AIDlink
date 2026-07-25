@@ -455,7 +455,8 @@ static esp_err_t h_root(httpd_req_t *r) {
                       "<b>%s</b>.",
                    fx, g.sats_used, g.sats_view, g.hdop,
                    g.used_gps, g.used_glo, g.used_gal, g.used_bds, g.used_qzss,
-                   g.pps_interval_us ? "locked" : "—", (unsigned)g.csum_errors,
+                   (g.pps_interval_us > 900000 && g.pps_interval_us < 1100000)
+                       ? "1 Hz locked" : "—", (unsigned)g.csum_errors,
                    live == SRC_GPS ? "the GNSS receiver"
                                    : live == SRC_FEED ? "the Wi-Fi feed" : "nothing");
             chunk(r, " The preferred source is used whenever it is live; the other takes "

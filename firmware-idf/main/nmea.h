@@ -21,6 +21,7 @@ typedef struct {
     double   hdop;
     double   gs_kt, track_deg;
     uint64_t utc_ms;          // epoch ms from RMC date+time; 0 when unknown
+    int      gga_quality;     // GGA field 6: 0 = no fix. Authoritative.
     int      sats_used;       // GGA field 7
     int      sats_view;       // sum of the per-talker GSV counts
     int      sats_gps, sats_glo, sats_gal, sats_bds, sats_qzss;   // in view

@@ -48,6 +48,19 @@ static int split(char *buf, char *f[], int cap) {
 
 static bool has(char *const f[], int n, int i) { return i < n && f[i][0]; }
 
+// GGA's quality field is single-valued and authoritative for "is there a fix at
+// all"; the per-constellation GSA dimensions only refine it to 2D or 3D. Without
+// this gate a constellation that stops reporting leaves a stale 3D behind, which
+// showed up on the bench as "3D fix, 0 satellites used, HDOP 99.99".
+static void recompute_fix(nmea_state_t *s) {
+    if (s->gga_quality == 0) { s->fix = NMEA_FIX_NONE; return; }
+    nmea_fix_t best = NMEA_FIX_NONE;
+    for (int i = 0; i < 6; i++) if (s->fix_sys[i] > best) best = s->fix_sys[i];
+    // GGA says there is a fix, so never report less than 2D even if no GSA has
+    // arrived yet this session.
+    s->fix = (best == NMEA_FIX_NONE) ? NMEA_FIX_2D : best;
+}
+
 // "ddmm.mmmm" / "dddmm.mmmm" -> signed degrees. deg_digits is 2 for latitude,
 // 3 for longitude. Returns false when the field is empty or malformed.
 static bool parse_coord(const char *v, const char *hemi, int deg_digits, double *out) {
@@ -127,9 +140,11 @@ bool nmea_line(nmea_state_t *s, const char *line) {
         } else {
             s->have_pos = false;               // keep the last position; flag it stale
         }
+        if (has(f, n, 6)) s->gga_quality = atoi(f[6]);
         if (has(f, n, 7)) s->sats_used = atoi(f[7]);
         if (has(f, n, 8)) s->hdop = atof(f[8]);
         if (has(f, n, 9)) s->alt_m = atof(f[9]);
+        recompute_fix(s);
         return true;
     }
 
@@ -176,9 +191,7 @@ bool nmea_line(nmea_state_t *s, const char *line) {
         // without erasing what another constellation reported this cycle.
         if (sys >= 1 && sys <= 5) s->fix_sys[sys] = fx;
         else                      s->fix_sys[0]   = fx;   // unattributed talker
-        nmea_fix_t best = NMEA_FIX_NONE;
-        for (int i = 0; i < 6; i++) if (s->fix_sys[i] > best) best = s->fix_sys[i];
-        s->fix = best;
+        recompute_fix(s);
         return true;
     }
 

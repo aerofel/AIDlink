@@ -295,7 +295,10 @@ void flightview_status(fv_status_t *s)
             strlcat(cons, one, sizeof cons);
         }
         if (!cons[0]) strlcpy(cons, "none", sizeof cons);
-        bool pps = g.pps_interval_us > 0 && (now - g.last_rx_ms) < 2000;
+        // A stale interval is not a healthy PPS: when the fix drops the receiver
+        // stops pulsing and the last measured gap can be many seconds.
+        bool pps = g.pps_interval_us > 900000 && g.pps_interval_us < 1100000 &&
+                   (now - g.last_rx_ms) < 2000;
         snprintf(s->overlay_l2, sizeof s->overlay_l2, "%s  PPS %s",
                  cons, pps ? "ok" : "--");
     }
