@@ -6,6 +6,9 @@
 // table, traffic log, and inline polling JS. Streamed as HTTP chunks (empty
 // strings are skipped — a zero-length chunk would terminate the response).
 #include "web.h"
+#include "gps.h"
+#include "possrc.h"
+#include "poller.h"
 #include "auth.h"
 #include "netcore.h"
 #include "pos.h"
@@ -88,6 +91,18 @@ static char *json_esc(char *dst, size_t cap, const char *src) {
 }
 
 // ---- v9 field helpers (byte-identical output) ----
+// Identity codes are conventionally upper-case; normalise on save so "nwww"
+// and "NWWW" cannot behave differently in the gazetteer lookup.
+static void upper_trim(char *v) {
+    char *b = v;
+    while (*b == ' ') b++;
+    size_t n = strlen(b);
+    while (n && b[n - 1] == ' ') n--;
+    for (size_t i = 0; i < n; i++)
+        v[i] = (b[i] >= 'a' && b[i] <= 'z') ? (char)(b[i] - 32) : b[i];
+    v[n] = 0;
+}
+
 static void ff_text(httpd_req_t *r, const char *lbl, const char *nm, const char *val, const char *type, bool full) {
     chunkf(r, "<div class='f%s'><label>%s</label><input type='%s' name='%s' value='", full ? " full" : "", lbl, type, nm);
     esc_chunk(r, val);
@@ -414,6 +429,52 @@ static esp_err_t h_root(httpd_req_t *r) {
     ff_tog(r, "Statistical winds (position)", "windsEn", c->winds_enable);
     chunk(r, "</div><div class='note'>Theoretical ETA + TOD from the selected profile (climb/cruise/descent + seasonal winds aloft, Offto data). The live feed <b>auto-selects</b> a matching type when it reports one. Choose <b>—</b> to keep the plain ground-speed estimator.</div></div>");
 
+    // 🛰 GNSS — rendered ONLY when a receiver has actually answered. Detection,
+    // not the board profile, decides visibility (spec 2026-07-25).
+    if (gps_has_hw()) {
+        gps_state_t g; gps_get(&g);
+        if (g.present) {
+            chunk(r, "<div class='card'><h2>🛰 GNSS (wired receiver)</h2><div class='grid'>");
+            ff_tog(r, "Use GPS as a position source", "gpsEn", c->gps_enable);
+            ff_tog(r, "Prefer GPS over the Wi-Fi feed", "gpsPref", c->gps_pref == 1);
+            chunk(r, "</div><div class='note'>");
+            const char *fx = g.fix == NMEA_FIX_3D ? "3D fix"
+                           : g.fix == NMEA_FIX_2D ? "2D fix" : "no fix";
+            possrc_t live = poller_live_source();
+            chunkf(r, "Live: <b>%s</b> · %d/%d satellites · HDOP %.2f · "
+                      "GPS %d / GLONASS %d / Galileo %d / BeiDou %d / QZSS %d · "
+                      "PPS %s · checksum errors %u<br>Position is currently coming from "
+                      "<b>%s</b>.",
+                   fx, g.sats_used, g.sats_view, g.hdop,
+                   g.sats_gps, g.sats_glo, g.sats_gal, g.sats_bds, g.sats_qzss,
+                   g.pps_interval_us ? "locked" : "—", (unsigned)g.csum_errors,
+                   live == SRC_GPS ? "the GNSS receiver"
+                                   : live == SRC_FEED ? "the Wi-Fi feed" : "nothing");
+            chunk(r, " The preferred source is used whenever it is live; the other takes "
+                     "over automatically if it is not, so a dropout never blanks the EFB."
+                     "</div></div>");
+        }
+    }
+
+    // 🪪 Aircraft identity fallback — shown on every board: a feed that omits the
+    // route benefits from this just as much as a GNSS-only unit does.
+    {
+        pos_state_t ip; pos_get(&ip);
+        chunk(r, "<div class='card'><h2>🪪 Aircraft identity (fallback)</h2><div class='grid'>");
+        ff_text(r, "Tail",        "idTail",   c->id_tail,   "text", false);
+        ff_text(r, "Flight",      "idFlight", c->id_flight, "text", false);
+        ff_text(r, "Origin",      "idOrig",   c->id_orig,   "text", false);
+        ff_text(r, "Destination", "idDest",   c->id_dest,   "text", false);
+        chunk(r, "</div><div class='note'>Used <b>only</b> for fields the live feed leaves "
+                 "empty — the feed always wins and overrides these. GNSS supplies no "
+                 "identity at all, so without these a GPS-only unit has no tail, flight "
+                 "number or route (and therefore no distance-to-go or ETA).<br>In use now: ");
+        chunkf(r, "tail <b>%s</b> · flight <b>%s</b> · route <b>%s</b> → <b>%s</b>",
+               ip.tail[0] ? ip.tail : "—", ip.flight[0] ? ip.flight : "—",
+               ip.orig[0] ? ip.orig : "—", ip.dest[0] ? ip.dest : "—");
+        chunk(r, "</div></div>");
+    }
+
     // 🔒 Security
     chunk(r, "<div class='card'><h2>🔒 Security (settings login)</h2><div class='grid'>");
     ff_tog(r, "Require login", "authEnable", c->auth_enable);
@@ -627,6 +688,12 @@ static esp_err_t h_save(httpd_req_t *r) {
         if (c->perf_type[0] && !perfdb_find(c->perf_type)) c->perf_type[0] = 0;
     }
     c->winds_enable = fld(body, "windsEn", v, sizeof v);
+    c->gps_enable   = fld(body, "gpsEn", v, sizeof v);
+    c->gps_pref     = fld(body, "gpsPref", v, sizeof v) ? 1 : 0;
+    if (fld(body, "idTail",   v, sizeof v)) { upper_trim(v); strlcpy(c->id_tail,   v, sizeof c->id_tail); }
+    if (fld(body, "idFlight", v, sizeof v)) { upper_trim(v); strlcpy(c->id_flight, v, sizeof c->id_flight); }
+    if (fld(body, "idOrig",   v, sizeof v)) { upper_trim(v); strlcpy(c->id_orig,   v, sizeof c->id_orig); }
+    if (fld(body, "idDest",   v, sizeof v)) { upper_trim(v); strlcpy(c->id_dest,   v, sizeof c->id_dest); }
     if (fld(body, "adbpPort", v, sizeof v)) c->adbp_port = atoi(v);
     if (fld(body, "dsPort", v, sizeof v)) c->ds_port = atoi(v);
     c->napt_enable = fld(body, "napt", v, sizeof v);
@@ -689,17 +756,37 @@ static esp_err_t h_status(httpd_req_t *r) {
     const char *dep = airports_icao(p.orig); if (!dep) dep = p.orig;
     const char *arr = airports_icao(p.dest); if (!arr) arr = p.dest;
 
-    char json[768];
+    // GNSS block: omitted entirely on boards with no receiver pins, so a
+    // consumer can tell "no GNSS hardware" from "GNSS present but unfixed".
+    char gpsj[320] = "";
+    possrc_t live = poller_live_source();
+    if (gps_has_hw()) {
+        gps_state_t g; gps_get(&g);
+        snprintf(gpsj, sizeof gpsj,
+            ",\"gps\":{\"present\":%s,\"enabled\":%s,\"pref\":\"%s\",\"fix\":%d,"
+            "\"sats_used\":%d,\"sats_view\":%d,\"hdop\":%.2f,"
+            "\"gps\":%d,\"glo\":%d,\"gal\":%d,\"bds\":%d,\"qzss\":%d,"
+            "\"pps_us\":%u,\"csum_err\":%u}",
+            g.present ? "true" : "false", CFG->gps_enable ? "true" : "false",
+            CFG->gps_pref == 1 ? "gps" : "feed", (int)g.fix,
+            g.sats_used, g.sats_view, g.hdop,
+            g.sats_gps, g.sats_glo, g.sats_gal, g.sats_bds, g.sats_qzss,
+            (unsigned)g.pps_interval_us, (unsigned)g.csum_errors);
+    }
+
+    char json[1152];
     snprintf(json, sizeof json,
         "{\"sta\":%s,\"ssid\":\"%s\",\"clients\":%d,\"valid\":%s,\"sim\":%s,"
         "\"lat\":%.5f,\"lon\":%.5f,\"trk\":%.1f,\"gs\":%.1f,\"alt\":%.0f,\"staip\":\"%s\","
         "\"tail\":\"%s\",\"flight\":\"%s\",\"dep\":\"%s\",\"arr\":\"%s\","
-        "\"pollok\":%s,\"pollage\":%ld,\"pollmsg\":\"%s\",\"heap\":%u}",
+        "\"pollok\":%s,\"pollage\":%ld,\"pollmsg\":\"%s\",\"heap\":%u"
+        ",\"live_source\":\"%s\"%s}",
         up ? "true" : "false", ssid_e, netcore_ap_client_count(),
         valid ? "true" : "false", p.simulated ? "true" : "false",
         p.lat, p.lon, p.track_deg, p.gs_kt, p.alt_ft, staip,
         p.tail[0] ? p.tail : CFG->ac_tail, p.flight, dep, arr,
-        pok ? "true" : "false", pollage, pmsg_e, (unsigned)poller_last_heap());
+        pok ? "true" : "false", pollage, pmsg_e, (unsigned)poller_last_heap(),
+        live == SRC_GPS ? "gps" : live == SRC_FEED ? "feed" : "none", gpsj);
     httpd_resp_set_type(r, "application/json");
     httpd_resp_sendstr(r, json);
     return ESP_OK;
