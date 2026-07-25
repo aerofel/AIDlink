@@ -137,6 +137,62 @@ USB mode:    USB-Serial/JTAG
 
 ---
 
+## Flashing a running unit with no hands (Boards 3/4/5)
+
+These boards have a **single USB-C and no UART bridge**, and once AIDlink is
+running TinyUSB turns that port into USB-NCM — so there is no serial port for
+esptool to grab, and no DTR/RTS line to pull the chip into the ROM downloader.
+Everything below exists to work around that.
+
+**`tools/flash-aid.sh` does the whole cycle unattended:**
+
+```bash
+AIDLINK_PASS=... tools/flash-aid.sh firmware-idf/build
+```
+
+It finds the NCM interface, logs into the portal, hits `/dfu`, waits for the ROM
+port, flashes the app slot, and waits for the unit to answer again.
+
+### The two rules that make it work
+
+1. **`--before no_reset`, always.** After `/dfu` the chip is *already* in the
+   downloader. Asking esptool to reset it again (`default_reset`, `usb_reset`)
+   toggles DTR/RTS on the USB-Serial-JTAG and is what produces the
+   **"port present but silent"** wedge — `No serial data received` on every
+   subsequent attempt. Never reset a chip that is already where you want it.
+2. **App slot only** (`0x10000`). The bootloader and partition table do not
+   change between builds, and **NVS at `0x9000` holds the Wi-Fi credentials** —
+   `erase_flash` here costs you the uplink config.
+
+### What still cannot be automated
+
+`esptool`'s "hard reset" over USB-Serial-JTAG is a **USB-level reset, not an EN
+pulse**. It therefore cannot:
+
+- clear the `FORCE_DOWNLOAD_BOOT` latch that `/dfu` sets, so a flashed app
+  sometimes will not start until **one RST tap** (`boot:0x23` = forced download);
+- recover a wedged downloader, which needs a **cable replug** (a true power
+  cycle — note a replug is *not* a power cycle if a battery is on the JST).
+
+Observed rate on Board 3 (2026-07-25): roughly **half** of `/dfu` attempts in one
+session wedged and needed a replug. When it works it is completely hands-off;
+when it does not, no amount of esptool flags recovers it. Budget for that.
+
+### Recovering by hand
+
+| Symptom | Fix |
+|---|---|
+| Port present, `No serial data received` | replug the cable |
+| Flashed OK but the app never starts, still `PID 0x1001`/`0x0009` | tap **RST** once (no BOOT) |
+| Portal unreachable, so `/dfu` is impossible | hold **BOOT**, tap **RST**, keep holding ~1 s, release |
+| Nothing works | unplug, hold **BOOT**, plug in, hold 2 s more, release |
+
+⚠️ **BOOT is not the user key.** On Board 3 the user key is **GPIO14** (it raises
+the GNSS overlay on the display); BOOT is **GPIO0**, next to RST by the USB-C.
+Holding GPIO14 does nothing for flashing.
+
+---
+
 ## Board 4 — LilyGO T3-S3 (the LoRa unit)
 
 **Detected by esptool 4.11 (2026-07-23):**
