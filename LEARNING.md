@@ -61,6 +61,49 @@ modified.
   during the round-trip between flashing and opening the console, and reads as a
   dead board.
 
+## 2026-07-25 — GNSS shipped as a selectable source: what the hardware taught
+
+Implementation of the spec above. Seven feature commits on
+`feat/gps-position-source`. Bugs worth remembering, all found by running rather
+than by reading:
+
+- **"3D fix, 0 satellites used, HDOP 99.99"** — self-contradictory state seen
+  live. Cause: per-constellation GSA fix dimensions were kept indefinitely, so a
+  constellation that stopped reporting left a stale 3D that won the max().
+  **GGA's quality field is the single authoritative answer** to "is there a fix";
+  GSA only refines it to 2D/3D. Gate on GGA, always.
+- **GSA `systemId` is field 18, not 17.** Field 17 is VDOP, which parses as a
+  perfectly believable constellation id — a silent wrong answer, not a crash.
+- **A trailing empty GSA erased a good 3D fix** reported moments earlier by
+  another constellation. Receivers emit one GSA per constellation every cycle.
+- **PPS "locked" was a lie.** `pps_interval_us` is the last measured gap; when
+  the fix drops the receiver stops pulsing and the value goes stale. An
+  18-second interval displayed as locked. Require 0.9–1.1 s.
+- **LVGL paints children in creation order.** An opaque overlay built early was
+  drawn *under* the route widgets built later. `lv_obj_move_foreground()` at
+  show time, rather than reshuffling the build.
+- **`gpio_config()` with `GPIO_INTR_DISABLE` then `gpio_set_intr_type()` leaves
+  the interrupt off.** The ISR registers and never fires — indistinguishable
+  from a dead wire. Cross-check any edge count with a polling task before
+  blaming hardware.
+- **`LV_SYMBOL_GPS` already exists** in the Montserrat symbol font; the planned
+  font-generation step was unnecessary.
+- **`layout_oled.c` needed no change**: its indicator is driven by
+  `pos_fix_seq()`, which the arbiter bumps for any source.
+
+### Verified on Board 3
+
+3D fix through the new parser (6 sats, HDOP 1.30), PPS at 1.000012 s, per-
+constellation solving counts, both portal cards, the three header tiles, the
+`gps` object in `/status`, and the two bug fixes above. All 10 host suites pass.
+
+### NOT yet verified (needs sky the bench does not have)
+
+The **green** tile/icon state, an actual **switch to GPS as the live source**,
+**fallback** in either direction, and the **no-GNSS board** regression check on
+Board 2/4. The code paths are host-tested but have not been exercised end to end
+against a live fix.
+
 ## 2026-07-24 — In-flight position dropout in Jepp = lwIP socket-pool exhaustion
 
 Confirmed fix on the in-service T-Display-S3 (Board 3), in flight.
