@@ -120,6 +120,50 @@ Step 4 is essential. GNSS supplies no tail, flight number or route, so without d
 identity row, route, ETA, trip bar and destination-local clock would all blank the moment GPS took
 over. `flight`/`tail`/`orig`/`dest` therefore persist across a source switch.
 
+## Manual identity fallback
+
+Carrying identity forward only helps once the feed has supplied it at least once. A unit that cold-
+boots on GPS alone — no feed ever seen — still has no tail, flight number or route, so the identity
+row, distance-to-go, ETA and destination clock stay blank. Four user-settable fields close that gap.
+
+**This deliberately relaxes an existing invariant.** `config.h` currently documents aircraft
+identity as *"RAM-only, filled by the live position feed … never user-set: the feed is the single
+source of truth and a reboot deliberately forgets it."* That comment must be updated: the feed
+remains **authoritative**, but is no longer the **only** source. The new fields sit strictly
+*beneath* it.
+
+### Precedence — per field, not all-or-nothing
+
+For each of `tail`, `flight`, `orig`, `dest` independently:
+
+```
+effective = feed_value  if feed_value is non-empty
+          = cfg_value   otherwise
+```
+
+- The feed **always wins** when it supplies a value, overwriting the manual one for that field.
+- A value the feed supplied earlier this boot counts as a feed value and keeps winning even if the
+  feed later stalls — a remembered real value beats a possibly-stale typed one.
+- Fields are independent: a feed that gives tail and flight but no route leaves `orig`/`dest`
+  coming from config.
+- Manual values are **persisted to NVS**, because the selection must survive a reboot mid-flight
+  (same reasoning as `perf_type`).
+
+Substitution happens **in the arbiter**, when `pos_state_t` is composed — not in `flightview.c`.
+Applying it centrally means ADBP and `/status` see the same identity the display does.
+
+> **Operational note:** this means a manually-typed tail and flight number are served to the EFB
+> over ADBP as ordinary identity. That is the intent — GPS-only operation should show the correct
+> flight in Jeppesen — but it does mean the operator is responsible for the values being right.
+
+Aircraft **type** needs no new field: `flightview_t.actype` already resolves from the portal
+`perf_type` choice or the feed, so the manual path exists.
+
+### Validation
+
+Uppercased and trimmed on save. `tail` ≤ 11 chars, `flight` ≤ 15, `orig`/`dest` ≤ 4 (ICAO or IATA;
+the existing airport gazetteer resolves either). Empty means "no fallback" — never a placeholder.
+
 The choice function is **pure and host-tested**:
 
 ```c
@@ -200,6 +244,11 @@ being fed.
 - `gps_pref` — preferred source (feed | GPS).
 - Read-only live detail: fix, sats used / in view, HDOP, constellations, PPS, checksum errors.
 
+**Settings — aircraft identity fallback.** A section shown on **every** board, GPS or not (a feed
+that omits route benefits equally): `id_tail`, `id_flight`, `id_orig`, `id_dest`. Each field shows
+the live effective value beside it, marked *from feed* or *from config*, so it is obvious at a
+glance which layer is winning.
+
 **`/status` JSON** gains, only when the board has GPS pins:
 
 ```json
@@ -219,6 +268,13 @@ Two new NVS keys in namespace `aidlink`:
 |---|---|---|---|
 | `gps_enable` | bool | `true` | Allow GPS to be selected at all. |
 | `gps_pref` | int | `0` (feed) | Preferred source: 0 = feed, 1 = GPS. |
+| `id_tail` | char[12] | `""` | Fallback tail, used only when the feed supplies none. |
+| `id_flight` | char[16] | `""` | Fallback flight number. |
+| `id_orig` | char[8] | `""` | Fallback origin (ICAO or IATA). |
+| `id_dest` | char[8] | `""` | Fallback destination (ICAO or IATA). |
+
+The four `id_*` keys are **new persisted** config, unlike the existing RAM-only `ac_tail`/`ac_type`
+which stay feed-filled and boot-forgotten.
 
 `gps_pref` defaults to **feed** so existing units behave exactly as they do today until the operator
 deliberately switches.
@@ -242,6 +298,8 @@ deliberately switches.
   (`$GNGGA,012952.00,2217.59913,S,16626.35477,E,1,06,1.30,22.3,M,56.6,M,,*66`), multi-talker GSV,
   bad checksums, empty fields and truncated lines.
 - `test_pos_choose.c` — the six-row arbitration truth table above.
+- `test_identity.c` — per-field precedence: feed-wins, config-fills-empty, mixed (feed gives tail
+  only), remembered-feed-value-beats-config-after-stall, and validation/uppercasing on save.
 - Quality-mapping table: `(fix, hdop, sats) → fv_gq_t` across every boundary.
 
 **On-target:** both sources live; forced fallback each way; button gestures; all five colours;
