@@ -1,5 +1,58 @@
 # AIDlink — Learning Journal
 
+## 2026-07-25 — Wired GNSS on Board 3: pins, a counterfeit M10, and a 3.0 V antenna floor
+
+Bench-validated a serial GNSS module on the T-Display-S3 (Board 3) with a
+throwaway probe app. All three signals confirmed working; AIDlink itself was not
+modified.
+
+- **Only two GPIOs are free on *every* board in the fleet: 16 and 12.** The
+  T-Display-S3 header exposes {1,2,3,10,11,12,13,16,17,18,21,43,44}; intersecting
+  that against the T3-S3 leaves just those two. On the T3-S3, **17 = OLED SCL**,
+  **18 = OLED SDA**, **21 = QWIIC SCL *and* LoRa DIO3**, **10 = QWIIC SDA + LoRa
+  DIO4**, 2/11/13/14 = microSD, 43/44 = UART0 console (`CONFIG_ESP_CONSOLE_UART_DEFAULT=y`).
+  Final wiring: **RX=16, TX=12, PPS=21 (Board 3 only)**. GPIO12 is safe on S3 —
+  the "GPIO12 is a strapping pin" trap is original-ESP32 only (S3 straps are 0/3/45/46).
+- **Keep TX.** It is what allows `UBX-CFG-VALSET` to set the airborne dynamic
+  model; the default *portable* model caps at 12 000 m / 310 m/s, and FL390 ≈
+  11 887 m sits right on that ceiling.
+- **The "NEO-M8N" is a counterfeit — the silicon is M10.** Can reads
+  `NEO-M8N-0-10`, but MON-VER reports `hwVersion=000A0000`, `PROTVER=34.10`,
+  `ROM SPG 5.10`. A real M8N is `00080000` / PROTVER 18–20.x / `ROM CORE 3.01`.
+  Consequence: **legacy `UBX-CFG-NAV5` does not exist on this part** — all config
+  must go through `CFG-VALSET` (`CFG-NAVSPG-DYNMODEL` = `0x20110021`, value 8).
+  Firmware runs from mask ROM, so there is nothing to update.
+- **The active antenna has a 3.0 V floor, and the board is 5 V-input.** With VCC
+  on the 3V3 rail the module's AMS1117 (1.1 V dropout) produced ~2.2 V — under the
+  antenna's rated minimum. Signature: **AGC pinned at 11 %** (`UBX-MON-RF`), not
+  the high AGC a *disconnected* antenna gives. On 5 V, AGC recovered to 30–45 %.
+  ⚠️ The header 5 V pin is VBUS, so **the GNSS dies on JST battery** — needs a
+  boost, a low-dropout module, or a passive antenna before this becomes a
+  position source.
+- **`UBX-MON-RF` is the diagnostic that matters.** AGC direction disambiguates:
+  *low* AGC = too much input power (interference / unstable LNA), *high* AGC =
+  no signal reaching the front end. NMEA alone cannot tell these apart.
+- **Patch antennas are directional — the labelled face is the BASE.** Label-up
+  cost ~12–15 dB (best SNR 28 dB-Hz, 1–2 sats). Flipped label-down onto a metal
+  tray as a ground plane, under open sky: **6 sats, HDOP 1.30, 3D fix**.
+- **PPS gotcha, self-inflicted:** `gpio_config()` with `.intr_type =
+  GPIO_INTR_DISABLE` followed by `gpio_set_intr_type()` **leaves the interrupt
+  disabled** — the ISR registers but never fires, which looks exactly like a dead
+  wire. Needs an explicit `gpio_intr_enable()`. Always cross-check an edge count
+  with a polling task before blaming hardware. Once fixed: `isr=10 poll=10 in 10 s`,
+  interval 1.000 s, ~10 % duty (100 ms pulse) — the u-blox default.
+- **Board-3-only PPS:** the eventual driver must carry the pins in the per-model
+  `board_t` profile (`.gps_pps_gpio = -1` on `PROF_T3S3`), so Boards 2/4/5 stay
+  unaffected and GNSS stays optional.
+- **Flash ritual, reconfirmed:** `/dfu` sets `FORCE_DOWNLOAD_BOOT`, which survives
+  a soft reset — a flashed app will NOT run until an **RST tap or power cycle**.
+  Poking DTR/RTS at that point wedges the ROM (`No serial data received` + silent
+  port). Recovery is a **replug**, which also clears the latch. After that, a
+  running app with USB-Serial-JTAG reflashes cleanly via `--before usb_reset`.
+- **Probes must loop forever.** A one-shot diagnostic finishes its ~35 s run
+  during the round-trip between flashing and opening the console, and reads as a
+  dead board.
+
 ## 2026-07-24 — In-flight position dropout in Jepp = lwIP socket-pool exhaustion
 
 Confirmed fix on the in-service T-Display-S3 (Board 3), in flight.
