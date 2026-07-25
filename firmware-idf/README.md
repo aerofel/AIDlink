@@ -149,6 +149,7 @@ clang -Imain -o /tmp/t host_test/test_tzdb.c            main/tzdb.c main/tzdb_da
 clang -Imain -o /tmp/t host_test/test_derive.c          main/derive.c main/geo.c -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_nmea.c            main/nmea.c       -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_possrc.c          main/possrc.c         && /tmp/t
+clang -Imain -o /tmp/t host_test/test_gpsqual.c         main/gpsqual.c        && /tmp/t
 clang -Imain -o /tmp/t host_test/test_eta.c             main/eta.c        -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_perfdb.c          main/perfdb.c main/perfdb_data.c -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_eta_profile.c     main/eta_profile.c main/perfdb.c main/perfdb_data.c main/eta.c main/geo.c -lm && /tmp/t

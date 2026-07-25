@@ -5,6 +5,8 @@
 // out verbatim in behaviour and stripped of every LVGL call, so that both the
 // colour LCD and the mono OLED render the same numbers.
 #include "flightview.h"
+#include "gps.h"
+#include "poller.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -249,4 +251,17 @@ void flightview_status(fv_status_t *s)
     uint32_t seq = pos_fix_seq();
     if (seq != feed_seq) { feed_seq = seq; feed_until = now + 180; }
     s->feed_active = now < feed_until;
+
+    // The indicator follows the LIVE source, not the preference: during a
+    // fallback the operator must see what is actually feeding the EFB.
+    s->source = (poller_live_source() == SRC_GPS) ? FV_SRC_GPS : FV_SRC_FEED;
+    s->gps_quality = FV_GQ_NONE;
+    if (gps_has_hw()) {
+        gps_state_t g; gps_get(&g);
+        if (g.present) {
+            bool silent = (now - g.last_rx_ms) > 5000;
+            s->gps_quality = fv_gps_quality(g.fix, g.hdop, g.sats_used,
+                                            g.sats_view, silent);
+        }
+    }
 }

@@ -33,6 +33,9 @@ LV_FONT_DECLARE(font_eta);     // U+25CE arrival bullseye
 #define COL_RED     0xFF3B30
 #define COL_YELLOW  0xFFEB3B
 #define COL_DIMMED  0x3A3A3A   // unlit signal bars / idle feed icon
+// Deliberately NOT COL_MAGENTA: magenta means "Wi-Fi feed", so reusing it for
+// "GPS with zero satellites" would make two different states look identical.
+#define COL_PURPLE  0xA855F7   // GPS indicator, no satellites in view
 #define COL_ETA     0xA8D1D1   // ETA times, UTC + destination-local
 #define COL_DIST    0xFFCBCB   // remaining-distance value
 #define COL_TOD     0xF1F7B5   // top-of-descent icon + time
@@ -46,7 +49,7 @@ LV_FONT_DECLARE(font_eta);     // U+25CE arrival bullseye
 
 static lv_obj_t *s_tail, *s_actype, *s_tz, *s_clock;
 static lv_obj_t *s_wifi_arc[3], *s_wifi_dot;
-static lv_obj_t *s_globe, *s_feed;
+static lv_obj_t *s_globe, *s_feed, *s_sat;
 static lv_obj_t *sg_brand, *s_build, *s_ip;
 static lv_span_t *sp_br_aid, *sp_br_link;
 static lv_obj_t *s_trip, *s_trip_arrow, *s_trip_pct;
@@ -130,6 +133,11 @@ static void tdisp_build(lv_display_t *disp)
     lv_label_set_text(s_globe, "\xE2\x98\x81");
     s_feed = mklabel(scr, &lv_font_montserrat_16, COL_DIMMED, LV_ALIGN_TOP_LEFT, 186, 142);
     lv_label_set_text(s_feed, LV_SYMBOL_UPLOAD);
+    // Same slot as the feed icon: exactly one of the two is ever visible, so the
+    // operator reads the position source from a single place on the panel.
+    s_sat = mklabel(scr, &lv_font_montserrat_16, COL_DIMMED, LV_ALIGN_TOP_LEFT, 186, 142);
+    lv_label_set_text(s_sat, LV_SYMBOL_GPS);
+    lv_obj_add_flag(s_sat, LV_OBJ_FLAG_HIDDEN);
 
     s_actype = mklabel(scr, &lv_font_montserrat_20, COL_YELLOW, LV_ALIGN_TOP_MID, 0, 6);
 
@@ -357,8 +365,25 @@ static void tdisp_status(const fv_status_t *s)
     lv_obj_set_style_opa(s_wifi_dot, s->blink_on ? LV_OPA_COVER : LV_OPA_TRANSP, 0);
 
     lv_obj_set_style_text_color(s_globe, lv_color_hex(s->internet ? COL_INET : COL_RED), 0);
-    lv_obj_set_style_text_color(s_feed,
-                                lv_color_hex(s->feed_active ? COL_MAGENTA : COL_DIMMED), 0);
+
+    bool gps = (s->source == FV_SRC_GPS);
+    if (gps) { lv_obj_add_flag(s_feed, LV_OBJ_FLAG_HIDDEN);  lv_obj_clear_flag(s_sat,  LV_OBJ_FLAG_HIDDEN); }
+    else     { lv_obj_add_flag(s_sat,  LV_OBJ_FLAG_HIDDEN);  lv_obj_clear_flag(s_feed, LV_OBJ_FLAG_HIDDEN); }
+
+    if (gps) {
+        uint32_t c;
+        switch (s->gps_quality) {
+            case FV_GQ_GREEN:  c = COL_GREEN;  break;
+            case FV_GQ_ORANGE: c = COL_AMBER;  break;
+            case FV_GQ_RED:    c = COL_RED;    break;
+            case FV_GQ_PURPLE: c = COL_PURPLE; break;
+            default:           c = COL_DIMMED; break;   // GREY / not applicable
+        }
+        lv_obj_set_style_text_color(s_sat, lv_color_hex(c), 0);
+    } else {
+        lv_obj_set_style_text_color(s_feed,
+                                    lv_color_hex(s->feed_active ? COL_MAGENTA : COL_DIMMED), 0);
+    }
 }
 
 const layout_drv_t layout_tdisplay = {

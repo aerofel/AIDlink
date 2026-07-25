@@ -15,6 +15,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include "config.h"
+#include "gpsqual.h"
 
 // Slow-changing content, rebuilt at ~2 Hz.
 typedef struct {
@@ -61,6 +62,7 @@ typedef struct {
 
 // Fast-changing status, sampled every display tick so indicators can blink.
 typedef enum { FV_LINK_DOWN, FV_LINK_SCANNING, FV_LINK_UP } fv_link_t;
+typedef enum { FV_SRC_FEED, FV_SRC_GPS } fv_src_t;
 
 typedef struct {
     fv_link_t link;
@@ -68,6 +70,10 @@ typedef struct {
     bool blink_on;    // precomputed blink phase for the DOWN/SCANNING states
     bool internet;    // netcore's frugal reachability probe
     bool feed_active; // a fix arrived within the last ~180 ms
+    // Which source is ACTUALLY live — may differ from the configured preference
+    // while falling back. Layouts pick the glyph from this, never from config.
+    fv_src_t source;
+    fv_gq_t  gps_quality;   // meaningful only when source == FV_SRC_GPS
 } fv_status_t;
 
 // Call once before the first build (stores cfg, zeroes the estimators).
