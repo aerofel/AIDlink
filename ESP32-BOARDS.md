@@ -160,7 +160,13 @@ port, flashes the app slot, and waits for the unit to answer again.
    toggles DTR/RTS on the USB-Serial-JTAG and is what produces the
    **"port present but silent"** wedge — `No serial data received` on every
    subsequent attempt. Never reset a chip that is already where you want it.
-2. **App slot only** (`0x10000`). The bootloader and partition table do not
+2. **`--no-stub`, always.** After `/dfu` the ROM enumerates on **USB-OTG**
+   (esptool prints `USB mode: USB-OTG`), and the flasher stub does not survive
+   there — it uploads, reports `Stub running...`, and then the port goes silent
+   permanently. Every wedge observed on 2026-07-25 followed that exact line.
+   Passing `--no-stub` afterwards does not help: by then the session is already
+   poisoned and only a replug recovers it.
+3. **App slot only** (`0x10000`). The bootloader and partition table do not
    change between builds, and **NVS at `0x9000` holds the Wi-Fi credentials** —
    `erase_flash` here costs you the uplink config.
 

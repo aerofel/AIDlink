@@ -65,7 +65,12 @@ echo "downloader on $PORT"
 #
 # App slot only. Bootloader and partition table are unchanged between builds,
 # and NVS at 0x9000 holds the Wi-Fi credentials — never erase_flash here.
-esptool.py -p "$PORT" --before no_reset --after hard_reset \
+# --no-stub is REQUIRED, not an optimisation. After /dfu the ROM enumerates on
+# USB-OTG ("USB mode: USB-OTG" in esptool's banner), and the flasher stub does
+# not survive there: it uploads, prints "Stub running...", and then the port goes
+# permanently silent — after which nothing but a replug recovers it. Slower, but
+# it is the difference between working and needing hands.
+esptool.py -p "$PORT" --before no_reset --after hard_reset --no-stub \
   write_flash --flash_mode dio --flash_size 16MB --flash_freq 80m \
   0x10000 "$BIN"
 
