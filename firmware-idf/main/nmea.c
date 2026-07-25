@@ -147,11 +147,38 @@ bool nmea_line(nmea_state_t *s, const char *line) {
 
     if (!strcmp(type, "GSA")) {
         // $xxGSA,mode,fixType,sv1..sv12,PDOP,HDOP,VDOP,systemId
+        if (n >= 17 && f[16][0]) s->hdop = atof(f[16]);
+
+        nmea_fix_t fx = NMEA_FIX_NONE;
         if (has(f, n, 2)) {
             int v = atoi(f[2]);
-            s->fix = (v == 3) ? NMEA_FIX_3D : (v == 2) ? NMEA_FIX_2D : NMEA_FIX_NONE;
+            fx = (v == 3) ? NMEA_FIX_3D : (v == 2) ? NMEA_FIX_2D : NMEA_FIX_NONE;
         }
-        if (n >= 17 && f[16][0]) s->hdop = atof(f[16]);
+        // Populated PRN slots (fields 3..14) = satellites this constellation is
+        // contributing to the solution.
+        int used = 0;
+        for (int i = 3; i <= 14 && i < n; i++) if (f[i][0]) used++;
+
+        // f[15]=PDOP f[16]=HDOP f[17]=VDOP f[18]=systemId. Reading 17 here gives
+        // VDOP, which parses as a plausible-looking constellation id.
+        int sys = (n >= 19 && f[18][0]) ? atoi(f[18]) : 0;
+        switch (sys) {
+            case 1: s->used_gps  = used; break;
+            case 2: s->used_glo  = used; break;
+            case 3: s->used_gal  = used; break;
+            case 4: s->used_bds  = used; break;
+            case 5: s->used_qzss = used; break;
+            default: break;      // no systemId (NMEA < 4.10): cannot attribute
+        }
+
+        // Record this constellation's dimension, then expose the best of them.
+        // Replacing per system means an empty GSA clears its own contribution
+        // without erasing what another constellation reported this cycle.
+        if (sys >= 1 && sys <= 5) s->fix_sys[sys] = fx;
+        else                      s->fix_sys[0]   = fx;   // unattributed talker
+        nmea_fix_t best = NMEA_FIX_NONE;
+        for (int i = 0; i < 6; i++) if (s->fix_sys[i] > best) best = s->fix_sys[i];
+        s->fix = best;
         return true;
     }
 

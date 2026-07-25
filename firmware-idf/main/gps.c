@@ -59,6 +59,11 @@ static void publish(const nmea_state_t *n, bool fix_ok) {
     s_gps.sats_gal   = n->sats_gal;
     s_gps.sats_bds   = n->sats_bds;
     s_gps.sats_qzss  = n->sats_qzss;
+    s_gps.used_gps   = n->used_gps;
+    s_gps.used_glo   = n->used_glo;
+    s_gps.used_gal   = n->used_gal;
+    s_gps.used_bds   = n->used_bds;
+    s_gps.used_qzss  = n->used_qzss;
     s_gps.hdop       = n->hdop;
     s_gps.gs_kt      = n->gs_kt;
     s_gps.track_deg  = n->track_deg;

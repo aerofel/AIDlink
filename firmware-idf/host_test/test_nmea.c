@@ -71,6 +71,40 @@ static void test_gsa_fix_dimension(void) {
     assert(s.fix == NMEA_FIX_2D);
 }
 
+static void test_gsa_used_per_constellation(void) {
+    nmea_state_t s;
+    nmea_reset(&s);
+
+    // The real bench case: the solution was carried entirely by BeiDou (system
+    // id 4, five PRNs) while GPS was visible but contributing nothing.
+    assert(nmea_line(&s, "$GNGSA,A,3,13,41,08,23,33,,,,,,,,3.36,1.30,3.10,4*0C"));
+    assert(s.used_bds == 5);
+    assert(s.used_gps == 0);
+    assert(s.fix == NMEA_FIX_3D);
+
+    // A trailing EMPTY GSA from another constellation must not erase that 3D
+    // fix — receivers emit one GSA per constellation every cycle.
+    assert(nmea_line(&s, "$GNGSA,A,1,,,,,,,,,,,,,99.99,99.99,99.99,1*33"));
+    assert(s.used_gps == 0);
+    assert(s.fix == NMEA_FIX_3D);   // still 3D, from BeiDou
+
+    // GPS joining the solution is counted independently.
+    assert(nmea_line(&s, "$GNGSA,A,3,07,30,09,,,,,,,,,,2.10,1.10,1.80,1*06"));
+    assert(s.used_gps == 3);
+    assert(s.used_bds == 5);
+    assert(s.fix == NMEA_FIX_3D);
+
+    // BeiDou dropping out clears only its own count, and the fix survives on GPS.
+    assert(nmea_line(&s, "$GNGSA,A,1,,,,,,,,,,,,,99.99,99.99,99.99,4*36"));
+    assert(s.used_bds == 0);
+    assert(s.used_gps == 3);
+    assert(s.fix == NMEA_FIX_3D);
+
+    // Everything dropping out finally clears the fix.
+    assert(nmea_line(&s, "$GNGSA,A,1,,,,,,,,,,,,,99.99,99.99,99.99,1*33"));
+    assert(s.fix == NMEA_FIX_NONE);
+}
+
 static void test_rmc(void) {
     nmea_state_t s;
     nmea_reset(&s);
@@ -149,6 +183,7 @@ int main(void) {
     test_gga_no_fix();
     test_gga_3d_fix();
     test_gsa_fix_dimension();
+    test_gsa_used_per_constellation();
     test_rmc();
     test_gsv_per_constellation();
     test_robustness();

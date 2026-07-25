@@ -15,7 +15,8 @@ typedef struct {
     bool       present;       // latched on the first checksum-valid sentence
     nmea_fix_t fix;
     int        sats_used, sats_view;
-    int        sats_gps, sats_glo, sats_gal, sats_bds, sats_qzss;
+    int        sats_gps, sats_glo, sats_gal, sats_bds, sats_qzss;   // in view
+    int        used_gps, used_glo, used_gal, used_bds, used_qzss;   // in solution
     double     hdop;
     double     lat, lon, alt_ft, gs_kt, track_deg;
     uint64_t   utc_ms;

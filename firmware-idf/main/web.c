@@ -315,7 +315,15 @@ static esp_err_t h_root(httpd_req_t *r) {
              "<div class='s'><div class='k'>Feed</div><div class='v' id='feed' style='font-size:.85rem'>…</div></div>"
              "<div class='s'><div class='k'>Firmware</div><div class='v' style='font-size:.8rem' title='version · date & time flashed'>");
     esc_chunk(r, fw_build());
-    chunk(r, "</div></div></div>");
+    chunk(r, "</div></div>");
+    // GNSS tiles live in the same strip rather than a separate box, so the
+    // operator reads position health in one place. Emitted only on boards with
+    // receiver pins; the JS hides them again if no receiver ever answers.
+    if (gps_has_hw())
+        chunk(r, "<div class='s' id='gq'><div class='k'>GNSS</div><div class='v' id='gfix'>…</div></div>"
+                 "<div class='s' id='gs2'><div class='k'>Satellites</div><div class='v' id='gsat'>…</div></div>"
+                 "<div class='s' id='gc'><div class='k'>Constellations</div><div class='v' id='gcon' style='font-size:.8rem'>…</div></div>");
+    chunk(r, "</div>");
 
     // hardware / ESP32 specs
     send_hw_card(r);
@@ -442,11 +450,11 @@ static esp_err_t h_root(httpd_req_t *r) {
                            : g.fix == NMEA_FIX_2D ? "2D fix" : "no fix";
             possrc_t live = poller_live_source();
             chunkf(r, "Live: <b>%s</b> · %d/%d satellites · HDOP %.2f · "
-                      "GPS %d / GLONASS %d / Galileo %d / BeiDou %d / QZSS %d · "
+                      "solving on GPS %d / GLONASS %d / Galileo %d / BeiDou %d / QZSS %d · "
                       "PPS %s · checksum errors %u<br>Position is currently coming from "
                       "<b>%s</b>.",
                    fx, g.sats_used, g.sats_view, g.hdop,
-                   g.sats_gps, g.sats_glo, g.sats_gal, g.sats_bds, g.sats_qzss,
+                   g.used_gps, g.used_glo, g.used_gal, g.used_bds, g.used_qzss,
                    g.pps_interval_us ? "locked" : "—", (unsigned)g.csum_errors,
                    live == SRC_GPS ? "the GNSS receiver"
                                    : live == SRC_FEED ? "the Wi-Fi feed" : "nothing");
@@ -513,6 +521,20 @@ static esp_err_t h_root(httpd_req_t *r) {
              "document.getElementById('staip').textContent=d.staip||'—';"
              "var fc=d.pollok?'var(--gr)':'var(--rd)';var fa=(d.pollage>=0?d.pollage+'s ago':'');"
              "document.getElementById('feed').innerHTML=\"<span style='color:\"+fc+\"'>\"+(d.pollmsg||'idle')+\"</span> <span style='color:var(--mut);font-size:.8em'>\"+fa+\"</span>\";"
+             "var g=d.gps;var gq=document.getElementById('gq');"
+             "if(gq){if(!g||!g.present){gq.style.display=gs2.style.display=gc.style.display='none';}else{"
+             "gq.style.display=gs2.style.display=gc.style.display='';"
+             // Same thresholds as the display: 3D + HDOP<=2 + >=5 sats is the only green.
+             "var col=g.sats_view==0?'#a855f7':(g.fix==1?'var(--rd)':"
+             "((g.fix==3&&g.hdop>0&&g.hdop<=2&&g.sats_used>=5)?'var(--gr)':'var(--am)'));"
+             "var fx=g.fix==3?'3D':(g.fix==2?'2D':'no fix');"
+             "gfix.innerHTML=\"<span style='color:\"+col+\"'>\"+fx+\"</span>\"+"
+             "(g.hdop>0&&g.fix>1?\" <span style='color:var(--mut);font-size:.8em'>HDOP \"+g.hdop.toFixed(1)+\"</span>\":'');"
+             "gsat.innerHTML=g.sats_used+\" <span style='color:var(--mut);font-size:.8em'>/ \"+g.sats_view+\" in view</span>\";"
+             "var cs=[['GPS',g.used_gps],['GLO',g.used_glo],['GAL',g.used_gal],['BDS',g.used_bds],['QZS',g.used_qzss]]"
+             ".filter(x=>x[1]>0).map(x=>x[0]+' '+x[1]).join(' · ');"
+             "gcon.textContent=cs||'—';"
+             "}}"
              "}catch(e){}}");
     chunkf(r, "async function uc(){try{let r=await fetch('/clients');let a=await r.json();let tb=document.querySelector('#clit tbody');"
               "document.getElementById('clic').textContent='('+a.length+' / %d)';"
@@ -758,7 +780,7 @@ static esp_err_t h_status(httpd_req_t *r) {
 
     // GNSS block: omitted entirely on boards with no receiver pins, so a
     // consumer can tell "no GNSS hardware" from "GNSS present but unfixed".
-    char gpsj[320] = "";
+    char gpsj[480] = "";
     possrc_t live = poller_live_source();
     if (gps_has_hw()) {
         gps_state_t g; gps_get(&g);
@@ -766,15 +788,17 @@ static esp_err_t h_status(httpd_req_t *r) {
             ",\"gps\":{\"present\":%s,\"enabled\":%s,\"pref\":\"%s\",\"fix\":%d,"
             "\"sats_used\":%d,\"sats_view\":%d,\"hdop\":%.2f,"
             "\"gps\":%d,\"glo\":%d,\"gal\":%d,\"bds\":%d,\"qzss\":%d,"
+            "\"used_gps\":%d,\"used_glo\":%d,\"used_gal\":%d,\"used_bds\":%d,\"used_qzss\":%d,"
             "\"pps_us\":%u,\"csum_err\":%u}",
             g.present ? "true" : "false", CFG->gps_enable ? "true" : "false",
             CFG->gps_pref == 1 ? "gps" : "feed", (int)g.fix,
             g.sats_used, g.sats_view, g.hdop,
             g.sats_gps, g.sats_glo, g.sats_gal, g.sats_bds, g.sats_qzss,
+            g.used_gps, g.used_glo, g.used_gal, g.used_bds, g.used_qzss,
             (unsigned)g.pps_interval_us, (unsigned)g.csum_errors);
     }
 
-    char json[1152];
+    char json[1408];
     snprintf(json, sizeof json,
         "{\"sta\":%s,\"ssid\":\"%s\",\"clients\":%d,\"valid\":%s,\"sim\":%s,"
         "\"lat\":%.5f,\"lon\":%.5f,\"trk\":%.1f,\"gs\":%.1f,\"alt\":%.0f,\"staip\":\"%s\","

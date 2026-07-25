@@ -76,7 +76,7 @@ typedef struct {
     fv_gq_t  gps_quality;   // meaningful only when source == FV_SRC_GPS
     // Transient banner raised by the user key; empty strings when inactive.
     int  overlay;            // 0 = none, 1 = source banner, 2 = GPS detail
-    char overlay_l1[28], overlay_l2[28];
+    char overlay_l1[40], overlay_l2[40];
 } fv_status_t;
 
 // Call once before the first build (stores cfg, zeroes the estimators).

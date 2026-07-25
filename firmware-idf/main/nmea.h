@@ -23,7 +23,16 @@ typedef struct {
     uint64_t utc_ms;          // epoch ms from RMC date+time; 0 when unknown
     int      sats_used;       // GGA field 7
     int      sats_view;       // sum of the per-talker GSV counts
-    int      sats_gps, sats_glo, sats_gal, sats_bds, sats_qzss;
+    int      sats_gps, sats_glo, sats_gal, sats_bds, sats_qzss;   // in view
+    // Satellites actually CONTRIBUTING to the solution, per constellation,
+    // counted from the PRN slots of each GSA. Genuinely different from the
+    // in-view counts: a receiver can see GPS while solving purely on BeiDou.
+    int      used_gps, used_glo, used_gal, used_bds, used_qzss;
+    // Internal: fix dimension reported by each GSA systemId (1..5). The exposed
+    // `fix` is the best of these. Receivers emit one GSA per constellation every
+    // cycle, including empty ones, so tracking per system stops a trailing empty
+    // GSA from erasing a good 3D fix that another constellation just reported.
+    nmea_fix_t fix_sys[6];
 } nmea_state_t;
 
 // Zero the state. Call once at start, and whenever counts should be dropped.

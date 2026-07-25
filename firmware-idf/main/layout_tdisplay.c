@@ -389,6 +389,10 @@ static void tdisp_status(const fv_status_t *s)
     if (s->overlay) {
         lv_label_set_text(s_ovl_l1, s->overlay_l1);
         lv_label_set_text(s_ovl_l2, s->overlay_l2);
+        // The plate is built early, and LVGL paints children in creation order,
+        // so the route/flight widgets built after it would otherwise draw straight
+        // through the overlay. Raise it each time it is shown.
+        lv_obj_move_foreground(s_ovl_bg);
         lv_obj_clear_flag(s_ovl_bg, LV_OBJ_FLAG_HIDDEN);
     } else {
         lv_obj_add_flag(s_ovl_bg, LV_OBJ_FLAG_HIDDEN);

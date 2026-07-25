@@ -281,8 +281,22 @@ void flightview_status(fv_status_t *s)
         const char *fx = g.fix == NMEA_FIX_3D ? "3D" : g.fix == NMEA_FIX_2D ? "2D" : "NO FIX";
         snprintf(s->overlay_l1, sizeof s->overlay_l1, "%s  %d/%d sats  HDOP %.1f",
                  fx, g.sats_used, g.sats_view, g.hdop);
+        // Name only the constellations actually contributing to the solution —
+        // a list of zeros tells the operator nothing.
+        char cons[24] = "";
+        const struct { const char *n; int u; } CS[] = {
+            { "GPS", g.used_gps }, { "GLO", g.used_glo }, { "GAL", g.used_gal },
+            { "BDS", g.used_bds }, { "QZS", g.used_qzss },
+        };
+        for (unsigned i = 0; i < sizeof CS / sizeof CS[0]; i++) {
+            if (!CS[i].u) continue;
+            char one[12];
+            snprintf(one, sizeof one, "%s%s %d", cons[0] ? " " : "", CS[i].n, CS[i].u);
+            strlcat(cons, one, sizeof cons);
+        }
+        if (!cons[0]) strlcpy(cons, "none", sizeof cons);
         bool pps = g.pps_interval_us > 0 && (now - g.last_rx_ms) < 2000;
-        snprintf(s->overlay_l2, sizeof s->overlay_l2, "G%d R%d E%d C%d  PPS %s",
-                 g.sats_gps, g.sats_glo, g.sats_gal, g.sats_bds, pps ? "ok" : "--");
+        snprintf(s->overlay_l2, sizeof s->overlay_l2, "%s  PPS %s",
+                 cons, pps ? "ok" : "--");
     }
 }
