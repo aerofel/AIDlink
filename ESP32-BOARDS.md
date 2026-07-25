@@ -180,9 +180,11 @@ pulse**. It therefore cannot:
 - recover a wedged downloader, which needs a **cable replug** (a true power
   cycle — note a replug is *not* a power cycle if a battery is on the JST).
 
-Observed rate on Board 3 (2026-07-25): roughly **half** of `/dfu` attempts in one
-session wedged and needed a replug. When it works it is completely hands-off;
-when it does not, no amount of esptool flags recovers it. Budget for that.
+Observed on Board 3 (2026-07-25): with `--no-stub` from the first connection the
+cycle is **reliably hands-off**. Every wedge in that session — five of them —
+was self-inflicted by letting the stub run; the `/dfu` endpoint itself was never
+at fault. The residual manual cases are the RST tap after a re-latch, and
+recovery once a session has already been poisoned.
 
 ### Recovering by hand
 

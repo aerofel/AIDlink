@@ -44,11 +44,19 @@ modified.
 - **Board-3-only PPS:** the eventual driver must carry the pins in the per-model
   `board_t` profile (`.gps_pps_gpio = -1` on `PROF_T3S3`), so Boards 2/4/5 stay
   unaffected and GNSS stays optional.
+- **The `/dfu` "wedge" was never `/dfu` — it is the esptool flasher stub.**
+  After `/dfu` the ROM enumerates on **USB-OTG** (`USB mode: USB-OTG` in
+  esptool's banner), NOT USB-Serial-JTAG. The stub uploads, prints
+  `Stub running...`, and the port then goes permanently silent; only a cable
+  replug recovers it. All five wedges in this session followed those two lines.
+  **`--no-stub` from the FIRST connection makes the cycle reliably hands-off**
+  — passing it as a retry never helps, because by then the session is poisoned.
+  Second rule: `--before no_reset`, since after `/dfu` the chip is already in the
+  downloader and resetting it again is another way to lose it.
+  `tools/flash-aid.sh` encodes both.
 - **Flash ritual, reconfirmed:** `/dfu` sets `FORCE_DOWNLOAD_BOOT`, which survives
-  a soft reset — a flashed app will NOT run until an **RST tap or power cycle**.
-  Poking DTR/RTS at that point wedges the ROM (`No serial data received` + silent
-  port). Recovery is a **replug**, which also clears the latch. After that, a
-  running app with USB-Serial-JTAG reflashes cleanly via `--before usb_reset`.
+  a soft reset — a flashed app may NOT run until an **RST tap or power cycle**,
+  because esptool's "hard reset" over USB is a USB-level reset, not an EN pulse.
 - **Probes must loop forever.** A one-shot diagnostic finishes its ~35 s run
   during the round-trip between flashing and opening the console, and reads as a
   dead board.
