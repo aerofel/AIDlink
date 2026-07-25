@@ -130,6 +130,13 @@ All settings persist in NVS. Key groups:
   automatically; Custom points at your own server (Viasat JSON shape). See [Position sources](#position-sources).
 - **⑤ Emulator — fixed test position** — when enabled, the source feed is **discarded** and the EFB
   receives a **fixed** position at the configured lat/lon (for bench testing).
+- **🛰 GNSS (wired receiver)** — on boards with a serial GNSS attached, selects it as a position source
+  and sets which source is *preferred*. The choice is a preference, not a lock: whichever source is
+  actually live feeds the EFB, so neither a GNSS dropout nor a feed stall blanks the position. Appears
+  only once a receiver has answered. See the [firmware README](firmware-idf/README.md).
+- **🪪 Aircraft identity (fallback)** — tail, flight, origin, destination used **only** for fields the
+  live feed leaves empty; the feed always wins. GNSS carries no identity, so without these a GPS-only
+  unit would show no route, distance-to-go or ETA.
 - **🔒 Security** — enable/disable the settings login, set username, change password.
 - **📡 Device traffic log** — auto-refreshing, with a live **capture** on/off toggle, Copy, and raw `/log`.
 

@@ -132,6 +132,14 @@ USB mode:    USB-Serial/JTAG
 - **Buttons:** RST, BOT (GPIO0) and user key (GPIO14; unused by firmware).
 - **RAM note:** internal SRAM is the scarce resource on this build — LVGL pool
   capped at 16 KB and a single 20-line draw buffer (see LEARNING.md 2026-07-06).
+- **Wired GNSS (2026-07-25):** u-blox **M10** receiver (sold as "NEO-M8N" — the
+  can is a counterfeit relabel; `hwVersion=000A0000`, `PROTVER=34.10`) on
+  **RX GPIO16 / TX GPIO12 / PPS GPIO21**, 9600 8N1 NMEA, powered from **5V**.
+  16 and 12 are the only GPIOs free across the whole fleet; PPS on 21 is
+  Board-3-only. Active antenna needs ≥3.0 V — the 3V3 rail starves it and pins
+  `MON-RF` AGC at 11 %. PPS measured at 1.000012 s, ~10 % duty.
+- **User key GPIO14** is now used: hold swaps the position source, tap shows GNSS
+  detail. **Not** the flashing button — that is BOOT/GPIO0.
 - **Runs:** AIDlink ESP-IDF with the onboard **flight display** (tail, flight
   number, DEP→ARR, NM to arrival, UTC offset + local time at position).
 

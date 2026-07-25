@@ -71,6 +71,77 @@ The **AID Web API** on `:80` (`getAPIVersion`, `getWiFiAPStatus`, `getAoIPStatus
 `getAcarsStatus`, `cmdReboot`) answers both **GET and POST** — EFBs such as
 Jeppesen FliteDeck probe with POST, so GET-only would fail AID detection.
 
+## Wired GNSS position source (Board 3)
+
+A serial GNSS receiver can feed position alongside the Wi-Fi poller. The chosen
+source is a **preference, not a lock**: whichever source is actually live feeds
+the EFB, so neither a GNSS dropout nor a feed stall blanks Jeppesen.
+
+**Wiring (T-Display-S3):**
+
+| Signal | Pin | Note |
+|---|---|---|
+| GPS TXD → ESP RX | **GPIO16** | fleet-safe |
+| GPS RXD ← ESP TX | **GPIO12** | fleet-safe |
+| PPS | **GPIO21** | **Board 3 only** — on the T3-S3 this is QWIIC SCL *and* LoRa DIO3 |
+| VCC | **5V** | see below |
+| GND | GND | |
+
+Pins come from the per-board profile in `board.c`, never a shared `#define`: on
+the classic ESP32-WROVER **GPIO16/17 are the PSRAM lines**. GPIO16 and GPIO12 are
+the only two free on every board in the fleet.
+
+⚠️ **5 V is not optional with an active antenna.** A typical breakout regulates
+with an AMS1117 (1.1 V dropout), so feeding the 3V3 rail yields ~2.2 V — under the
+3.0 V minimum most active antennas need. The signature is `UBX-MON-RF` reporting
+**AGC pinned near 11 %** (too much input power from an unstable LNA), *not* the
+high AGC a disconnected antenna gives. On 5 V, AGC settles at 30–45 %.
+⚠️ The header 5 V pin is **VBUS**, so the receiver goes dark on JST battery.
+
+**Selection and fallback.** A source counts as live when its last fix is younger
+than its stale window (GNSS 5 s, feed `stale_ms`). The preferred source wins when
+live, the other takes over when it is not, and only when neither is live does the
+position go stale. `/status` reports `live_source`, which can differ from the
+configured preference during a fallback.
+
+**Identity is decoupled from position.** GNSS supplies no tail, flight number or
+route, so the arbiter always carries those from the feed, with the persisted
+`id_*` fields filling only what the feed left empty. Without this a GPS-only boot
+would have no identity row, distance-to-go or ETA.
+
+**Display.** The magenta upload glyph (Wi-Fi feed) is replaced by a satellite
+glyph when GNSS is live, coloured by fix quality:
+
+| Colour | Meaning |
+|---|---|
+| green | 3D **and** HDOP ≤ 2.0 **and** ≥ 5 satellites used |
+| orange | 2D, or 3D that is not trustworthy |
+| red | satellites in view but no fix |
+| purple | nothing in view at all |
+| grey | receiver detected but gone quiet |
+
+A 3D fix alone is not enough for green: badly clustered satellites give a 3D
+solution that can be hundreds of metres out while HDOP says so plainly.
+
+**User key (GPIO14).** Hold ≥ 1 s to swap the preferred source (persisted, with
+an on-screen confirmation); tap for a ~4 s overlay showing fix, satellites used /
+in view, HDOP, the constellations actually solving, and PPS. Both are inert
+without a detected receiver. Hold rather than tap because a stray press would
+otherwise silently change what feeds the EFB.
+
+**Portal.** The GNSS card appears **only once a receiver has answered** —
+detection decides visibility, not the board profile. Three tiles in the header
+strip show fix + HDOP, satellites used / in view, and the solving constellations.
+
+**Receiver note.** The bench unit is sold as a "NEO-M8N" but reports
+`hwVersion=000A0000`, `PROTVER=34.10`, `ROM SPG 5.10` — it is **M10 silicon under
+a counterfeit label**. Consequence: the legacy `UBX-CFG-NAV5` message does not
+exist on it; configuration must use `UBX-CFG-VALSET`
+(`CFG-NAVSPG-DYNMODEL` = `0x20110021`, value 8 = airborne <4g). That matters
+because the default *portable* dynamic model caps at 12 000 m / 310 m/s, and
+FL390 is 11 887 m. Sending that config is **not implemented** — the receiver runs
+in its default NMEA configuration.
+
 ## Onboard RGB status LED (ESP32-S3)
 
 The S3's WS2812 (GPIO48) shows status on one pixel:
@@ -174,11 +245,16 @@ See `../docs/eta-estimator.md`.
 | `auth.*` | salted SHA-256 login + persistent session cookie |
 | `pos.*` | mutex-guarded shared ownship state |
 | `adbp.*` / `adbp_frame.c` | ARINC-834 ADBP server (+ host-tested wire format) |
-| `poller.*` / `poller_sources.c` / `geo.*` | position poller, JSON parsers, geo (all host-tested) |
+| `poller.*` / `poller_sources.c` / `geo.*` | position poller, JSON parsers, geo (all host-tested); `poller.c` also arbitrates the live source |
+| `nmea.*` | pure NMEA 0183 parser — GGA/RMC/GSA/GSV, no ESP-IDF types (host-tested) |
+| `gps.*` | GNSS receiver: UART1 + PPS, publishes `gps_state_t`; no source policy |
+| `possrc.*` | pure source-choice + per-field identity precedence (host-tested) |
+| `gpsqual.*` | pure fix-quality → display colour band (host-tested) |
+| `button.*` | user-key debounce, long/short gestures (boards that declare one) |
 | `services.*` | mDNS advertisement |
 | `log.*` | device traffic-log ring buffer (web `/log`) |
 | `statusled.*` | onboard RGB status LED (boards that have one) |
-| `board.*` | board identity by eFuse MAC → per-board hardware (LED, display) |
+| `board.*` | board identity by eFuse MAC → per-board hardware (LED, display, GNSS pins, user key) |
 | `display.*` | T-Display-S3 flight display (esp_lcd i80 ST7789 + LVGL) |
 | `airports.*` | embedded IATA/ICAO → lat/lon/elevation gazetteer (host-tested) |
 | `tzdb.*` / `tzdb_data.c` | 1° world timezone grid + offset transitions, generated from IANA data (host-tested; regenerate ~2028) |
