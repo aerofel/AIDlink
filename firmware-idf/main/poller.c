@@ -9,6 +9,8 @@
 #include "geo.h"
 #include "derive.h"
 #include "perfdb.h"
+#include "gps.h"
+#include "possrc.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -31,6 +33,21 @@ static aidlink_cfg_t *CFG;
 // per-poll differencing flapped GS between 0 and the clamp)
 static derive_state_t s_derive;
 
+// Last fix from the Wi-Fi feed. The feed no longer writes pos_state_t directly:
+// it lands here, and arbitrate() below decides each second whether this or the
+// GNSS receiver actually feeds the EFB. Keeping one writer preserves pos.c's
+// "never tear a read" invariant.
+typedef struct {
+    bool     valid;
+    double   lat, lon, alt_ft, gs_kt, track_deg;
+    bool     have_track;
+    uint64_t utc_ms;
+    uint32_t at_ms;
+    char     flight[16], tail[12], orig[8], dest[8];
+} feedfix_t;
+static feedfix_t s_feed;
+static possrc_t  s_live_src;
+
 // live poll status (surfaced on the web /status page later)
 static bool s_poll_ok;
 static uint32_t s_poll_at_ms;
@@ -44,24 +61,21 @@ static void apply_fix(double lat, double lon, double alt, double gs, double trac
                       bool have_track, uint64_t utc_ms, bool sim,
                       const char *flight, const char *tail, const char *orig, const char *dest,
                       const char *actype) {
-    pos_state_t p; pos_get(&p);
     uint32_t t = now_ms();
 
     double dgs, dtrk; bool dhave;
     derive_update(&s_derive, lat, lon, t, gs, track, have_track, &dgs, &dtrk, &dhave);
     if (dgs > 1500) dgs = 1500;
 
-    p.valid = true; p.simulated = sim; p.fixed = false;
-    p.lat = lat; p.lon = lon; p.alt_ft = alt;
-    p.gs_kt = dgs; p.track_deg = dtrk; p.have_track = dhave;
-    if (utc_ms) p.utc_ms = utc_ms;
-    p.last_fix_ms = t;
-    p.service_avail = true;
-    if (flight) strlcpy(p.flight, flight, sizeof p.flight);
-    if (tail) strlcpy(p.tail, tail, sizeof p.tail);
-    if (orig) strlcpy(p.orig, orig, sizeof p.orig);
-    if (dest) strlcpy(p.dest, dest, sizeof p.dest);
-    pos_set(&p);
+    s_feed.valid = true;
+    s_feed.lat = lat; s_feed.lon = lon; s_feed.alt_ft = alt;
+    s_feed.gs_kt = dgs; s_feed.track_deg = dtrk; s_feed.have_track = dhave;
+    if (utc_ms) s_feed.utc_ms = utc_ms;
+    s_feed.at_ms = t;
+    if (flight) strlcpy(s_feed.flight, flight, sizeof s_feed.flight);
+    if (tail) strlcpy(s_feed.tail, tail, sizeof s_feed.tail);
+    if (orig) strlcpy(s_feed.orig, orig, sizeof s_feed.orig);
+    if (dest) strlcpy(s_feed.dest, dest, sizeof s_feed.dest);
 
     // The live feed is the single source of truth for aircraft identity (the
     // portal has no identity card). RAM-only, deliberately NOT persisted:
@@ -240,6 +254,52 @@ static void poll_once(void) {
     s_poll_ok = true; s_poll_at_ms = now_ms(); strlcpy(s_poll_msg, "ok", sizeof s_poll_msg);
 }
 
+// Choose the live source and publish. The ONLY writer of pos_state_t outside
+// the emulator.
+static void arbitrate(void) {
+    uint32_t t = now_ms();
+    gps_state_t g; gps_get(&g);
+
+    bool gps_live  = CFG->gps_enable && g.present && g.fix != NMEA_FIX_NONE &&
+                     (t - g.last_fix_ms) < 5000;
+    bool feed_live = s_feed.valid && (t - s_feed.at_ms) < CFG->stale_ms;
+
+    possrc_t src = possrc_choose(gps_live, feed_live, CFG->gps_pref);
+    if (src != s_live_src) {
+        ESP_LOGI(TAG, "position source: %s -> %s",
+                 s_live_src == SRC_GPS ? "gps" : s_live_src == SRC_FEED ? "feed" : "none",
+                 src == SRC_GPS ? "gps" : src == SRC_FEED ? "feed" : "none");
+        s_live_src = src;
+    }
+    if (src == SRC_NONE) { pos_mark_stale(); return; }
+
+    pos_state_t p; pos_get(&p);
+    p.valid = true; p.simulated = false; p.fixed = false; p.service_avail = true;
+    if (src == SRC_GPS) {
+        p.lat = g.lat; p.lon = g.lon; p.alt_ft = g.alt_ft;
+        p.gs_kt = g.gs_kt; p.track_deg = g.track_deg; p.have_track = true;
+        if (g.utc_ms) p.utc_ms = g.utc_ms;
+        p.last_fix_ms = g.last_fix_ms;
+    } else {
+        p.lat = s_feed.lat; p.lon = s_feed.lon; p.alt_ft = s_feed.alt_ft;
+        p.gs_kt = s_feed.gs_kt; p.track_deg = s_feed.track_deg;
+        p.have_track = s_feed.have_track;
+        if (s_feed.utc_ms) p.utc_ms = s_feed.utc_ms;
+        p.last_fix_ms = s_feed.at_ms;
+    }
+    // Identity is decoupled from position. GNSS supplies none of it, so without
+    // this the identity row, route, ETA, trip bar and destination clock would
+    // all blank the instant GPS took over. The feed wins per field; the
+    // configured fallback fills only what it left empty.
+    possrc_ident(p.flight, sizeof p.flight, s_feed.flight, CFG->id_flight);
+    possrc_ident(p.tail,   sizeof p.tail,   s_feed.tail,   CFG->id_tail);
+    possrc_ident(p.orig,   sizeof p.orig,   s_feed.orig,   CFG->id_orig);
+    possrc_ident(p.dest,   sizeof p.dest,   s_feed.dest,   CFG->id_dest);
+    pos_set(&p);
+}
+
+possrc_t poller_live_source(void) { return s_live_src; }
+
 static void poller_task(void *arg) {
     uint32_t last_poll = 0, last_sim = now_ms();
     for (;;) {
@@ -249,9 +309,7 @@ static void poller_task(void *arg) {
             sim_step(dt);
         } else {
             if (t - last_poll >= CFG->poll_ms) { last_poll = t; poll_once(); }
-            // stale watchdog
-            pos_state_t p; pos_get(&p);
-            if (p.valid && !p.simulated && now_ms() - p.last_fix_ms > CFG->stale_ms) pos_mark_stale();
+            arbitrate();   // picks the live source, applies identity, publishes
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }

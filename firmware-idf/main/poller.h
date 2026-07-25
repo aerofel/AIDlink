@@ -5,6 +5,7 @@
 // HTTP(S), parses the fix, and writes pos.h. Also runs the emulator when enabled.
 #pragma once
 #include "config.h"
+#include "possrc.h"
 
 // Start the poller task (periodic fetch + emulator + stale watchdog).
 // Takes the live (mutable) config: a received tail number replaces and
@@ -17,3 +18,7 @@ void poller_status(bool *ok, uint32_t *at_ms, char *msg, unsigned msgcap);
 // Free heap (bytes) sampled at the last poll — surfaced on /status as a
 // health gauge for the TLS/HTTP fetch path.
 uint32_t poller_last_heap(void);
+
+// Which source is ACTUALLY feeding position right now — may differ from the
+// configured preference while falling back. Used by the display and /status.
+possrc_t poller_live_source(void);
