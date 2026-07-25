@@ -24,6 +24,7 @@ static const board_t PROF_S3_DEVKIT = {
     .name = "esp32s3-devkit",
     .panel = NULL, .layout = NULL,
     .led = LED_WS2812, .led_gpio = 48,
+    .gps_rx = -1, .gps_tx = -1, .gps_pps = -1, .btn_gpio = -1,
 };
 
 static const board_t PROF_TDISPLAY_S3 = {
@@ -33,6 +34,9 @@ static const board_t PROF_TDISPLAY_S3 = {
     // GPIO48 here is LCD data D7 — driving WS2812 pulses onto it would corrupt
     // the panel, so this board has no controllable LED.
     .led = LED_NONE, .led_gpio = -1,
+    // Only unit with GNSS wired today. RX/TX are fleet-safe; PPS is Board-3-only.
+    .gps_rx = 16, .gps_tx = 12, .gps_pps = 21,
+    .btn_gpio = 14,                   // user key, unused by the rest of the firmware
 };
 
 static const board_t PROF_T3S3 = {
@@ -41,6 +45,8 @@ static const board_t PROF_T3S3 = {
     DISP(panel_ssd1306, layout_oled)
     // plain LED, not addressable; LoRa pins (5/3/6/7/8/34) left untouched
     .led = LED_GPIO, .led_gpio = 37,
+    // 17/18 are the OLED I2C and 21 is QWIIC SCL + LoRa DIO3 — no GNSS here.
+    .gps_rx = -1, .gps_tx = -1, .gps_pps = -1, .btn_gpio = -1,
 };
 
 // --- fleet registry (see ESP32-BOARDS.md) ------------------------------------
@@ -63,6 +69,7 @@ static const struct { uint8_t mac[6]; const board_t *b; } FLEET[] = {
 static const board_t GENERIC = {
     .name = "generic", .panel = NULL, .layout = NULL,
     .led = LED_WS2812, .led_gpio = 48,
+    .gps_rx = -1, .gps_tx = -1, .gps_pps = -1, .btn_gpio = -1,
 };
 
 const board_t *board_get(void) {

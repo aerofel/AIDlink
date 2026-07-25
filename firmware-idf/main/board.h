@@ -27,6 +27,13 @@ typedef struct {
     const struct layout_drv_s *layout;    // NULL = no display on this board
     led_kind_t  led;
     int         led_gpio;
+    // Wired GNSS receiver, -1 when this model has none. Pins are a per-board
+    // fact, never a shared #define: on the classic ESP32-WROVER GPIO16/17 are
+    // the PSRAM lines, so opening a UART on them blind would be destructive.
+    // Only 16 (RX) and 12 (TX) are free across the whole fleet; PPS on 21 is
+    // Board-3-only (on the T3-S3 it is QWIIC SCL *and* LoRa DIO3).
+    int         gps_rx, gps_tx, gps_pps;
+    int         btn_gpio;                 // user key, -1 = none
 } board_t;
 
 // Identify the board from the eFuse base MAC. Never NULL; cached after the
