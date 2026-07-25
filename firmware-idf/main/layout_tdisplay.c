@@ -50,6 +50,7 @@ LV_FONT_DECLARE(font_eta);     // U+25CE arrival bullseye
 static lv_obj_t *s_tail, *s_actype, *s_tz, *s_clock;
 static lv_obj_t *s_wifi_arc[3], *s_wifi_dot;
 static lv_obj_t *s_globe, *s_feed, *s_sat;
+static lv_obj_t *s_ovl_bg, *s_ovl_l1, *s_ovl_l2;
 static lv_obj_t *sg_brand, *s_build, *s_ip;
 static lv_span_t *sp_br_aid, *sp_br_link;
 static lv_obj_t *s_trip, *s_trip_arrow, *s_trip_pct;
@@ -138,6 +139,21 @@ static void tdisp_build(lv_display_t *disp)
     s_sat = mklabel(scr, &lv_font_montserrat_16, COL_DIMMED, LV_ALIGN_TOP_LEFT, 186, 142);
     lv_label_set_text(s_sat, LV_SYMBOL_GPS);
     lv_obj_add_flag(s_sat, LV_OBJ_FLAG_HIDDEN);
+
+    // User-key overlay: a centred plate that covers the flight view for a
+    // couple of seconds. Built once, shown on demand.
+    s_ovl_bg = lv_obj_create(scr);
+    lv_obj_set_size(s_ovl_bg, 300, 62);
+    lv_obj_align(s_ovl_bg, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_set_style_bg_color(s_ovl_bg, lv_color_hex(0x101820), 0);
+    lv_obj_set_style_bg_opa(s_ovl_bg, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_color(s_ovl_bg, lv_color_hex(COL_LOGO_CY), 0);
+    lv_obj_set_style_border_width(s_ovl_bg, 1, 0);
+    lv_obj_set_style_radius(s_ovl_bg, 4, 0);
+    lv_obj_clear_flag(s_ovl_bg, LV_OBJ_FLAG_SCROLLABLE);
+    s_ovl_l1 = mklabel(s_ovl_bg, &lv_font_montserrat_16, COL_WHITE, LV_ALIGN_TOP_MID, 0, 2);
+    s_ovl_l2 = mklabel(s_ovl_bg, &lv_font_montserrat_14, COL_GREY,  LV_ALIGN_TOP_MID, 0, 26);
+    lv_obj_add_flag(s_ovl_bg, LV_OBJ_FLAG_HIDDEN);
 
     s_actype = mklabel(scr, &lv_font_montserrat_20, COL_YELLOW, LV_ALIGN_TOP_MID, 0, 6);
 
@@ -369,6 +385,14 @@ static void tdisp_status(const fv_status_t *s)
     bool gps = (s->source == FV_SRC_GPS);
     if (gps) { lv_obj_add_flag(s_feed, LV_OBJ_FLAG_HIDDEN);  lv_obj_clear_flag(s_sat,  LV_OBJ_FLAG_HIDDEN); }
     else     { lv_obj_add_flag(s_sat,  LV_OBJ_FLAG_HIDDEN);  lv_obj_clear_flag(s_feed, LV_OBJ_FLAG_HIDDEN); }
+
+    if (s->overlay) {
+        lv_label_set_text(s_ovl_l1, s->overlay_l1);
+        lv_label_set_text(s_ovl_l2, s->overlay_l2);
+        lv_obj_clear_flag(s_ovl_bg, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_ovl_bg, LV_OBJ_FLAG_HIDDEN);
+    }
 
     if (gps) {
         uint32_t c;

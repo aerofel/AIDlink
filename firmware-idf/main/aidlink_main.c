@@ -14,6 +14,7 @@
 #include "pos.h"
 #include "adbp.h"
 #include "gps.h"
+#include "button.h"
 #include "poller.h"
 #include "services.h"
 #include "log.h"
@@ -53,6 +54,7 @@ void app_main(void) {
     web_start(&cfg);
     adbp_start(&cfg);      // ARINC-834 ADBP position feed
     gps_start();           // wired GNSS receiver (boards that declare pins)
+    button_start(&cfg);    // user key: hold swaps position source
     poller_start(&cfg);    // position source poller + emulator
     services_start(&cfg);  // mDNS: <dev_name>.local + service advertisement
     statusled_start();     // onboard RGB status LED (boards that have one)

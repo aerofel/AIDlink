@@ -6,6 +6,7 @@
 // colour LCD and the mono OLED render the same numbers.
 #include "flightview.h"
 #include "gps.h"
+#include "button.h"
 #include "poller.h"
 #include <stdio.h>
 #include <string.h>
@@ -263,5 +264,25 @@ void flightview_status(fv_status_t *s)
             s->gps_quality = fv_gps_quality(g.fix, g.hdop, g.sats_used,
                                             g.sats_view, silent);
         }
+    }
+
+    // User-key overlay. Text is composed here, like everything else the layouts
+    // draw — they place glyphs and never format.
+    s->overlay = 0;
+    s->overlay_l1[0] = s->overlay_l2[0] = 0;
+    btn_overlay_t ovl = button_overlay();
+    if (ovl == BTN_OVL_SOURCE) {
+        s->overlay = 1;
+        snprintf(s->overlay_l1, sizeof s->overlay_l1, "SOURCE: %s",
+                 CFG->gps_pref == 1 ? "GPS" : "FEED");
+    } else if (ovl == BTN_OVL_DETAIL) {
+        gps_state_t g; gps_get(&g);
+        s->overlay = 2;
+        const char *fx = g.fix == NMEA_FIX_3D ? "3D" : g.fix == NMEA_FIX_2D ? "2D" : "NO FIX";
+        snprintf(s->overlay_l1, sizeof s->overlay_l1, "%s  %d/%d sats  HDOP %.1f",
+                 fx, g.sats_used, g.sats_view, g.hdop);
+        bool pps = g.pps_interval_us > 0 && (now - g.last_rx_ms) < 2000;
+        snprintf(s->overlay_l2, sizeof s->overlay_l2, "G%d R%d E%d C%d  PPS %s",
+                 g.sats_gps, g.sats_glo, g.sats_gal, g.sats_bds, pps ? "ok" : "--");
     }
 }
