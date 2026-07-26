@@ -355,7 +355,10 @@ static esp_err_t h_root(httpd_req_t *r) {
              "<select id='scanList' style='flex:1' onchange=\"if(this.value){var s=document.querySelector('input[name=staSsid]');s.value=this.value;var p=document.querySelector('input[name=staPass]');if(p){p.value='';p.focus();}}\"><option value=''>— press Scan —</option></select>"
              "<button type='button' class='ghost' onclick='doScan(this)'>Scan</button></div></div>");
     ff_text(r, "SSID", "staSsid", c->sta_ssid, "text", false);
-    ff_text(r, "Password", "staPass", c->sta_pass, "password", false);
+    // Shown in clear: the uplink passphrase is typed at the aircraft door against
+    // a placard, and masking it makes typos undetectable. The value was already
+    // sent to the browser either way — "password" only hid it visually.
+    ff_text(r, "Password", "staPass", c->sta_pass, "text", false);
     ff_tog(r, "Use DHCP", "staDhcp", c->sta_dhcp);
     chunkf(r, "<div class='f'><label>Static IP</label><input id='staIp' type='text' name='staIp' value='%s'%s></div>", esc(e1, sizeof e1, ipv), dis);
     chunkf(r, "<div class='f'><label>Gateway</label><input id='staGw' type='text' name='staGw' value='%s'%s></div>", esc(e1, sizeof e1, gwv), dis);
@@ -366,7 +369,7 @@ static esp_err_t h_root(httpd_req_t *r) {
     // ② Cockpit AP
     chunk(r, "<div class='card'><h2>② Cockpit AP (we feed / EFB joins)</h2><div class='grid'>");
     ff_text(r, "SSID", "apSsid", c->ap_ssid, "text", false);
-    ff_text(r, "Password (≥8)", "apPass", c->ap_pass, "password", false);
+    ff_text(r, "Password (≥8)", "apPass", c->ap_pass, "text", false);
     ff_tog(r, "Hidden SSID", "apHidden", c->ap_hidden);
     chunk(r, "</div><div class='note'>For lab compatibility testing, set the AP SSID (and Hidden flag) that your EFB client expects.</div></div>");
 
