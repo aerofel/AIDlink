@@ -1,5 +1,85 @@
 # AIDlink — Learning Journal
 
+## 2026-07-26 — A second GNSS receiver: genuine MAX-M8Q on a Pi-HAT carrier
+
+Identified a new module from photos + the u-blox data sheet, then **confirmed it live
+over its own CP2102** (jumpers on A, read-only UBX polls). Full write-up in
+**`GPS-HARDWARE.md`** — only the non-obvious bits here.
+
+- **Board 2 cannot be flashed over native USB — use the CH343 port.** `/dfu` returns
+  200 and the app stops, but the ROM downloader **never enumerates a CDC port** on
+  macOS; the stale `303A:4000` NCM descriptor just sits in the USB tree. Waited 25 s
+  and 60 s, twice. `tools/flash-aid.sh` says "Boards 3 / 4 / 5" in its header for
+  exactly this reason — those are native-USB-only. Board 2 has a **second USB port
+  with a WCH CH343** (`1A86:55D3` → `/dev/cu.usbmodem5AE60430151`); over that,
+  esptool auto-reset worked first try, **no BOOT+RST needed**, and the stub is fine
+  (the `--no-stub` rule only applies to the USB-OTG ROM path). 1.7 MB in 22 s.
+  Recovery from the failed `/dfu` is a cable replug — nothing was written either time.
+- **GNSS data path confirmed end-to-end on Board 2.** After adding
+  `.gps_rx=16 .gps_tx=12 .gps_pps=21` to `PROF_S3_DEVKIT`: `gps: listening on UART1
+  rx=16 tx=12 pps=21 @ 9600 baud`, and `/status` reports `gps.present=true` with
+  **`csum_err=0`**. That single pair of facts validates jumper position B, TX/RX
+  orientation, and baud in one shot — `present` can only go true on a checksum-valid
+  sentence, so a swapped pair or wrong jumper would have left it false.
+- **`gps.present=true` with `sats_view=0` is the useful diagnostic split**: the serial
+  side is proven good and the failure is isolated to RF. `age_out()`'s "no valid
+  sentence" warning is NOT a substitute — it only fires if the receiver *was* present
+  and went quiet, so silence at boot is ambiguous.
+- **The fleet now has two receivers with *incompatible* config protocols.** This one
+  is a genuine **MAX-M8Q-0-10** — `MON-VER` gives `ROM CORE 3.01 (107888)`,
+  `hwVersion=00080000`, `PROTVER=18.00` — so legacy **`UBX-CFG-NAV5`** is the right
+  way to set `dynModel`, verified by CFG-NAV5 answering a poll. The 2026-07-25 bench
+  part is M10-class silicon (`000A0000` / `34.10`) and needs **`CFG-VALSET`**. Any
+  config code must branch on `UBX-MON-VER`, never assume.
+- **`hwVersion` is the counterfeit test.** `00080000` = real M8, `000A0000` = M10
+  silicon wearing an M8 silkscreen. Cheaper and more definitive than any other check.
+- **Board 1 and this HAT both enumerate as CP2102 `10C4:EA60` serial `0001`**, i.e.
+  both grab `/dev/cu.usbserial-0001`. The port name cannot tell them apart — read the
+  stream (NMEA vs. ESP-IDF log) before assuming which one you are talking to.
+- **Live defaults matched the data sheet exactly**: `dynModel=0` portable, 1.00 Hz,
+  GPS+SBAS+QZSS+GLONASS on, Galileo/BeiDou/IMES off. Nothing to guess at.
+- **`trkChHw` reports 32 tracking channels, not 72.** The "72-channel" figure is
+  u-blox's acquisition engine; it never appears in `MON-*`.
+- **Zero satellites indoors *and* outdoors**, `GPGSV`/`GLGSV` = `1,1,00` throughout.
+- **A frozen `agcCnt` is the "RF path is open" signature.** AGC read exactly **5928**
+  on 12 consecutive samples, unchanged after carrying the antenna outside — spread
+  **zero**. Meanwhile `noisePerMS` and `jamInd` dithered, proving `MON-HW` was live.
+  A working AGC loop always moves by tens of counts; a frozen one means nothing is
+  coupling into `RF_IN`. **This is a distinct third signature**, alongside the
+  11 %-pinned *low* AGC (under-volted antenna, 2026-07-25) and genuinely high AGC
+  (weak sky view). Read the *variance*, not just the value.
+- **Identical AGC across two different antennas means the antenna is not the
+  variable.** The known-good 2026-07-25 patch and a small pigtail antenna both gave
+  `agcCnt=5928` to the count. Swapping antennas changes the load at `RF_IN`, so an
+  adaptive AGC must move — a *bit-identical* reading exonerates the antenna and points
+  at either missing bias (both antennas active, carrier supplies none — MAX-M8Q has no
+  `V_ANT`) or a broken RF path on the carrier. **The discriminator is DC volts on the
+  u.FL centre with the antenna off**, not more sky time. `NAV-SAT` was still
+  `cno=0 qual=1` (blind search, zero energy) throughout.
+- **⚠️ `aStatus=OK` does NOT mean an antenna is connected.** `CFG-ANT` here is
+  `flags=0x001b`: `svcs` on, `scd` (short detect) on, **`ocd` (open detect) OFF**.
+  With open detection disabled the receiver physically cannot report a missing
+  antenna — `OK` means only "no short". I briefly mis-read `OK` as proof that bias
+  and antenna were fine; it proves neither. Always poll `CFG-ANT` before trusting
+  `aStatus`.
+- **ROM part ⇒ config is volatile.** No flash; settings live only in `V_BCKP`-backed
+  RAM and no backup cell is visible on the carrier. Baud, nav rate, dynModel and
+  constellation selection must be **re-sent on every boot**. `gps.c` is currently
+  receive-only, so the module runs power-on defaults today.
+- **Galileo is disabled by default** on M8 — `UBX-CFG-GNSS` turns it on. This is the
+  cheapest accuracy win available here, because **SBAS is worthless in the South
+  Pacific** (WAAS/EGNOS/MSAS/GAGAN all cover elsewhere).
+- **L1 single-band, 2.5 m CEP, 10 Hz concurrent / 18 Hz single-GNSS.** Operational
+  limits ≤4 g / 50,000 m / 500 m/s — a jet at FL410 and 300 m/s is well inside.
+  9600 baud, not the chip, is what caps the practical update rate at ~2 Hz.
+- **Supply is 2.7–3.6 V, not 1.65 V** — the 1.65 V figure in the M8 family belongs to
+  the MAX-M8C. Easy spec-sheet trap.
+- **MAX-M8Q has `LNA_EN` but no `V_ANT`.** Active-antenna bias is MAX-M8**W** only, so
+  any bias must come from the carrier board — relevant given the 3.0 V antenna floor
+  that bit us on 2026-07-25.
+- **Carrier gotcha:** the A/B/C jumpers shipped on **A = USB ~ GNSS**, which leaves the
+  on-board CP2102 driving the module's RXD. Pull both before wiring an ESP32 TX to it.
+
 ## 2026-07-25 — Wired GNSS on Board 3: pins, a counterfeit M10, and a 3.0 V antenna floor
 
 Bench-validated a serial GNSS module on the T-Display-S3 (Board 3) with a

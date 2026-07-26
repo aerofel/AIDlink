@@ -4,17 +4,29 @@
 for bench and interoperability testing.**
 
 <p align="center">
-  <img src="docs/flight-display.png" alt="AIDlink flight display on a LilyGO T-Display-S3" width="760">
+  <img src="docs/flight-display.jpg" alt="AIDlink flight display on a LilyGO T-Display-S3" width="760">
   <br>
   <sub><i>The onboard flight display (ESP32-S3 T-Display) live in flight-test: tail &amp; flight number,
   trip-progress bar, route, position &amp; altitude, distance to go, steady ETA, UTC and local time at the
-  aircraft position — plus Wi-Fi / internet / feed status icons.</i></sub>
+  aircraft position — plus Wi-Fi / internet / satellite / feed status icons.</i></sub>
 </p>
 
 <p align="center">
-  <img src="docs/aidlink-dashboard.png" alt="AIDlink on-device web dashboard" width="760">
+  <img src="docs/oled-display.jpg" alt="AIDlink flight view on a LilyGO T3-S3 OLED" width="760">
   <br>
-  <sub><i>The built-in web dashboard — live status, connected clients, Wi-Fi scan, and configuration.</i></sub>
+  <sub><i>The same flight view rendered on a LilyGO T3-S3's 128×64 monochrome OLED — one firmware,
+  per-board panel and layout drivers selected automatically from the eFuse MAC.</i></sub>
+</p>
+
+<p align="center">
+  <img src="docs/gnss-hat-devkit.jpg" alt="u-blox MAX-M8Q GNSS HAT wired to an ESP32-S3 devkit" width="370">
+  &nbsp;
+  <img src="docs/gnss-module-tdisplay.jpg" alt="u-blox NEO-M8N breakout beside a LilyGO T-Display-S3" width="370">
+  <br>
+  <sub><i>Wired GNSS as a position source. <b>Left:</b> a u-blox <b>MAX-M8Q</b> on a Raspberry Pi HAT-format
+  carrier, jumper-wired to an ESP32-S3 devkit (RX 16 / TX 12 / PPS 21). <b>Right:</b> a <b>NEO-M8N</b>-marked
+  breakout beside a LilyGO T-Display-S3. Either feeds NMEA 0183 at 9600 baud — no HAT, Pi or shield
+  electronics required.</i></sub>
 </p>
 
 ---
@@ -271,6 +283,71 @@ clamps/derives ground speed, and dead-reckons position at the push rate for smoo
 
 ---
 
+## Wired GNSS receiver 🛰
+
+A serial GNSS receiver can be attached as an **independent position source** — no cabin Wi-Fi, no internet,
+no moving-map provider. Any receiver that emits **NMEA 0183 at 9600 baud** works; the parser is pure and
+covered by host tests built from a real capture.
+
+### Wiring
+
+| Receiver | ESP32 | `board_t` field |
+|---|---|---|
+| `TXD` (module out) | **GPIO 16** | `gps_rx` |
+| `RXD` (module in) | **GPIO 12** | `gps_tx` |
+| `PPS` (optional) | **GPIO 21** | `gps_pps` |
+| `GND` | GND | — |
+| `VCC` | 3V3 or 5V per module | — |
+
+**GPIO 16 and 12 are the only pins free across every board in the fleet** — on the classic ESP32-WROVER,
+16/17 are the PSRAM lines, so opening a UART there blind is destructive. Pins live in the per-model profile
+in `firmware-idf/main/board.c`, keyed by eFuse MAC, so a board with no receiver stays inert rather than
+driving pins blind. Adding a receiver to a board is one line in its profile.
+
+### Ground speed and track come from the receiver
+
+On the GNSS path, **ground speed and track are taken verbatim from the RMC sentence** (`f[7]` = SOG knots,
+`f[8]` = COG °true) and passed straight through — no smoothing, no derivation. u-blox computes these from
+carrier Doppler rather than position differencing, which is why the data sheet quotes 0.05 m/s velocity and
+0.3° heading accuracy.
+
+This differs from the Wi-Fi feed path, which runs `derive.c` to reconstruct track from successive positions
+(EMA-smoothed great-circle bearing) and ground speed from distance/time when the provider omits them:
+
+| Source | Ground speed & track |
+|---|---|
+| **GNSS** | RMC fields verbatim — the receiver's own solution |
+| **Wi-Fi feed** | provider's values when present; derived from position deltas when not |
+
+⚠️ COG is meaningless at low ground speed — with the aircraft stationary the field is noise.
+
+### Source arbitration
+
+The GNSS setting is a **preference, not a lock**. Whichever source is actually live feeds the EFB, so
+neither a GNSS dropout nor a feed stall blanks the position. Because **GNSS carries no identity**, the
+manual identity fallback (tail, flight, origin, destination) supplies only the fields the live feed leaves
+empty — without it, a GPS-only unit would show no route, distance-to-go or ETA.
+
+Fix quality drives the satellite indicator colour, and `/status` exposes the full receiver state
+(`present`, `fix`, `sats_used`, `sats_view`, `hdop`, per-constellation counts, `pps_us`, `csum_err`).
+
+### Tested receivers, and two traps
+
+- **u-blox MAX-M8Q** on a Pi HAT-format carrier — genuine M8 (`ROM CORE 3.01`, `hwVersion 00080000`,
+  `PROTVER 18.00`). L1 only, 3 concurrent constellations, 2.5 m CEP, TCXO, PPS at 30 ns RMS.
+- **A NEO-M8N-marked breakout** that actually reports **M10-class firmware** (`hwVersion 000A0000`,
+  `PROTVER 34.10`, `ROM SPG 5.10`). Consequence: legacy `UBX-CFG-NAV5` **does not exist** on it and all
+  configuration must go through `CFG-VALSET`. **Check `UBX-MON-VER` before trusting a silkscreen.**
+- **Antenna, not receiver, is the usual fault.** Active antennas need bias the module may not supply
+  (MAX-M8Q has `LNA_EN` but no `V_ANT`), and patch antennas are directional — the labelled face is the
+  **base**. `UBX-MON-HW` is the diagnostic that matters: *low* AGC = too much input power, *high* AGC =
+  no signal reaching the front end, and a **frozen** AGC across an antenna swap means the RF path is open.
+  `aStatus=OK` proves nothing unless `CFG-ANT` shows open-detect enabled.
+
+Full receiver specification, wiring detail and diagnostics: **[`GPS-HARDWARE.md`](GPS-HARDWARE.md)**.
+
+---
+
 ## Logging & debugging
 
 - The firmware mirrors a 90-line ring buffer to USB serial and to the web `/log`. Verbose detail (full
@@ -293,6 +370,8 @@ tools/flash.sh                 # Arduino: compile + upload (auto-version; macOS 
 tools/tee_serial.py            # background serial logger
 tools/reboot.py                # reboot the board from the host (RTS toggle)
 examples/flight_info.json      # sample position-source response
+GPS-HARDWARE.md                # GNSS receiver specs, wiring, and RF fault isolation
+ESP32-BOARDS.md                # per-board silicon specs and USB-networking feasibility
 LICENSE                        # Apache-2.0
 ```
 
@@ -300,6 +379,58 @@ LICENSE                        # Apache-2.0
 > proven build). `firmware-idf/` is the ESP-IDF rewrite that additionally turns
 > an **ESP32-S3's USB-C cable into a network link** (DHCP + NAT to the uplink,
 > coexisting with the Wi-Fi AP) — see [`firmware-idf/README.md`](firmware-idf/README.md).
+
+---
+
+## Changelog
+
+Newest first. Dates are the working dates in this repository's history.
+
+### 2026-07-26 — GNSS on a second board, portal tweaks
+
+- **Wired GNSS brought up on the ESP32-S3 devkit** (Board 2): `PROF_S3_DEVKIT` given
+  `gps_rx=16 / gps_tx=12 / gps_pps=21`. Data path verified end-to-end — `gps.present=true` with
+  `csum_err=0`, which validates jumper routing, TX/RX orientation and baud in a single check.
+- **Uplink Wi-Fi and cockpit AP passwords are now shown in clear text** in the settings page. Both values
+  were already sent to the browser; masking only hid them visually, and made typos undetectable when
+  entering a passphrase off a placard. The portal login password stays masked.
+- **New [`GPS-HARDWARE.md`](GPS-HARDWARE.md)** — full MAX-M8Q specification, carrier-board pinout, jumper
+  routing, ESP32 wiring, and an RF fault-isolation procedure built from `UBX-MON-HW` / `CFG-ANT`.
+- **Flashing note:** Board 2 cannot be flashed over native USB — `/dfu` returns 200 but the ROM downloader
+  never enumerates a CDC port. Use its second USB port (**WCH CH343**); esptool auto-reset works there with
+  no BOOT+RST, and the stub is safe.
+
+### 2026-07-25 — Wired GNSS as a selectable position source
+
+- Pure **NMEA 0183 parser** with host tests built from a real capture.
+- **UART1 receiver task**, PPS edge counter, per-board pin profiles.
+- **Source arbitration** with fallback and identity precedence — preference, not lock.
+- **Portal controls** for the GNSS source and the manual identity fallback; persisted to NVS.
+- **Satellite indicator** coloured by fix quality; per-constellation "used" counts and settings tiles.
+- **User-key gestures** — hold swaps source, tap shows GPS detail.
+- Fix dimension gated on GGA quality; PPS health tightened.
+- **Flashing:** `--no-stub` is mandatory on the USB-OTG ROM — the stub does not survive it. Hands-off
+  reflash script added for the native-USB S3 boards.
+
+### 2026-07-24 — In-flight position dropout fixed
+
+- **Raised the lwIP socket pool.** ADBP push was being starved, and the EFB lost position in flight.
+- Registered a second T3-S3; split per-model profiles from the MAC map.
+
+### 2026-07-23 — Board 4 support
+
+- **LilyGO T3-S3** support with segregated panel/layout drivers (SSD1306 OLED alongside the ST7789 LCD).
+
+### 2026-07-21 — Feed stability
+
+- Stable Viasat poll: keep-alive TLS, octal PSRAM, fetch diagnostics.
+- Internet probe via HTTP `generate_204` instead of a blocked port-53 handshake.
+
+### 2026-07-15 / 16 — ETA estimator
+
+- Orthodromic + vertical-profile rework; **FMS-steady** ETA display; measured A20N profile.
+- Real-flight replay tooling — see [`docs/eta-estimator.md`](docs/eta-estimator.md).
+- Display polish: local-ETA badge, estimator palette, cloud icon for internet reachability.
 
 ---
 
