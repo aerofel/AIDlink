@@ -24,7 +24,10 @@ static const board_t PROF_S3_DEVKIT = {
     .name = "esp32s3-devkit",
     .panel = NULL, .layout = NULL,
     .led = LED_WS2812, .led_gpio = 48,
-    .gps_rx = -1, .gps_tx = -1, .gps_pps = -1, .btn_gpio = -1,
+    // MAX-M8Q GNSS HAT wired 2026-07-26. 16/12 are the fleet-safe pair; 21 is
+    // free on this unit (octal PSRAM uses 33-37, native USB uses 19/20), unlike
+    // the T3-S3 where 21 is QWIIC SCL + LoRa DIO3.
+    .gps_rx = 16, .gps_tx = 12, .gps_pps = 21, .btn_gpio = -1,
 };
 
 static const board_t PROF_TDISPLAY_S3 = {
@@ -34,7 +37,8 @@ static const board_t PROF_TDISPLAY_S3 = {
     // GPIO48 here is LCD data D7 — driving WS2812 pulses onto it would corrupt
     // the panel, so this board has no controllable LED.
     .led = LED_NONE, .led_gpio = -1,
-    // Only unit with GNSS wired today. RX/TX are fleet-safe; PPS is Board-3-only.
+    // RX/TX are the fleet-safe pair; PPS on 21 is safe here and on the devkit,
+    // but NOT on the T3-S3 (QWIIC SCL + LoRa DIO3).
     .gps_rx = 16, .gps_tx = 12, .gps_pps = 21,
     .btn_gpio = 14,                   // user key, unused by the rest of the firmware
 };
