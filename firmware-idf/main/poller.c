@@ -11,6 +11,8 @@
 #include "perfdb.h"
 #include "gps.h"
 #include "possrc.h"
+#include "log.h"
+#include "netcore.h"
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -53,6 +55,13 @@ static bool s_poll_ok;
 static uint32_t s_poll_at_ms;
 static char s_poll_msg[64] = "no poll yet";
 static uint32_t s_last_heap;   // free heap sampled at the last poll (diagnostics)
+
+// Poll diagnostics for the persistent log (spec 2026-08-13): per-minute
+// summary counters plus failure-streak edges, so a post-flight /flog shows
+// when and why the feed went away — not just that it did.
+static uint32_t s_win_ok, s_win_fail, s_win_maxms;
+static char     s_win_lasterr[40];
+static uint32_t s_fail_streak, s_fail_start_ms;
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -216,18 +225,32 @@ bool poller_parse_panasonic(const char *json, double *lat, double *lon, double *
                             double *gs, double *track, bool *have_track, uint64_t *utc_ms,
                             char *flight, char *tail, char *orig, char *dest, char *actype);
 
+static void poll_fail(uint32_t lat_ms, const char *err) {
+    s_win_fail++;
+    if (lat_ms > s_win_maxms) s_win_maxms = lat_ms;
+    strlcpy(s_win_lasterr, err, sizeof s_win_lasterr);
+    if (s_fail_streak++ == 0) {
+        s_fail_start_ms = now_ms();
+        logln("[poll] FAIL: %s (%lums, rssi %d)", err, (unsigned long)lat_ms, netcore_sta_rssi());
+    }
+}
+
 static void poll_once(void) {
     static char body[4096];
     long http_date = 0;
     char err[40] = "";
     s_last_heap = esp_get_free_heap_size();
+    uint32_t t0 = now_ms();
     int n = http_get(body, sizeof body, &http_date, err, sizeof err);
+    uint32_t lat_ms = now_ms() - t0;
+    if (lat_ms > s_win_maxms) s_win_maxms = lat_ms;
     if (n <= 0) {
         s_poll_ok = false;
         snprintf(s_poll_msg, sizeof s_poll_msg, "fetch failed: %s", err[0] ? err : "?");
         ESP_LOGW(TAG, "poll fail: %s (free heap %u, largest block %u)", err[0] ? err : "?",
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        poll_fail(lat_ms, err[0] ? err : "?");
         return;
     }
 
@@ -248,8 +271,15 @@ static void poll_once(void) {
     bool ok = (CFG->src_type == 1)
         ? poller_parse_panasonic(body, &lat, &lon, &alt, &gs, &track, &have_track, &utc, flight, tail, orig, dest, actype)
         : poller_parse_viasat(body, &lat, &lon, &alt, &gs, &track, &have_track, &utc, flight, tail, orig, dest, actype);
-    if (!ok) { s_poll_ok = false; strlcpy(s_poll_msg, "parse failed", sizeof s_poll_msg); return; }
+    if (!ok) { s_poll_ok = false; strlcpy(s_poll_msg, "parse failed", sizeof s_poll_msg);
+               poll_fail(lat_ms, "parse"); return; }
 
+    if (s_fail_streak) {
+        logln("[poll] recovered after %lu fails, %lus gap",
+              (unsigned long)s_fail_streak, (unsigned long)((now_ms() - s_fail_start_ms) / 1000));
+        s_fail_streak = 0;
+    }
+    s_win_ok++;
     apply_fix(lat, lon, alt, gs, track, have_track, utc, false, flight, tail, orig, dest, actype);
     s_poll_ok = true; s_poll_at_ms = now_ms(); strlcpy(s_poll_msg, "ok", sizeof s_poll_msg);
 }
@@ -269,6 +299,11 @@ static void arbitrate(void) {
         ESP_LOGI(TAG, "position source: %s -> %s",
                  s_live_src == SRC_GPS ? "gps" : s_live_src == SRC_FEED ? "feed" : "none",
                  src == SRC_GPS ? "gps" : src == SRC_FEED ? "feed" : "none");
+        logln("[pos] source %s -> %s (feed age %lds, gps %s)",
+              s_live_src == SRC_GPS ? "gps" : s_live_src == SRC_FEED ? "feed" : "none",
+              src == SRC_GPS ? "gps" : src == SRC_FEED ? "feed" : "none",
+              s_feed.at_ms ? (long)((t - s_feed.at_ms) / 1000) : -1,
+              gps_live ? "live" : "down");
         s_live_src = src;
     }
     if (src == SRC_NONE) { pos_mark_stale(); return; }
@@ -301,7 +336,7 @@ static void arbitrate(void) {
 possrc_t poller_live_source(void) { return s_live_src; }
 
 static void poller_task(void *arg) {
-    uint32_t last_poll = 0, last_sim = now_ms();
+    uint32_t last_poll = 0, last_sim = now_ms(), last_sum = now_ms();
     for (;;) {
         uint32_t t = now_ms();
         if (CFG->sim_enable) {
@@ -310,6 +345,21 @@ static void poller_task(void *arg) {
         } else {
             if (t - last_poll >= CFG->poll_ms) { last_poll = t; poll_once(); }
             arbitrate();   // picks the live source, applies identity, publishes
+        }
+        // One summary line per minute for the persistent log: enough to
+        // reconstruct link quality, poll success rate and feed age offline.
+        if (t - last_sum >= 60000) {
+            if (s_win_ok + s_win_fail) {
+                logln("[poll] 60s ok=%lu fail=%lu maxms=%lu rssi=%d heap=%lu age=%lds src=%s%s%s",
+                      (unsigned long)s_win_ok, (unsigned long)s_win_fail,
+                      (unsigned long)s_win_maxms, netcore_sta_rssi(),
+                      (unsigned long)s_last_heap,
+                      s_feed.at_ms ? (long)((t - s_feed.at_ms) / 1000) : -1,
+                      s_live_src == SRC_GPS ? "gps" : s_live_src == SRC_FEED ? "feed" : "none",
+                      s_win_fail ? " last=" : "", s_win_fail ? s_win_lasterr : "");
+            }
+            s_win_ok = s_win_fail = s_win_maxms = 0; s_win_lasterr[0] = 0;
+            last_sum = t;
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }

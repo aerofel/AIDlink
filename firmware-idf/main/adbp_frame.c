@@ -40,6 +40,25 @@ void adbp_dead_reckon(pos_state_t *p, double dt_s) {
     p->lon = lon2 * 180.0 / M_PI;
 }
 
+adbp_pstate_t adbp_classify(bool valid, uint32_t last_fix_ms, uint32_t now_ms,
+                            uint32_t stale_ms, uint32_t dr_hold_ms) {
+    if (!last_fix_ms) return ADBP_POS_NCD;              // never had a fix
+    uint32_t age = now_ms - last_fix_ms;
+    if (valid && age < stale_ms) return ADBP_POS_FRESH;
+    if (age < stale_ms + dr_hold_ms) return ADBP_POS_DR;
+    return ADBP_POS_NCD;
+}
+
+bool adbp_push_due(bool on_event, uint32_t cur_fix, uint32_t last_fix_seen,
+                   uint32_t now_ms, uint32_t last_push_ms, uint32_t period_ms,
+                   adbp_pstate_t st, adbp_pstate_t prev_st) {
+    if (st != prev_st) return true;                     // state edge: tell the EFB now
+    bool period_up = (now_ms - last_push_ms) >= period_ms;
+    if (!on_event) return period_up;
+    if (cur_fix != last_fix_seen) return true;          // new fix event
+    return st != ADBP_POS_NCD && period_up;             // fallback cadence while reportable
+}
+
 int adbp_parse_params(const char *req, char names[][ADBP_MAXNAME], int maxn) {
     int n = 0;
     const char *needle = "<parameter name=\"";
@@ -72,11 +91,12 @@ static bool has(const char *hay, const char *needle) { return strstr(hay, needle
 
 // Emit one <parameter .../> for `name`. Returns bytes written; sets *matched.
 static int param_xml(char *out, size_t cap, const char *name, const pos_state_t *p,
-                     const aidlink_cfg_t *cfg, bool fresh, uint64_t stamp_ms, bool *matched) {
+                     const aidlink_cfg_t *cfg, adbp_pstate_t state, uint32_t age_s,
+                     uint64_t stamp_ms, bool *matched) {
     char U[ADBP_MAXNAME]; upper(U, sizeof U, name);
     char nm[ADBP_MAXNAME]; adbp_xml_esc(nm, sizeof nm, name);
     *matched = true;
-    char val[64]; int type = 0; bool ncd = !fresh;
+    char val[64]; int type = 0; bool ncd = (state == ADBP_POS_NCD);
 
     // helper macros to format
     #define VALF(fmt, x) do { snprintf(val, sizeof val, fmt, (x)); } while (0)
@@ -96,9 +116,17 @@ static int param_xml(char *out, size_t cap, const char *name, const pos_state_t 
     else if ((has(U, "ALT") && !has(U, "CORRECTION")) || has(U, "BARO_CORRECTION_ALTITUDE1")) {
         type = 0; double a = p->alt_ft > 1.0 ? p->alt_ft : 31000; VALF("%.0f", a);
     }
-    else if (has(U, "GNSS_AVAIL") || (has(U, "AVAIL"))) { type = 6; VALF("%d", fresh ? 1 : 0); ncd = false; }
-    else if (has(U, "FOM")) { type = 0; strcpy(val, "8.0"); ncd = false; }
-    else if (has(U, "HDOP") || has(U, "VDOP") || has(U, "DILUTION")) { type = 0; strcpy(val, "0.8"); ncd = false; }
+    else if (has(U, "GNSS_AVAIL") || (has(U, "AVAIL"))) { type = 6; VALF("%d", state != ADBP_POS_NCD ? 1 : 0); ncd = false; }
+    else if (has(U, "FOM")) {
+        type = 0; ncd = false;
+        if (state == ADBP_POS_DR) { double f = 8.0 + 2.0 * age_s; if (f > 999.0) f = 999.0; VALF("%.1f", f); }
+        else strcpy(val, "8.0");
+    }
+    else if (has(U, "HDOP") || has(U, "VDOP") || has(U, "DILUTION")) {
+        type = 0; ncd = false;
+        if (state == ADBP_POS_DR) { double h = 0.8 + 0.01 * age_s; if (h > 9.9) h = 9.9; VALF("%.1f", h); }
+        else strcpy(val, "0.8");
+    }
     else if (has(U, "INTEGRITYLIMIT") || has(U, "GPSHIL")) { type = 0; strcpy(val, "0.10"); ncd = false; }
     else if (has(U, "ACID") || has(U, "TAIL") || has(U, "REGIST") || has(U, "ACREG")) {
         type = 7; const char *s = p->tail[0] ? p->tail : cfg->ac_tail;
@@ -134,13 +162,13 @@ static int param_xml(char *out, size_t cap, const char *name, const pos_state_t 
 
 int adbp_params_block(char *out, size_t cap, char names[][ADBP_MAXNAME], int n,
                       const pos_state_t *p, const aidlink_cfg_t *cfg,
-                      bool fresh, uint64_t stamp_ms, bool *miss) {
+                      adbp_pstate_t state, uint32_t age_s, uint64_t stamp_ms, bool *miss) {
     int o = 0;
     o += snprintf(out + o, cap - o, "<parameters>");
     bool any_miss = false;
     for (int i = 0; i < n && o < (int)cap - 128; i++) {
         bool matched;
-        o += param_xml(out + o, cap - o, names[i], p, cfg, fresh, stamp_ms, &matched);
+        o += param_xml(out + o, cap - o, names[i], p, cfg, state, age_s, stamp_ms, &matched);
         if (!matched) any_miss = true;
     }
     o += snprintf(out + o, cap - o, "</parameters>");

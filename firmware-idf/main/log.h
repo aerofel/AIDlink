@@ -16,5 +16,10 @@ bool log_enabled(void);
 // Append a line (dropped if capture disabled). printf-style.
 void logln(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 
+// Optional secondary sink: every captured line is also handed to sink() after
+// being stored in the ring (e.g. flog.c's persistent flash log). Called
+// outside the ring mutex, from the logging task's context.
+void log_set_sink(void (*sink)(const char *line));
+
 // Iterate stored lines oldest->newest, invoking cb for each. Returns line count.
 int log_foreach(void (*cb)(const char *line, void *ctx), void *ctx);

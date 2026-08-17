@@ -8,6 +8,8 @@
 #include "web.h"
 #include "gps.h"
 #include "possrc.h"
+#include "adbp.h"
+#include "flog.h"
 #include "poller.h"
 #include "auth.h"
 #include "netcore.h"
@@ -407,7 +409,9 @@ static esp_err_t h_root(httpd_req_t *r) {
               "oninput=\"pollLbl.textContent=(this.value/1000).toFixed(2)+' s'\"></div>",
            c->poll_ms / 1000.0, (unsigned long)c->poll_ms);
     ff_num(r, "Stale → NCD (ms)", "staleMs", c->stale_ms, "500");
-    chunk(r, "</div><div class='note'><b>Viasat</b> and <b>Panasonic</b> use their official on-board endpoints automatically. Choose <b>Custom / test URL</b> to point at your own server (must return the Viasat JSON shape: <code>latitude, longitude, altitude, groundSpeed…</code>).</div></div>");
+    ff_num(r, "DR hold after stale (ms)", "drHoldMs", c->dr_hold_ms, "1000");
+    chunk(r, "</div><div class='note'><b>Viasat</b> and <b>Panasonic</b> use their official on-board endpoints automatically. Choose <b>Custom / test URL</b> to point at your own server (must return the Viasat JSON shape: <code>latitude, longitude, altitude, groundSpeed…</code>)."
+             " <b>DR hold</b>: after the stale window the EFBs keep receiving the last position dead-reckoned along track/GS (FOM/HDOP degrade with age) for this long before going NCD, so a feed dropout does not blank the ownship. 0 disables.</div></div>");
 
     // ⑤ Emulator
     chunk(r, "<div class='card'><h2>⑤ Emulator — fixed test position</h2><div class='grid'>");
@@ -446,6 +450,7 @@ static esp_err_t h_root(httpd_req_t *r) {
         gps_state_t g; gps_get(&g);
         if (g.present) {
             chunk(r, "<div class='card'><h2>🛰 GNSS (wired receiver)</h2><div class='grid'>");
+            chunk(r, "<input type='hidden' name='gpsCard' value='1'>");   // h_save marker: card was in the form
             ff_tog(r, "Use GPS as a position source", "gpsEn", c->gps_enable);
             ff_tog(r, "Prefer GPS over the Wi-Fi feed", "gpsPref", c->gps_pref == 1);
             chunk(r, "</div><div class='note'>");
@@ -510,8 +515,16 @@ static esp_err_t h_root(httpd_req_t *r) {
               "<label class='tog' style='margin:0'><input type='checkbox' id='logEn' %s onchange=\"fetch('/logtoggle?on='+(this.checked?1:0))\"><span>Live capture</span></label>"
               "<button class='ghost' type='button' onclick='poll()'>Refresh</button>"
               "<button class='ghost' type='button' onclick='copyLog()'>📋 Copy</button>"
-              "<a href='/log' target='_blank' style='color:var(--cy);font-size:.8rem'>open raw ↗</a></div></div>",
+              "<a href='/log' target='_blank' style='color:var(--cy);font-size:.8rem'>open raw ↗</a>",
            c->log_enable ? "checked" : "");
+    if (flog_available())
+        chunkf(r, "<a href='/flog' target='_blank' style='color:var(--cy);font-size:.8rem'>⬇ flight log (%lu KB) ↗</a>"
+                  "<a href='/flog?clear=1' onclick=\"return confirm('Erase the persisted flight log?')\" "
+                  "style='color:var(--mut);font-size:.8rem'>clear</a>",
+               (unsigned long)(flog_used_bytes() / 1024));
+    chunk(r, "</div><div class='note'>With <b>Live capture</b> on, every log line is also written to a "
+             "dedicated flash partition that survives reboots and power-off — pull <b>flight log</b> "
+             "after a flight to analyse poll failures, position-state transitions and EFB pushes.</div></div>");
     chunk(r, "<footer><a href='/log' style='color:var(--cy)' target='_blank'>▸ traffic log (ADBP + HTTP probes)</a> · aidlink · ESP32 · ");
     chunk(r, __DATE__);
     chunk(r, "</footer></div>");
@@ -703,6 +716,7 @@ static esp_err_t h_save(httpd_req_t *r) {
     if (fld(body, "vsUrl", v, sizeof v)) strlcpy(c->vs_url, v, sizeof c->vs_url);
     if (fld(body, "pollMs", v, sizeof v)) c->poll_ms = strtoul(v, 0, 10);
     if (fld(body, "staleMs", v, sizeof v)) c->stale_ms = strtoul(v, 0, 10);
+    if (fld(body, "drHoldMs", v, sizeof v)) c->dr_hold_ms = strtoul(v, 0, 10);
     c->sim_enable = fld(body, "simEnable", v, sizeof v);
     if (fld(body, "simLat", v, sizeof v)) c->sim_lat = atof(v);
     if (fld(body, "simLon", v, sizeof v)) c->sim_lon = atof(v);
@@ -714,8 +728,14 @@ static esp_err_t h_save(httpd_req_t *r) {
         if (c->perf_type[0] && !perfdb_find(c->perf_type)) c->perf_type[0] = 0;
     }
     c->winds_enable = fld(body, "windsEn", v, sizeof v);
-    c->gps_enable   = fld(body, "gpsEn", v, sizeof v);
-    c->gps_pref     = fld(body, "gpsPref", v, sizeof v) ? 1 : 0;
+    // The GNSS card only renders while a receiver is detected, so its checkboxes
+    // are absent from the form whenever the module is unplugged — and a
+    // presence-based parse would then silently disable GPS. Only trust the
+    // checkboxes when the card's hidden marker proves the card was in the form.
+    if (fld(body, "gpsCard", v, sizeof v)) {
+        c->gps_enable = fld(body, "gpsEn", v, sizeof v);
+        c->gps_pref   = fld(body, "gpsPref", v, sizeof v) ? 1 : 0;
+    }
     if (fld(body, "idTail",   v, sizeof v)) { upper_trim(v); strlcpy(c->id_tail,   v, sizeof c->id_tail); }
     if (fld(body, "idFlight", v, sizeof v)) { upper_trim(v); strlcpy(c->id_flight, v, sizeof c->id_flight); }
     if (fld(body, "idOrig",   v, sizeof v)) { upper_trim(v); strlcpy(c->id_orig,   v, sizeof c->id_orig); }
@@ -724,7 +744,9 @@ static esp_err_t h_save(httpd_req_t *r) {
     if (fld(body, "dsPort", v, sizeof v)) c->ds_port = atoi(v);
     c->napt_enable = fld(body, "napt", v, sizeof v);
     if (fld(body, "devName", v, sizeof v)) strlcpy(c->dev_name, v, sizeof c->dev_name);
-    c->log_enable = fld(body, "logEnable", v, sizeof v);
+    // log_enable is deliberately NOT parsed here: the main form never renders a
+    // logEnable field, so the old presence-based parse turned logging off on
+    // every save. The /logtoggle endpoint owns that flag.
     c->auth_enable = fld(body, "authEnable", v, sizeof v);
     if (fld(body, "authUser", v, sizeof v)) strlcpy(c->auth_user, v, sizeof c->auth_user);
     if (fld(body, "authPass", v, sizeof v) && v[0]) {
@@ -742,6 +764,7 @@ static esp_err_t h_save(httpd_req_t *r) {
     if (c->poll_ms < 250) c->poll_ms = 250;
     if (c->poll_ms > 60000) c->poll_ms = 60000;
     if (c->stale_ms < 1000) c->stale_ms = 1000;
+    if (c->dr_hold_ms > 3600000) c->dr_hold_ms = 3600000;   // DR is a bounded lie: cap 1 h
     free(body);
 
     cfg_save(c);
@@ -808,13 +831,14 @@ static esp_err_t h_status(httpd_req_t *r) {
         "\"lat\":%.5f,\"lon\":%.5f,\"trk\":%.1f,\"gs\":%.1f,\"alt\":%.0f,\"staip\":\"%s\","
         "\"tail\":\"%s\",\"flight\":\"%s\",\"dep\":\"%s\",\"arr\":\"%s\","
         "\"pollok\":%s,\"pollage\":%ld,\"pollmsg\":\"%s\",\"heap\":%u"
-        ",\"live_source\":\"%s\"%s}",
+        ",\"live_source\":\"%s\",\"pos_state\":\"%s\"%s}",
         up ? "true" : "false", ssid_e, netcore_ap_client_count(),
         valid ? "true" : "false", p.simulated ? "true" : "false",
         p.lat, p.lon, p.track_deg, p.gs_kt, p.alt_ft, staip,
         p.tail[0] ? p.tail : CFG->ac_tail, p.flight, dep, arr,
         pok ? "true" : "false", pollage, pmsg_e, (unsigned)poller_last_heap(),
-        live == SRC_GPS ? "gps" : live == SRC_FEED ? "feed" : "none", gpsj);
+        live == SRC_GPS ? "gps" : live == SRC_FEED ? "feed" : "none",
+        adbp_pos_state_str(), gpsj);
     httpd_resp_set_type(r, "application/json");
     httpd_resp_sendstr(r, json);
     return ESP_OK;
@@ -888,6 +912,28 @@ static esp_err_t h_log(httpd_req_t *r) {
     httpd_resp_sendstr_chunk(r, NULL);
     return ESP_OK;
 }
+// Persistent flash log: stream the whole flog partition (oldest first), or
+// erase it with ?clear=1. Auth-gated like everything else.
+static void flog_emit(const char *chunk_, int len, void *ctx) {
+    httpd_resp_send_chunk((httpd_req_t *)ctx, chunk_, len);
+}
+static esp_err_t h_flog(httpd_req_t *r) {
+    if (!gate(r)) return ESP_OK;
+    char q[32] = {0}, v[4] = {0};
+    if (httpd_req_get_url_query_str(r, q, sizeof q) == ESP_OK &&
+        httpd_query_key_value(q, "clear", v, sizeof v) == ESP_OK && atoi(v)) {
+        flog_clear();
+        httpd_resp_set_type(r, "text/plain; charset=utf-8");
+        httpd_resp_sendstr(r, "flight log cleared\n");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(r, "text/plain; charset=utf-8");
+    if (!flog_available()) { httpd_resp_sendstr(r, "(no flog partition)\n"); return ESP_OK; }
+    flog_dump(flog_emit, r);
+    httpd_resp_send_chunk(r, NULL, 0);
+    return ESP_OK;
+}
+
 static esp_err_t h_logtoggle(httpd_req_t *r) {
     if (!gate(r)) return ESP_OK;
     char q[32] = {0}, on[4] = {0};
@@ -987,6 +1033,7 @@ void web_start(aidlink_cfg_t *cfg) {
     reg("/clients", HTTP_GET, h_clients);
     reg("/scan", HTTP_GET, h_scan);
     reg("/log", HTTP_GET, h_log);
+    reg("/flog", HTTP_GET, h_flog);
     reg("/logtoggle", HTTP_GET, h_logtoggle);
     reg("/save", HTTP_POST, h_save);
     reg("/login", HTTP_GET, h_login_get);

@@ -177,6 +177,10 @@ port, flashes the app slot, and waits for the unit to answer again.
 3. **App slot only** (`0x10000`). The bootloader and partition table do not
    change between builds, and **NVS at `0x9000` holds the Wi-Fi credentials** —
    `erase_flash` here costs you the uplink config.
+   ⚠ Exception (2026-08-13): the table gained a `flog` data partition at
+   `0x310000`. A unit still on the pre-flog table needs `0x8000
+   partition-table.bin` added ONCE to the same write_flash; NVS is untouched
+   (the table is 0xC00 bytes at 0x8000).
 
 ### What still cannot be automated
 

@@ -18,6 +18,7 @@
 #include "poller.h"
 #include "services.h"
 #include "log.h"
+#include "flog.h"
 #include "statusled.h"
 #include "board.h"
 #include "display.h"
@@ -37,6 +38,8 @@ void app_main(void) {
     pos_init();
     log_init();
     cfg_load(&cfg);
+    flog_init();               // persistent flash log (no-op without a flog partition)
+    log_set_sink(flog_line);   // every captured logln line also lands on flash
 
     // First-boot credential seed: default login admin / password (salted SHA-256).
     if (cfg.auth_hash[0] == 0) {

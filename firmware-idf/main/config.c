@@ -70,6 +70,7 @@ void cfg_load(aidlink_cfg_t *c) {
     c->sim_trk = 82; c->sim_gs = 526; c->sim_alt = 36000;
     c->poll_ms = 1000; c->stale_ms = 30000;   // default 1 s poll; 30 s stale —
     // the live cabin Wi-Fi drops fetch bursts >15 s, which NCD-blipped the feed
+    c->dr_hold_ms = 300000;   // 5 min dead-reckoning hold after stale (spec 2026-08-13)
     c->auth_enable = true; strcpy(c->auth_user, "admin");
 
     nvs_handle_t h;
@@ -119,6 +120,7 @@ void cfg_load(aidlink_cfg_t *c) {
     get_str(h, "vs_url", c->vs_url, sizeof c->vs_url);
     c->poll_ms = get_u32(h, "poll_ms", c->poll_ms);
     c->stale_ms = get_u32(h, "stale_ms", c->stale_ms);
+    c->dr_hold_ms = get_u32(h, "dr_hold_ms", c->dr_hold_ms);
     c->sim_enable = get_bool(h, "sim_enable", c->sim_enable);
     c->sim_lat = get_dbl(h, "sim_lat", c->sim_lat);
     c->sim_lon = get_dbl(h, "sim_lon", c->sim_lon);
@@ -176,6 +178,7 @@ int cfg_save(const aidlink_cfg_t *c) {
     e |= nvs_set_str(h, "vs_url", c->vs_url);
     e |= nvs_set_u32(h, "poll_ms", c->poll_ms);
     e |= nvs_set_u32(h, "stale_ms", c->stale_ms);
+    e |= nvs_set_u32(h, "dr_hold_ms", c->dr_hold_ms);
     e |= nvs_set_u8(h, "sim_enable", c->sim_enable ? 1 : 0);
     e |= nvs_set_blob(h, "sim_lat", &c->sim_lat, sizeof(double));
     e |= nvs_set_blob(h, "sim_lon", &c->sim_lon, sizeof(double));

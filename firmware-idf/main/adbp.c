@@ -28,6 +28,7 @@ typedef struct {
     uint16_t port;          // advertised publishport
     bool     on_event;
     uint32_t period_ms, last_push_ms, last_fix_seen;
+    adbp_pstate_t last_state;   // freshness state at the last push (edge detection)
     char     params[1400];
     int      sock;          // push socket (-1 = not connected)
     bool     was_connected;
@@ -47,16 +48,39 @@ static uint64_t stamp_ms(uint64_t utc_ms) {
     return 1782000000000ULL + (now_ms() % 1000);     // synthetic floor
 }
 
-// Snapshot pos + dead-reckon, then build <parameters>. Returns *fresh + *miss.
+// Current freshness state of the shared position, per spec 2026-08-13.
+static adbp_pstate_t pos_state_now(void) {
+    pos_state_t p; pos_get(&p);
+    return adbp_classify(p.valid, p.last_fix_ms, now_ms(), CFG->stale_ms, CFG->dr_hold_ms);
+}
+
+const char *adbp_pos_state_str(void) {
+    if (!CFG) return "ncd";
+    switch (pos_state_now()) {
+        case ADBP_POS_FRESH: return "fresh";
+        case ADBP_POS_DR:    return "dr";
+        default:             return "ncd";
+    }
+}
+
+// Snapshot pos, classify, dead-reckon (fresh AND during the DR hold), then
+// build <parameters>.
 static int build_params(char *out, size_t cap, char names[][ADBP_MAXNAME], int n, bool *miss) {
     pos_state_t p; pos_get(&p);
     uint32_t age = now_ms() - p.last_fix_ms;
-    bool fresh = p.valid && age < CFG->stale_ms;
-    if (fresh) {
-        double dt = age / 1000.0; if (dt > CFG->stale_ms / 1000.0) dt = CFG->stale_ms / 1000.0;
+    adbp_pstate_t st = adbp_classify(p.valid, p.last_fix_ms, now_ms(),
+                                     CFG->stale_ms, CFG->dr_hold_ms);
+    if (st != ADBP_POS_NCD) {
+        // In the DR hold the arbiter has already cleared p.valid; the retained
+        // lat/lon/track/gs carry the extrapolation, so revalidate the local copy.
+        if (st == ADBP_POS_DR) p.valid = true;
+        double dt = age / 1000.0;
+        double cap_s = (CFG->stale_ms + CFG->dr_hold_ms) / 1000.0;
+        if (dt > cap_s) dt = cap_s;
         adbp_dead_reckon(&p, dt);
     }
-    return adbp_params_block(out, cap, names, n, &p, CFG, fresh, stamp_ms(p.utc_ms), miss);
+    return adbp_params_block(out, cap, names, n, &p, CFG, st, age / 1000,
+                             stamp_ms(p.utc_ms), miss);
 }
 
 // Read an ADBP request from a connected socket (until </method> or timeout).
@@ -128,6 +152,12 @@ static void handle_request(int cs, uint32_t peer_ip) {
                          (unsigned)(peer_ip & 0xFF), (unsigned)((peer_ip >> 8) & 0xFF),
                          (unsigned)((peer_ip >> 16) & 0xFF), (unsigned)((peer_ip >> 24) & 0xFF),
                          pport, per, on_event, np);
+                // The subscription mode decides which dropout path the EFB is
+                // exposed to (spec 2026-08-13) — record it where /log can see it.
+                logln("[adbp] subscribe %s per=%lums pubport=%ld np=%d from %u.%u.%u.%u",
+                      on_event ? "OnEvent" : "periodic", (unsigned long)per, pport, np,
+                      (unsigned)(peer_ip & 0xFF), (unsigned)((peer_ip >> 8) & 0xFF),
+                      (unsigned)((peer_ip >> 16) & 0xFF), (unsigned)((peer_ip >> 24) & 0xFF));
             } else ESP_LOGW(TAG, "no free subscription slot");
         }
         build_params(body, sizeof body, names, np, &miss);
@@ -176,10 +206,24 @@ static void push_subs(void) {
     uint32_t cur_fix = p.last_fix_ms, now = now_ms();
     static char body[3072], msg[4096];
 
+    adbp_pstate_t st = adbp_classify(p.valid, p.last_fix_ms, now,
+                                     CFG->stale_ms, CFG->dr_hold_ms);
+    // One line per transition so a post-flight /log (or the flash log) shows
+    // exactly when the EFB was moved between fresh / dead-reckoned / NCD.
+    static adbp_pstate_t s_prev_state = ADBP_POS_NCD;
+    if (st != s_prev_state) {
+        static const char *nm[] = { "fresh", "dr", "ncd" };
+        logln("[adbp] pos %s -> %s (fix age %lus)", nm[s_prev_state], nm[st],
+              (unsigned long)((now - p.last_fix_ms) / 1000));
+        s_prev_state = st;
+    }
+
     for (int i = 0; i < MAX_SUBS; i++) {
         sub_t *su = &s_subs[i];
         if (!su->active) continue;
-        bool due = su->on_event ? (cur_fix != su->last_fix_seen) : (now - su->last_push_ms >= su->period_ms);
+        bool due = adbp_push_due(su->on_event, cur_fix, su->last_fix_seen,
+                                 now, su->last_push_ms, su->period_ms,
+                                 st, su->last_state);
         if (!due) continue;
 
         if (su->sock < 0) {
@@ -208,7 +252,7 @@ static void push_subs(void) {
         if (w <= 0) { close(su->sock); su->sock = -1; su->was_connected = false; }
         else { if (dl) send(su->sock, delim, dl, 0); su->push_count++; s_push_seq++; }
 
-        su->last_push_ms = now; su->last_fix_seen = cur_fix;
+        su->last_push_ms = now; su->last_fix_seen = cur_fix; su->last_state = st;
     }
 }
 

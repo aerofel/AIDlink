@@ -214,6 +214,8 @@ clang -Imain -o /tmp/t host_test/test_config_subnet.c   main/config_util.c   && 
 clang -Imain -o /tmp/t host_test/test_dnsfwd_remap.c    main/dnsfwd_util.c   && /tmp/t
 clang -Imain -o /tmp/t host_test/test_web_util.c        main/web_util.c      && /tmp/t
 clang -Imain -o /tmp/t host_test/test_adbp_frame.c      main/adbp_frame.c -lm && /tmp/t
+clang -Imain -o /tmp/t host_test/test_adbp_hold.c       main/adbp_frame.c -lm && /tmp/t
+clang -Imain -o /tmp/t host_test/test_flog_core.c       main/flog_core.c      && /tmp/t
 clang -Imain -o /tmp/t host_test/test_geo.c             main/geo.c        -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_airports.c        main/airports.c main/geo.c -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_tzdb.c            main/tzdb.c main/tzdb_data.c -lm && /tmp/t

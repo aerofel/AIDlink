@@ -36,7 +36,7 @@ int main(void) {
     aidlink_cfg_t cfg; memset(&cfg, 0, sizeof cfg);
     cfg.frame_len = 1; cfg.frame_prolog_each = true; strcpy(cfg.ac_tail, "TEST01");
     bool miss = false;
-    adbp_params_block(out, sizeof out, names, n, &p, &cfg, true, 1782000000000ULL, &miss);
+    adbp_params_block(out, sizeof out, names, n, &p, &cfg, ADBP_POS_FRESH, 0, 1782000000000ULL, &miss);
     assert(strstr(out, "<parameters>") && strstr(out, "</parameters>"));
     assert(strstr(out, "value=\"47.500000\""));    // LAT
     assert(strstr(out, "value=\"-122.300000\""));  // LON
@@ -45,7 +45,7 @@ int main(void) {
 
     // unknown param -> NCD + miss
     char un[1][ADBP_MAXNAME]; strcpy(un[0], "TOTALLYBOGUS");
-    adbp_params_block(out, sizeof out, un, 1, &p, &cfg, true, 0, &miss);
+    adbp_params_block(out, sizeof out, un, 1, &p, &cfg, ADBP_POS_FRESH, 0, 0, &miss);
     assert(strstr(out, "validity=\"2\""));
     assert(miss);
 

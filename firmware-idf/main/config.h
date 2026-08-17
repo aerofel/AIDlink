@@ -59,6 +59,10 @@ typedef struct {
     int      src_type;         // 0=Viasat, 1=Panasonic, 2=custom
     char     vs_url[128];      // custom/test source URL
     uint32_t poll_ms, stale_ms;
+    // Dead-reckoning hold (spec 2026-08-13): after stale_ms, ADBP keeps serving
+    // the extrapolated position as valid for this long before going NCD, so a
+    // feed stall does not blank the EFB ownship. 0 = off (NCD at stale_ms).
+    uint32_t dr_hold_ms;
     // --- wired GNSS source ---
     bool     gps_enable;       // allow GPS to be chosen at all
     int      gps_pref;         // preferred source: 0 = Wi-Fi feed, 1 = GPS

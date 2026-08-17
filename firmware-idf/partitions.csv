@@ -3,3 +3,6 @@
 nvs,      data, nvs,     0x9000,   0x6000
 phy_init, data, phy,     0xf000,   0x1000
 factory,  app,  factory, 0x10000,  0x300000
+# Persistent diagnostic log (flog.c, spec 2026-08-13). 512 KB keeps ~60 flight
+# hours of summary lines and still fits the 4 MB T3-S3 (ends at 0x390000).
+flog,     data, 0x40,    0x310000, 0x80000

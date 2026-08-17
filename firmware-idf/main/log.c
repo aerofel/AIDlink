@@ -12,6 +12,9 @@ static int  s_head;                 // index of the oldest line
 static int  s_count;                // number of stored lines
 static bool s_enable;
 static SemaphoreHandle_t s_mux;
+static void (*s_sink)(const char *line);
+
+void log_set_sink(void (*sink)(const char *line)) { s_sink = sink; }
 
 void log_init(void) {
     if (!s_mux) s_mux = xSemaphoreCreateMutex();
@@ -34,6 +37,7 @@ void logln(const char *fmt, ...) {
     else s_head = (s_head + 1) % LOG_N;   // full -> overwrite oldest
     strlcpy(s_buf[idx], line, LOG_LINE);
     xSemaphoreGive(s_mux);
+    if (s_sink) s_sink(line);   // outside the ring mutex: the sink may hit flash
 }
 
 int log_foreach(void (*cb)(const char *line, void *ctx), void *ctx) {
