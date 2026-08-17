@@ -260,7 +260,7 @@ See `../docs/eta-estimator.md`.
 | `display.*` | T-Display-S3 flight display (esp_lcd i80 ST7789 + LVGL) |
 | `airports.*` | embedded IATA/ICAO → lat/lon/elevation gazetteer (host-tested) |
 | `tzdb.*` / `tzdb_data.c` | 1° world timezone grid + offset transitions, generated from IANA data (host-tested; regenerate ~2028) |
-| `derive.*` | GS/track from successive fixes: movement-gated, filtered, wrap-safe (host-tested) |
+| `derive.*` | GS/track from successive fixes: per-axis quantization estimate, precision-adaptive bearing baseline over a position ring, polyline GS, wrap-safe weighted EMA (host-tested) |
 | `eta.*` | made-good arrival estimator: 600 s window + EMA + minute hysteresis (host-tested; fallback + ring provider) |
 | `eta_profile.*` | theoretical-profile ETA/TOD: Offto-parity climb/cruise/descent/approach, wind triangle, cruise bias (host-tested) |
 | `perfdb.*` / `perfdb_data.c` | aircraft performance + seasonal 250/300 hPa wind climatology, generated READ-ONLY from the Offto app DB (`tools/gen_perfdb.py`; host-tested) |

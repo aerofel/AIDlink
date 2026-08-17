@@ -1,6 +1,131 @@
 # AIDlink — Learning Journal
 
-## 2026-07-26 — A second GNSS receiver: genuine MAX-M8Q on a Pi-HAT carrier
+## 2026-08-16 — Ownship heading twitch = per-axis coordinate quantization; derive.c reworked
+
+- **Live capture in flight (F-ONEA ACI410 NWWW→NZAA, Board 3 on the cable):**
+  /status `trk` stepped −10.6/+19.8/+8.6° between 2-s samples and `gs` flapped
+  388–551 kt in steady flight. Root cause: the feed serves **lat with 4 decimals
+  but lon with only 3** (174.447 / .451 / .456…) — 0.001° of lon at 35S is
+  **91 m**, ~40 % of the distance flown per second, so adjacent-sample bearings
+  are quantization noise and the α=0.35 EMA passed half of it through to the
+  EFB (ADBP TRK/THDG/GS come straight from the derived values, and the DR
+  extrapolation steers along the same track).
+- **The axes are NOT symmetric and the error is course-dependent:** coarse lon
+  is along-track (harmless) on an eastbound leg but cross-track (dominant) on a
+  northbound one. Any fixed baseline length is wrong somewhere.
+- **derive.c reworked (TDD, all 17 host suites pass):** per-axis decimal-
+  precision estimate from the incoming values (sliding max over 30-sample
+  blocks, so a trailing-zero value like 171.310 can't shrink it); 96-entry ring
+  of distinct fixes; track taken over the NEWEST baseline whose projected
+  bearing error (per-axis quanta rotated into the cross-track direction) is
+  ≤ 0.7°; GS over the **polyline** distance to the oldest entry within 90 s —
+  a straight chord under-measured a 90° turn by ~10 % (425 vs 470 kt in the
+  turn test); weighted vector-EMA fallback while nothing clean exists yet.
+  Sim results: 1 Hz q4 track steps 0.94°→0.18°/s; the live q3-lon case 0.17°/s
+  with GS within ±5 kt.
+- **Teleport rejection now RESETS the ring** instead of advancing the baseline:
+  the same capture showed a genuine feed glitch (lat …2948 → **…2695** → …3018,
+  a 1.5 NM out-and-back) — with a ring, a glitch entry must not be allowed to
+  donate an endpoint to any later bearing.
+- Watch it on grep: `dec_places()` tolerance is 1e-3 after scaling — a parsed
+  "171.306" double is integer×10³ to ~1e-8, an unquantized GNSS double walks to
+  the 6-decimal cap (≈0.11 m quantum → newest baseline always qualifies).
+
+## 2026-08-13 — DR hold + persistent flash log shipped; bench-verified end-to-end
+
+Implemented the spec below same-day (commits pending): `dr_hold_ms` (default 5 min),
+tri-state fresh/DR/NCD in ADBP, OnEvent fallback cadence, subscribe/transition
+logging, `pos_state` on /status, and `flog` — a 512 KB flash partition persisting
+every logln line with uptime+UTC timestamps, downloadable at `/flog`.
+
+- **DR hold verified live on Board 3** with a custom feed (Mac serving a moving
+  Viasat-shape JSON at 480 kt, then killed): 62 s into the stall, getParameters
+  still returned `validity="1"` with the position *extrapolated* +8.3 NM along
+  track (exactly 62 s at 480 kt), FOM 132.0 (=8+2·age_s), HDOP 1.4, GNSS_AVAIL 1;
+  `/log` showed `[adbp] pos fresh -> dr (fix age 30s)` right at the stale gate.
+  Old firmware returned bare `validity="2"` in the same state.
+- **The custom-source trick is the right DR test rig** — the emulator can't test
+  DR (it refreshes `last_fix_ms` forever and sets `fixed`, which disables
+  dead-reckoning). `srcType=2` + a Python server on the NCM Mac (172.20.1.2)
+  exercises the real poller/derive/arbiter path, and killing the server IS the
+  in-flight stall. Viasat JSON has no track: serve *moving* positions and let
+  `derive` produce track/GS.
+- **Partition-table change over /dfu works**: add `0x8000 partition-table.bin`
+  to the same `--no-stub --before no_reset` write as the app. NVS at 0x9000 is
+  untouched (pt is 0xC00 bytes at 0x8000). New table: `flog, data, 0x40,
+  0x310000, 0x80000` — sized to fit the 4 MB T3-S3 too. flog headers require
+  magic AND rsv==0 so pre-existing flash garbage can't fake a sector.
+- **The post-dfu-flash soft-reboot USB wedge is a coin flip, not "first reset
+  only"**: this session the first /save reboot after flashing re-enumerated in
+  2 s, the *third* one wedged (stale NCM iface `active`, Espressif still in
+  `ioreg`, 100 % ping loss, no usbmodem port). The 2026-07-15 "deterministic
+  first soft reset" model is wrong. Assume ANY soft reset after a dfu-flash
+  session may wedge until a physical RST/replug has happened.
+  **Post-mortem via flog (the new log's first real catch):** the app ran
+  perfectly through the whole 23-min wedge (heartbeats + poll summaries, heap
+  stable) — USB-only failure, as theorised in 2026-07-15. The cable replug left
+  **no boot marker** = with a battery on the JST it truly is not a power cycle,
+  which is why the wedge survived it; only the RST tap (logged as
+  `reset=poweron` — an EN pulse reads as poweron, not `ext`) cleared it.
+- **Pin ADBP bench probes with `nc -s 172.20.1.2`** — nc has no `--interface`,
+  and the Mac's Wi-Fi overlaps 172.20.0.0/20; binding the source IP forces en12.
+- The zsh no-word-split trap (`for t in "..."; clang $t`) bit again in the
+  host-test runner — `${=t}`, always. All 18 host suites pass.
+- `/save` h_save bugs fixed while there: presence-parsed `logEnable` turned
+  logging OFF on every save (field never rendered — /logtoggle owns it now),
+  and `gpsEn`/`gpsPref` were silently disabled whenever the GNSS card was
+  hidden (now gated on a hidden `gpsCard` marker rendered with the card).
+
+## 2026-08-13 — Jepp ownship disappearance = the NCD cliff at stale_ms (analysis only)
+
+Root-caused the in-flight "ownship vanishes then re-appears" report (distinct from
+the 2026-07-24 socket-pool incident — here :80 stays healthy). Full design in
+`docs/superpowers/specs/2026-08-13-adbp-dr-hold-spec.md`. Key facts:
+
+- **A fetch failure never invalidates anything** (`poll_once` returns early, no
+  failure counter); the only clock is `age = now - last_fix_ms` vs `stale_ms`. Below
+  it, ADBP frames are validity=1 and **already dead-reckoned** along last track/GS
+  (`adbp.c:55-58`, `adbp_frame.c:31-41`, dt clamped to stale_ms). At it, a cliff:
+  coarse+fine GPSLAT/GPSLONG all go `validity="2"` bare-NCD and `GNSS_AVAIL=0` —
+  the EFB has no fix and drops the symbol.
+- **OnEvent subscriptions are worse: silence from the FIRST failed poll** — `due`
+  needs `last_fix_ms` to change (`adbp.c:176,182`), so stale NCD frames are never
+  even sent. We don't know which mode FliteDeck negotiates; log it on subscribe.
+- **NVS beats code defaults on field units:** the in-service Board 3 still runs
+  `stale_ms=15000, poll_ms=4000` (read live via the portal) although the code
+  defaults moved to 30000/1000 — so ~4 missed polls ≈ two 8 s HTTP timeouts kill
+  the position. Always read the portal, never trust `config.c`, when reasoning
+  about a deployed unit's timing.
+- **Failures cluster by construction:** every http error closes the keep-alive
+  socket (`poller.c:206-207`), so the next poll pays a full TLS handshake over an
+  already-lossy link. One radio fade easily spans the whole 15 s window.
+- `stale_ms` conflates "fix trust window" (arbiter → GNSS fallback) with "when ADBP
+  stops reporting". Zero-code mitigation: raising Stale→NCD in the portal extends
+  the DR window (position keeps moving, periodic subs only). Proper fix per spec:
+  separate `dr_hold_ms` with degraded FOM/HDOP + OnEvent fallback cadence + honest
+  NCD after the cap.
+- `service_avail` in `pos_state_t` is write-only dead state; `getParameters`
+  `errorcode` means "unknown param", not staleness — no protocol signal of feed
+  health exists besides per-parameter validity.
+
+## 2026-08-13 — Post-flight log forensics are impossible: the log is RAM-only
+
+- Asked "can we analyse last flight's logs?" on Board 3 after a flight. Answer: **no,
+  by design**. `log.c` is a 90-line × 200-char RAM ring; the partition table is only
+  `nvs / phy_init / factory` — no SPIFFS/LittleFS/SD, nothing position- or log-shaped
+  ever touches flash. A power cycle erases everything; even continuously powered, 90
+  lines of 60-s heartbeats cover barely ~1.5 h and hold no position history.
+- **Uptime can be read straight off `/log`**: the display heartbeat fires every 600
+  ticks at 100 ms/tick, so `last hb tick × 0.1 s` = uptime (tick 12600 = 21 min).
+  Useful because there is no `/hw` endpoint — the hardware card is inline in the
+  portal page, and `/status` carries no uptime field.
+- Board identity over the cable, reconfirmed: USB descriptor is the anonymous TinyUSB
+  NCM `303A:4000` serial `123456` for *every* board — only the NCM MAC discriminates
+  (host `en12` ether / ARP of 172.20.1.1 in the `d0:cf:13:32:2f:4x` block = Board 3).
+- If flight logging is ever wanted: Board 3 has ~12.9 MB of the 16 MB flash unused
+  (app slot 3 MB + nvs 24 KB); a data partition logging 1 Hz fixes costs ~2 MB per
+  10-h flight. Requires a partition-table reflash, which per the 2026-07-25 rules
+  must NOT be done via the app-slot-only `/dfu` ritual without care for NVS at 0x9000.
 
 Identified a new module from photos + the u-blox data sheet, then **confirmed it live
 over its own CP2102** (jumpers on A, read-only UBX polls). Full write-up in
