@@ -327,6 +327,19 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
 
     ESP_ERROR_CHECK(esp_wifi_start());
 
+    // Drop the 802.11b rates on the AP. Broadcast, multicast and management
+    // frames go out at the lowest supported basic rate: with 11b enabled that is
+    // 1 Mbit/s, roughly 6x the airtime of the 6 Mbit/s OFDM basic rate for the
+    // same frame. In a cabin we share one congested 2.4 GHz channel with the
+    // uplink AP and every other passenger, AND the AP+STA are the same radio, so
+    // that airtime is the scarce resource -- measured as a jittery client hop
+    // (3.5/15.2/113.5 ms) against 1.1/1.7/3.4 ms over the USB cable. Every EFB,
+    // phone and laptop is 802.11n or better; only a genuinely 11b-only client
+    // would be excluded, and none exists on this aircraft.
+    esp_err_t rate_err = esp_wifi_config_11b_rate(WIFI_IF_AP, true);
+    ESP_LOGI(TAG, "[NET] AP 11b rates %s",
+             rate_err == ESP_OK ? "disabled" : esp_err_to_name(rate_err));
+
 #if AIDLINK_BRIDGE
     // The glue starts the bridge netif on WIFI_EVENT_AP_START but only brings its
     // link "up" on the first Wi-Fi association (WIFI_EVENT_AP_STACONNECTED). We
