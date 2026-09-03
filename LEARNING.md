@@ -1,5 +1,158 @@
 # AIDlink — Learning Journal
 
+## 2026-09-04 — DNS cache + AP airtime tuning; and where the uplink ceiling actually is
+
+Second in-flight round on the same Viasat leg (VTBS→NWWW). Build 68 flashed over
+the cable, hash verified, no RST tap. **6 AP clients stayed associated across the
+Wi-Fi change** — that was the risk and it did not bite.
+
+- **The uplink ceiling is the provider's shaper, not us.** Three 400 KB transfers
+  gave 45,572 / 46,166 / 47,038 B/s — within 3%. That consistency is a token
+  bucket at **~368 kbit/s**, and no device-side change raises it. Corollary worth
+  remembering: **the 8.8% ICMP loss is ICMP-specific deprioritization, not data
+  loss.** At 936 ms RTT genuine 8.8% loss caps TCP near 6 kB/s; we measured a
+  rock-steady 46. Don't chase "packet loss" that TCP plainly isn't seeing.
+- **The Viasat position endpoint is ON THE AIRCRAFT, not across the satellite.**
+  `wifi.inflight.viasat.com` answers in **61–104 ms** vs ~940 ms satellite RTT. So
+  the 1 Hz `poll_ms` costs *nothing* on the metered link. I nearly recommended
+  slowing it to reclaim ~3.5% of bandwidth — the estimate was pure fiction built
+  on the assumption it crossed the satellite. **Measure the endpoint, don't assume
+  the topology.**
+- **`build/sdkconfig` is the authoritative config, not `firmware-idf/sdkconfig`.**
+  `idf.py` prints `-- Project sdkconfig file .../build/sdkconfig`. Editing the
+  top-level one changes nothing. Worse: an incremental `idf.py build` will **not**
+  regenerate `build/config/sdkconfig.h` when sdkconfig changes, so it silently
+  compiles the OLD values — and even `idf.py reconfigure` won't help if you edited
+  the wrong file. Always verify the value actually landed:
+  `grep '#define CONFIG_ESP_WIFI_RX_BA_WIN ' build/config/sdkconfig.h`.
+- **A safety flag silently undid the PSRAM Wi-Fi tuning.** `ESP_WIFI_RX_BA_WIN`
+  defaults to 16 only `if (SPIRAM_TRY_ALLOCATE_WIFI_LWIP && !SPIRAM_IGNORE_NOTFOUND)`.
+  We set `SPIRAM_IGNORE_NOTFOUND=y` deliberately as a boot guardrail, which drops
+  the window back to **6** — Espressif's help calls 16 the recommended minimum in
+  exactly this configuration. Now pinned explicitly (16/16, dynamic RX/TX 64) in
+  `sdkconfig.defaults.esp32s3` only; `STATIC_RX_BUFFER_NUM` stays 10 because those
+  buffers must come from internal DMA SRAM, and the non-PSRAM ESP32 shares nothing.
+- **The DNS cache's value is determinism, not raw latency — the garden's resolver
+  already caches.** Pre-flash, repeats of one name gave 11/32/16 ms (upstream
+  cache hit) but another gave 1353/360/770 ms. Post-flash every repeat is
+  **2–6 ms** after a 594–745 ms first lookup. So the win is that repeats become
+  local, deterministic, **survive a satellite dropout**, and are **shared across all
+  clients** — each phone/tablet otherwise keeps its own private OS cache. Do not
+  claim "saves 660 ms per repeat"; often upstream would have served it in ~20 ms.
+- **Cache correctness choices worth keeping:** never cache SERVFAIL/REFUSED (on
+  this link they are a transient drop, and pinning one turns a blip into an
+  outage); never cache TC=1; NXDOMAIN/NODATA cached at the 5 s floor since they
+  carry no answer TTL; TTL clamped to [5,300] s; compression pointers are stepped
+  over and **never followed** when walking RRs. `dnshit`/`dnsmiss` on `/status`.
+- **macOS will not rejoin the AP while the USB-NCM link works** — `en0` sat
+  `status: inactive` for 5+ min after the reboot. Don't read that as "the AP is
+  broken": check `clients` on `/status` (that field is `esp_wifi_ap_get_sta_list()`,
+  a live association count, not a DHCP lease). Toggling Wi-Fi needs sudo, so the
+  Wi-Fi-path measurement needs the human (menu-bar toggle avoids sudo entirely).
+- **The AP tuning measurably worked — this is the win for the cable-less clients.**
+  Same 6784 B local page, same method, before vs after (8 runs vs 6):
+
+  | | TCP connect | total | throughput |
+  |---|---|---|---|
+  | before | 23.6–111.0 ms | 0.124–0.635 s | 10.7–54.6 kB/s |
+  | after  | **4.5–21.7 ms** | **0.035–0.206 s** | **33.0–194.7 kB/s** |
+
+  Median throughput ~26.6 → ~99 kB/s (**≈3.7×**); worst case 10.7 → 33.0 kB/s;
+  worst TCP handshake 111 → 22 ms (**5×**, and an earlier session saw 2.96 s
+  handshakes). 40-packet RTT 4.16/29.47/111.67 → 3.23/**21.39**/93.76 ms. All 8
+  runs beat the pre-change median, so this is not a lucky sample — though the
+  cabin channel is shared and noisy, so treat absolute numbers as indicative and
+  trust the connect-time column, which is least sensitive to that noise.
+- **7 devices share ONE shaped session.** All AP clients are NATed through a single
+  Viasat allowance with no QoS anywhere in lwIP, so one device doing a photo sync
+  starves the rest. On this link, *contention beats tuning* — the biggest available
+  win is fewer active clients, not firmware.
+
+## 2026-09-03 — Uplink tuning: NAPT/dnsfwd timers were LAN-shaped; measured in flight on Viasat
+
+Live measurement from the cabin (Board 3 as AP, Viasat uplink, MacBook on Wi-Fi),
+then four fixes. **Flashed in flight over the cable (build 66) and verified on the
+wire** — results at the end of this entry.
+
+**Verified after flashing (2026-09-03, ESP32-S3 d0:cf:13:32:2f:48, hash verified,
+came back with no RST tap):**
+- AAAA now answered on-device: **2444 ms mean → 2 ms**, 6/6 instead of 5/6, and the
+  11 s stall class is gone. `TYPE65` likewise 2–3 ms. Both return NOERROR with
+  ANSWER: 0 (NODATA), and **A is unchanged at 666 vs 671 ms — no regression.**
+- **UDP NAT mappings now survive an 8 s idle gap** (3/3 NTP servers, second reply
+  from the same source port after idling) — under the old 2 s timeout that reply
+  was dropped. Direct on-the-wire proof the timer override is live.
+- ⚠️ **Attribution trap:** the post-flash run happened over the USB-C cable
+  (`route get default` → `en12`), so the local-RTT gain (38.1 → 3.2 ms mean, max
+  100.7 → 10.4 ms) and most of the throughput gain (8.3 → 47.2 kB/s, and the 1 MB
+  download finally *completing*) are **the cable, not the firmware**. Satellite RTT
+  actually got *worse* in the same window (790 → 1133 ms), which is the clearest
+  reminder that only same-path, same-window comparisons mean anything here.
+- **Test-tooling trap:** macOS `dig` does not know the `HTTPS` type keyword — `dig
+  HTTPS name` silently queries a bogus *name* at type A (NXDOMAIN, full satellite
+  RTT) and looks like the local-answer fix failing. Use **`dig TYPE65`**.
+
+- **esp-lwip's NAPT timers are wrong for a satellite uplink and have no Kconfig.**
+  `IP_NAPT_TIMEOUT_MS_UDP` is **2 s** — *shorter than one round trip* on this link
+  (measured 682–989 ms, mean 790 ms, and the poller already allows 12 s). Every UDP
+  flow with a >2 s gap loses its translation: QUIC/HTTP3 on UDP 443 (Chrome/Safari
+  default) and any VPN keepalive (WireGuard 25 s) get torn down continuously.
+  RFC 4787 REQ-5 wants ≥2 min. ICMP is also 2 s, which silently caps how slow a
+  ping may be before the reply is discarded as unmapped — misleading precisely
+  when you're diagnosing a slow link. TCP is the other extreme: **30 min** idle
+  retention in a 512-entry table, so dead entries can exhaust it and then NEW
+  connections fail while ping and established flows keep working.
+  All three are `#ifndef`-guarded → override with `idf_build_set_property(
+  COMPILE_DEFINITIONS ...)` in the root CMakeLists **before `project()`**, then
+  verify they actually landed: `grep IP_NAPT build/compile_commands.json`.
+- **NAPT cannot translate ICMP errors, so client PMTUD is structurally broken.**
+  `ip4_napt.c` handles *only* `ICMP_ECHO`/`ICMP_ER` keyed by echo id. An inbound
+  type 3 code 4 "fragmentation needed" carries an embedded TCP header, matches no
+  entry, and is dropped. **And lowering the STA MTU does not fix it**: `ip4.c`
+  runs `ip_napt_forward()` (which rewrites the source) *before* the MTU check, so
+  the `icmp_dest_unreach(ICMP_DUR_FRAG)` it generates is addressed to the
+  post-NAT source — our own STA IP — and never reaches the client. DHCP option 26
+  is the only sound lever, and IDF **hardcodes it to 1500** (`dhcpserver.c`:
+  `*optptr++ = 0x05; *optptr++ = 0xdc;`) with no Kconfig and no runtime setter.
+  Measured verdict: **not our bottleneck** — 744 KB of a 1 MB download did get
+  through, so full-size packets flow. A real black hole stalls at ~10–20 KB.
+- **`dnsfwd`'s 3 s slot timeout was destroying valid replies.** Observed live: an
+  AAAA probe took **11054 ms** and returned nothing, while A queries in the same
+  minute averaged 671 ms. The reply arrives, the slot has already been freed, so
+  `p->used` is false and it's dropped — the client then retries and pays another
+  full satellite round trip for an answer we'd already received. Now
+  `DNSFWD_TIMEOUT_MS 9000`, and slots 16→32 (a stub fans out A+AAAA+HTTPS per
+  hostname, so 16 evicted queries that were still in flight).
+- **AAAA is guaranteed-useless traffic on this device and worth answering locally.**
+  `CONFIG_LWIP_IPV6_FORWARD` is off and we send no RA, so a client only ever gets a
+  link-local address and no v6 default route — any AAAA we relay names an address
+  it provably cannot reach. Measured cost of that waste: AAAA mean **2444 ms**,
+  HTTPS/SVCB (type 65) mean **963 ms**, per hostname. Now answered locally as
+  **NODATA** (NOERROR + ANCOUNT=0), never NXDOMAIN — NXDOMAIN denies the whole
+  name and can poison the A lookup for the same host.
+- **The local Wi-Fi hop is the unexpected co-bottleneck, and it is NOT what we
+  fixed.** Same 6784-byte local portal page, six consecutive fetches: 78 ms /
+  198 ms / 322 ms / 396 ms / 3.29 s / 6.07 s, i.e. 87 kB/s best down to 1.1 kB/s.
+  `time_connect` to 172.20.1.1 alone ranged 6.7 ms → **2.96 s** (≈ SYN retransmit
+  backoff), while ICMP showed **0.0% loss over 60 packets** at 4.1/25.7/159.2 ms.
+  0% ping loss with multi-second local TCP handshakes = airtime starvation /
+  burst drops, not link loss. Cause is structural: one radio, `ap.ap.channel = 0`
+  follows the STA onto whatever congested cabin channel Viasat uses, and every
+  client byte crosses that channel twice. Candidate fixes (`esp_wifi_config_11b_rate(
+  WIFI_IF_AP, true)` for ~6× cheaper broadcast airtime; Wi-Fi buffer/BA-window
+  raises now that PSRAM is on) were **deliberately not attempted in flight** —
+  they change what the AP advertises to associating clients.
+- **There is no OTA path on this hardware — do not touch `/dfu` without a cable.**
+  `partitions.csv` has a single `factory` app partition (no `ota_0`/`ota_1`) and
+  `web.c` has no upload endpoint. `/dfu` only sets `RTC_CNTL_FORCE_DOWNLOAD_BOOT`
+  and reboots into the ROM downloader — the unit leaves the network and needs
+  `idf.py flash` over USB plus a physical RST. In the air with no cable that is an
+  unrecoverable lockout, so uplink fixes cannot be validated until back on ground.
+- **Benchmark caveat:** the cabin uplink comes and goes, so absolute throughput
+  numbers (8.3 kB/s over 90 s, 4.0 kB/s over 40 s) are not steady-state. Trust the
+  *relative* same-window comparisons (AAAA vs A vs HTTPS) and the local-hop
+  numbers, which don't involve the satellite at all.
+
 ## 2026-08-16 — Ownship heading twitch = per-axis coordinate quantization; derive.c reworked
 
 - **Live capture in flight (F-ONEA ACI410 NWWW→NZAA, Board 3 on the cable):**
