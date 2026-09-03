@@ -11,8 +11,11 @@ and no ETA. **I got the first diagnosis wrong — recording it so nobody re-runs
   showed lockups in **19 of 25 boots** (once 2 h 40 m straight). I shipped a
   rebuild-after-5-fails fix. **It fired 28 times and changed nothing.** Keep the
   fix — it closes a genuine latent hole — but it was not the cause.
-- **RIGHT: the uplink Wi-Fi degrades and the poller is just its heaviest user.**
-  The evidence that settles it:
+- **ALSO WRONG: "the uplink degrades and the poller is its heaviest user."**
+  That is the TRIGGER, not the cause, and it does not survive the decisive test
+  below. Reverting the BA windows 16->6 to rule out a Wi-Fi cause changed
+  nothing: the poller ran 4 minutes, then locked up again at rssi -77..-84.
+  Evidence that pointed here, and why it was not enough:
   - `rssi=-83..-88`, and one window logged **`rssi=0`** — that is
     `esp_wifi_sta_get_ap_info()` failing, i.e. the STA had dropped entirely.
   - `maxms=7547 / 8022 / 10407` — these are **timeouts** against the poller's
@@ -22,9 +25,40 @@ and no ETA. **I got the first diagnosis wrong — recording it so nobody re-runs
     earlier. The whole uplink was ~30x slower, not just the poller.
   - The 60 s internet probe (12 s timeout) kept logging "reachable" throughout,
     which is exactly why a single red/green cloud is misleading.
-  **Diagnostic rule: before blaming the fetch code, compare a laptop request
-  through the NAT against the device's own request. If both are slow it is the
-  uplink.** And check `rssi` in the `[poll] 60s` line first.
+  **Diagnostic rule: compare a laptop request through the NAT against the
+  device's own request to the SAME host, at the same moment.** That is what
+  finally cracked it — and it says the opposite of the RSSI story.
+- **THIRD AND BEST: socket/TIME_WAIT pool exhaustion, self-sustained by the
+  1 Hz retry.** The decisive measurement, taken while the poller was returning
+  `ESP_ERR_HTTP_CONNECT` with 8 s timeouts:
+  - the **laptop reached `wifi.inflight.viasat.com` through our own NAT, over
+    the same STA link, in 100–230 ms** (connect 6–98 ms), 200 OK — and the same
+    with the poller's exact `aidlink` User-Agent, so it is not UA filtering;
+  - `inet=ok` at the same time: our own 60 s probe, which builds a **fresh**
+    client, succeeded **over the satellite**.
+  So the link is fine, the server is fine, and only the device's own outbound
+  sockets fail. The limits: `LWIP_MAX_SOCKETS=16` (already the lwIP maximum,
+  cannot be raised), `MAX_ACTIVE_TCP=16`, `TCP_MSL=60000`. A failing poll still
+  costs a connection, so retrying every second parks ~50 connections a minute
+  in a 16-entry pool that drains over a minute. The pool saturates, every later
+  `socket()` fails, **and the retries keep it saturated** — which is exactly why
+  it never recovered on its own, why a reboot always fixed it instantly, and why
+  rebuilding the HTTP client did nothing (a fresh client needs a fresh socket;
+  if anything it fed the churn — it fired 28 times during one outage).
+  The clincher, and it matches the note already sitting in `sdkconfig.defaults`:
+  **httpd went unreachable for two minutes while ICMP stayed at 1.5 ms.**
+  Socket-based servers die together while ICMP and NAPT keep working.
+  - Fix shipped: **exponential backoff** in `poller.c` (2/4/8/16/30 s, capped at
+    30 s — inside the 5-minute DR hold, so the EFB keeps a DR position), rebuild
+    threshold relaxed 5 -> 60 so it cannot contribute to churn, and
+    **`CONFIG_LWIP_TCP_MSL` 60 s -> 10 s** so what churn remains drains 6x faster.
+  - ⚠️ **UNVERIFIED IN FLIGHT.** Flashed and confirmed running (hash verified,
+    device came back), but the aircraft link ended before it could be observed
+    across a real failure. **Falsifiable prediction for next flight: the poller
+    should now RECOVER ON ITS OWN without a reboot, and the `[poll] 60s` line
+    should show a handful of fails per window instead of ~50.** If it still
+    locks up with ok=0 forever, this diagnosis is wrong too — check whether
+    httpd also stops accepting while ping still works.
 - **Two firmware changes still worth making** (not done yet): back off instead of
   retrying a failing poll at 1 Hz with an 8 s blocking timeout (it burns airtime
   on an already-struggling link), and stop graying `dep`/`arr`/`flight`/`tail` —
