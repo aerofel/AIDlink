@@ -40,9 +40,37 @@ bool netcore_has_ssid(void);
 // RSSI (dBm) of the connected uplink AP; 0 when the STA is not connected.
 int netcore_sta_rssi(void);
 
-// True when the last internet-reachability probe succeeded (bare TCP handshake
-// to a public DNS server — a walled-garden uplink shows false here).
+// True when the last internet-reachability probe verified real internet.
+// Equivalent to netcore_inet_state() == INET_OK; kept for callers that only
+// need the red/green answer (display, LED).
 bool netcore_inet_up(void);
+
+// Why there is (or isn't) internet. A single red light cannot distinguish "you
+// never signed in" from "the satellite is down", and those need opposite actions
+// from the crew, so the probe result is kept as a state.
+//
+// Deliberately PROVIDER-NEUTRAL: three of these come from the generic
+// captive-portal probe (a non-204 HTTP answer means something is intercepting,
+// no answer at all means the link is dead), and only INET_SERVICE_OFF needs a
+// hint from whoever understands the current provider's feed. Nothing in netcore
+// knows what "Viasat" is, so a new provider only has to push the same hint.
+typedef enum {
+    INET_NO_UPLINK = 0,   // the STA is not associated to any uplink AP
+    INET_OK,              // verified end-to-end (probe returned exactly 204)
+    INET_PORTAL,          // something intercepted the probe -> sign-in required
+    INET_SERVICE_OFF,     // the provider reports its service unavailable here
+    INET_DOWN,            // associated, nothing intercepting, still no internet
+} inet_state_t;
+
+inet_state_t netcore_inet_state(void);
+const char  *netcore_inet_state_str(void);   // stable slug for /status and logs
+
+// Provider-neutral service hint. A position source that can see its provider's
+// own service flags pushes them here; netcore never learns which provider it is.
+// `reason` is a short provider-specific string for display/logging (may be NULL).
+// Hints expire on their own, so a stalled source cannot pin a stale verdict.
+typedef enum { SVC_UNKNOWN = 0, SVC_YES, SVC_NO } svc_tri_t;
+void netcore_service_hint(svc_tri_t available, const char *reason);
 
 // True while a Wi-Fi scan is in progress.
 bool netcore_scanning(void);

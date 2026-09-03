@@ -185,6 +185,26 @@ static const char *poll_url(void) {
 static esp_http_client_handle_t s_http;
 static fetch_t s_fetch;
 
+// Destroy the client so the next poll builds a fresh one (new transport, new
+// DNS resolution). close() alone is NOT enough to recover a wedged handle: it
+// drops the socket but keeps esp_http_client's transport state, and once that
+// state is stuck every later perform() returns ESP_ERR_HTTP_CONNECT forever.
+// Measured in flog: the poller locked up in 19 of 25 recorded boots, once for
+// 2 h 40 m straight (ok=0 fail=~55 every 60 s), while the internet probe -- a
+// freshly created client on the same uplink -- kept succeeding throughout. Only
+// a reboot ever cleared it.
+static void http_client_drop(void) {
+    if (!s_http) return;
+    esp_http_client_cleanup(s_http);
+    s_http = NULL;
+}
+
+// Consecutive failures before we stop trusting the handle and rebuild it. Small
+// enough that the EFB feed recovers well inside the 30 s stale gate, large
+// enough that an ordinary flaky-RSSI blip (which close()+retry does fix, see the
+// "recovered after N fails" log line) never pays for a TLS handshake.
+#define POLL_REBUILD_AFTER_FAILS 5
+
 static bool http_client_ensure(void) {
     if (s_http) return true;
     esp_http_client_config_t c = {
@@ -224,6 +244,23 @@ bool poller_parse_viasat(const char *json, double *lat, double *lon, double *alt
 bool poller_parse_panasonic(const char *json, double *lat, double *lon, double *alt,
                             double *gs, double *track, bool *have_track, uint64_t *utc_ms,
                             char *flight, char *tail, char *orig, char *dest, char *actype);
+// Provider service state -> the neutral hint in netcore.h. Return false when the
+// payload says nothing about service availability.
+bool poller_parse_viasat_svc(const char *json, int *available, char *reason, size_t rcap);
+bool poller_parse_panasonic_svc(const char *json, int *available, char *reason, size_t rcap);
+
+// Feed the provider's own view of "is the service usable" to netcore, so a dead
+// probe can be reported as "service off here" rather than a bare "no internet".
+// Dispatch mirrors the position parsers: one case per source, and netcore stays
+// ignorant of which provider is configured.
+static void push_service_hint(const char *body) {
+    int avail = 1;
+    char reason[32] = "";
+    bool have = (CFG->src_type == 1)
+        ? poller_parse_panasonic_svc(body, &avail, reason, sizeof reason)
+        : poller_parse_viasat_svc(body, &avail, reason, sizeof reason);
+    netcore_service_hint(have ? (avail ? SVC_YES : SVC_NO) : SVC_UNKNOWN, reason);
+}
 
 static void poll_fail(uint32_t lat_ms, const char *err) {
     s_win_fail++;
@@ -251,6 +288,14 @@ static void poll_once(void) {
                  (unsigned)esp_get_free_heap_size(),
                  (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         poll_fail(lat_ms, err[0] ? err : "?");
+        // Rebuild periodically, not just once: if the first rebuild lands while
+        // the uplink is still down it proves nothing, and we must keep offering
+        // the endpoint a genuinely new connection until one takes.
+        if (s_fail_streak && (s_fail_streak % POLL_REBUILD_AFTER_FAILS) == 0) {
+            logln("[poll] rebuilding HTTP client after %lu consecutive fails",
+                  (unsigned long)s_fail_streak);
+            http_client_drop();
+        }
         return;
     }
 
@@ -271,6 +316,11 @@ static void poll_once(void) {
     bool ok = (CFG->src_type == 1)
         ? poller_parse_panasonic(body, &lat, &lon, &alt, &gs, &track, &have_track, &utc, flight, tail, orig, dest, actype)
         : poller_parse_viasat(body, &lat, &lon, &alt, &gs, &track, &have_track, &utc, flight, tail, orig, dest, actype);
+    // The fetch succeeded, so the provider's service flags in this same body are
+    // current -- no extra request needed. Do this before the parse check: a body
+    // we cannot parse for position may still carry a valid service verdict.
+    push_service_hint(body);
+
     if (!ok) { s_poll_ok = false; strlcpy(s_poll_msg, "parse failed", sizeof s_poll_msg);
                poll_fail(lat_ms, "parse"); return; }
 

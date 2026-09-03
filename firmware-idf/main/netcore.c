@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_http_client.h"
+#include "esp_timer.h"
 #include "dhcpserver/dhcpserver.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
@@ -132,24 +133,70 @@ bool netcore_scanning(void) { return s_scanning; }
 #define INET_PROBE_URL "http://connectivitycheck.gstatic.com/generate_204"
 static volatile bool s_inet;
 static volatile bool s_inet_probe_now;
+static volatile inet_state_t s_inet_state = INET_NO_UPLINK;
 
-static bool http204_probe(int timeout_ms) {
+// Provider service hint (see netcore.h). Expires so a stalled position source
+// cannot pin a stale "service off" verdict forever.
+#define SVC_HINT_TTL_MS 120000
+static volatile svc_tri_t s_svc = SVC_UNKNOWN;
+static volatile uint32_t  s_svc_at_ms;
+static char s_svc_reason[32];
+
+void netcore_service_hint(svc_tri_t available, const char *reason) {
+    s_svc = available;
+    s_svc_at_ms = (uint32_t)(esp_timer_get_time() / 1000);
+    if (reason) strlcpy(s_svc_reason, reason, sizeof s_svc_reason);
+    else s_svc_reason[0] = 0;
+}
+
+static svc_tri_t svc_hint_fresh(void) {
+    if (s_svc == SVC_UNKNOWN) return SVC_UNKNOWN;
+    uint32_t age = (uint32_t)(esp_timer_get_time() / 1000) - s_svc_at_ms;
+    return age > SVC_HINT_TTL_MS ? SVC_UNKNOWN : s_svc;
+}
+
+inet_state_t netcore_inet_state(void) { return s_inet_state; }
+
+static const char *state_str(inet_state_t s) {
+    switch (s) {
+        case INET_OK:          return "ok";
+        case INET_PORTAL:      return "portal";
+        case INET_SERVICE_OFF: return "service_off";
+        case INET_DOWN:        return "down";
+        default:               return "no_uplink";
+    }
+}
+
+const char *netcore_inet_state_str(void) { return state_str(s_inet_state); }
+
+// Probe outcome. The distinction that matters is between "something answered
+// but it wasn't a 204" (a captive portal is intercepting -> the user can fix
+// this by signing in) and "nothing answered at all" (the link itself is down).
+typedef enum { PROBE_204, PROBE_INTERCEPT, PROBE_NOLINK } probe_res_t;
+
+static probe_res_t http204_probe(int timeout_ms) {
     esp_http_client_config_t c = {
         .url = INET_PROBE_URL,
         .timeout_ms = timeout_ms,
         .disable_auto_redirect = true,   // a captive 3xx must read as "not 204", not be followed
     };
     esp_http_client_handle_t h = esp_http_client_init(&c);
-    if (!h) return false;
+    if (!h) return PROBE_NOLINK;
     esp_http_client_set_header(h, "User-Agent", "aidlink");
-    bool ok = false;
+    probe_res_t res = PROBE_NOLINK;
     if (esp_http_client_open(h, 0) == ESP_OK) {          // GET, no request body
-        esp_http_client_fetch_headers(h);                // read status + headers only,
-        ok = (esp_http_client_get_status_code(h) == 204); // body intentionally left unread
+        // read status + headers only; the body is intentionally left unread
+        if (esp_http_client_fetch_headers(h) >= 0) {
+            int status = esp_http_client_get_status_code(h);
+            // Exactly 204 is real internet. Anything else that still produced a
+            // status line came from an intercepting portal (200 + HTML, a 3xx
+            // redirect, or 511 Network Authentication Required).
+            res = (status == 204) ? PROBE_204 : PROBE_INTERCEPT;
+        }
     }
     esp_http_client_close(h);
     esp_http_client_cleanup(h);
-    return ok;
+    return res;
 }
 
 static void inet_task(void *arg) {
@@ -159,11 +206,27 @@ static void inet_task(void *arg) {
         for (uint32_t w = 0; w < wait_ms && !s_inet_probe_now; w += 500)
             vTaskDelay(pdMS_TO_TICKS(500));
         s_inet_probe_now = false;
-        if (!s_sta_up) { s_inet = false; wait_ms = 60000; continue; }
-        bool ok = http204_probe(12000);   // 12 s tolerates satellite RTT (measured 1-10 s)
-        if (ok != s_inet) logln("internet %s", ok ? "reachable" : "unreachable");
-        s_inet = ok;
-        wait_ms = 60000;         // every 60 s (~0.8 KB/probe ~= 1.2 MB/day)
+        if (!s_sta_up) {
+            if (s_inet_state != INET_NO_UPLINK) logln("internet: no uplink");
+            s_inet_state = INET_NO_UPLINK; s_inet = false; wait_ms = 60000; continue;
+        }
+        probe_res_t pr = http204_probe(12000);   // 12 s tolerates satellite RTT (measured 1-10 s)
+
+        inet_state_t st;
+        if (pr == PROBE_204)            st = INET_OK;
+        else if (pr == PROBE_INTERCEPT) st = INET_PORTAL;        // sign-in needed
+        else if (svc_hint_fresh() == SVC_NO) st = INET_SERVICE_OFF;
+        else                            st = INET_DOWN;          // link itself is dead
+
+        if (st != s_inet_state) {
+            if (st == INET_SERVICE_OFF && s_svc_reason[0])
+                logln("internet: service_off (%s)", s_svc_reason);
+            else
+                logln("internet: %s", state_str(st));
+        }
+        s_inet_state = st;
+        s_inet = (st == INET_OK);
+        wait_ms = 60000;         // every 60 s (~0.8 KB/probe; the plan is time-based, not metered)
     }
 }
 

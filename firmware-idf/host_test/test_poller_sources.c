@@ -15,6 +15,61 @@ bool poller_parse_panasonic(const char *json, double *lat, double *lon, double *
                             double *gs, double *track, bool *have_track, uint64_t *utc_ms,
                             char *flight, char *tail, char *orig, char *dest, char *actype);
 
+// ---- provider service state -> netcore's neutral hint -----------------------
+bool poller_parse_viasat_svc(const char *json, int *available, char *reason, size_t rcap);
+bool poller_parse_panasonic_svc(const char *json, int *available, char *reason, size_t rcap);
+
+static void test_service_state(void) {
+    int av; char why[32];
+
+    // Healthy: all three flags good -> available, reason carries the mode.
+    const char *ok_json =
+        "{\"service_available\":true,\"internet_use_enabled\":true,"
+        "\"service_disable\":false,\"mode\":\"NORMAL\"}";
+    av = -1; why[0] = 0;
+    assert(poller_parse_viasat_svc(ok_json, &av, why, sizeof why));
+    assert(av == 1);
+    assert(strcmp(why, "mode=NORMAL") == 0);
+
+    // Any ONE flag going the wrong way means the service is off.
+    const char *off[] = {
+        "{\"service_available\":false,\"internet_use_enabled\":true,\"service_disable\":false}",
+        "{\"service_available\":true,\"internet_use_enabled\":false,\"service_disable\":false}",
+        "{\"service_available\":true,\"internet_use_enabled\":true,\"service_disable\":true}",
+    };
+    for (unsigned i = 0; i < sizeof off / sizeof off[0]; i++) {
+        av = -1;
+        assert(poller_parse_viasat_svc(off[i], &av, why, sizeof why));
+        assert(av == 0);
+    }
+
+    // No service fields at all -> "unknown", NOT "off". This distinction is the
+    // whole point: asserting an outage from a silent payload would report a dead
+    // uplink while the internet is actually fine.
+    av = 7;
+    assert(!poller_parse_viasat_svc("{\"latitude\":\"1.0\"}", &av, why, sizeof why));
+    assert(av == 7);                       // left untouched
+    assert(!poller_parse_viasat_svc("not json at all", &av, why, sizeof why));
+    assert(av == 7);
+
+    // Viasat wraps scalars as {"value":...}; the shared helper must see through it.
+    av = -1;
+    assert(poller_parse_viasat_svc(
+        "{\"service_available\":{\"value\":false},\"mode\":{\"value\":\"PAXWAIT\"}}",
+        &av, why, sizeof why));
+    assert(av == 0);
+    assert(strcmp(why, "mode=PAXWAIT") == 0);
+
+    // A different provider must be able to say nothing without breaking anything:
+    // Panasonic carries no service flags, so it always reports unknown.
+    av = 5; why[0] = 'x'; why[1] = 0;
+    assert(!poller_parse_panasonic_svc(ok_json, &av, why, sizeof why));
+    assert(av == 5);
+    assert(why[0] == 0);
+
+    printf("  service_state: PASS (provider-neutral tri-state)\n");
+}
+
 int main(void) {
     double lat, lon, alt, gs, track; bool ht; uint64_t utc;
     char flight[16] = "", tail[12] = "", orig[8] = "", dest[8] = "", actype[8] = "";
@@ -75,6 +130,8 @@ int main(void) {
     assert(fabs(gs - 470) < 1e-6);
     assert(ht && fabs(track - 120) < 1e-6);
     assert(strcmp(flight, "SB800") == 0 && strcmp(tail, "F-ONEA") == 0);
+
+    test_service_state();
 
     printf("test_poller_sources: PASS\n");
     return 0;

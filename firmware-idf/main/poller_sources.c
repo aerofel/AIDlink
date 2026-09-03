@@ -76,6 +76,45 @@ bool poller_parse_viasat(const char *json, double *lat, double *lon, double *alt
 }
 
 // Panasonic lat/lon: 8-digit string, deg*1000, >=80000000 means negative.
+// ---- provider service state -------------------------------------------------
+// Each provider reports "is the internet service usable right now" differently.
+// These map that onto the neutral tri-state in netcore.h so nothing outside this
+// file knows which provider is in use. Adding a provider means adding one
+// function here and one case in the poller's dispatch — netcore is untouched.
+//
+// Returns false when the payload carries no service information at all, which
+// must stay distinct from "the provider says NO": an unknown state has to leave
+// the internet verdict to the end-to-end probe rather than assert an outage.
+//
+// Viasat (/ac/flight/info): any of these three going the wrong way means the
+// service is off, and `mode` is carried as the human-readable reason.
+bool poller_parse_viasat_svc(const char *json, int *available, char *reason, size_t rcap) {
+    cJSON *r = cJSON_Parse(json);
+    if (!r) return false;
+    bool have = false, off = false;
+    cJSON *v;
+    if ((v = viasat_scalar(r, "service_available")))   { have = true; if (cJSON_IsFalse(v)) off = true; }
+    if ((v = viasat_scalar(r, "internet_use_enabled"))) { have = true; if (cJSON_IsFalse(v)) off = true; }
+    if ((v = viasat_scalar(r, "service_disable")))      { have = true; if (cJSON_IsTrue(v))  off = true; }
+    if (have && reason && rcap) {
+        reason[0] = 0;
+        char mode[24] = "";
+        if (viasat_str(r, "mode", mode, sizeof mode) && mode[0])
+            snprintf(reason, rcap, "mode=%s", mode);
+    }
+    if (have) *available = off ? 0 : 1;
+    cJSON_Delete(r);
+    return have;
+}
+
+// Panasonic's flight-data feed carries no service flags, so it always reports
+// "unknown" and the end-to-end probe decides on its own.
+bool poller_parse_panasonic_svc(const char *json, int *available, char *reason, size_t rcap) {
+    (void)json; (void)available;
+    if (reason && rcap) reason[0] = 0;
+    return false;
+}
+
 static double pan_ll(const char *s) {
     long v = atol(s);
     return v >= 80000000L ? -((v - 80000000L) / 1000.0) : (v / 1000.0);

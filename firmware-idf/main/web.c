@@ -831,13 +831,13 @@ static esp_err_t h_status(httpd_req_t *r) {
 
     char json[1408];
     snprintf(json, sizeof json,
-        "{\"dnshit\":%u,\"dnsmiss\":%u,"
+        "{\"dnshit\":%u,\"dnsmiss\":%u,\"inet\":\"%s\","
         "\"sta\":%s,\"ssid\":\"%s\",\"clients\":%d,\"valid\":%s,\"sim\":%s,"
         "\"lat\":%.5f,\"lon\":%.5f,\"trk\":%.1f,\"gs\":%.1f,\"alt\":%.0f,\"staip\":\"%s\","
         "\"tail\":\"%s\",\"flight\":\"%s\",\"dep\":\"%s\",\"arr\":\"%s\","
         "\"pollok\":%s,\"pollage\":%ld,\"pollmsg\":\"%s\",\"heap\":%u"
         ",\"live_source\":\"%s\",\"pos_state\":\"%s\"%s}",
-        (unsigned)dns_hit, (unsigned)dns_miss,
+        (unsigned)dns_hit, (unsigned)dns_miss, netcore_inet_state_str(),
         up ? "true" : "false", ssid_e, netcore_ap_client_count(),
         valid ? "true" : "false", p.simulated ? "true" : "false",
         p.lat, p.lon, p.track_deg, p.gs_kt, p.alt_ft, staip,
