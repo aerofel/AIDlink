@@ -34,6 +34,76 @@ static uint32_t upstream_addr(void) {
     return 0;
 }
 
+// ---- reply cache -----------------------------------------------------------
+// Keyed on the raw question section (name + QTYPE + QCLASS). Shared by every
+// client, which is the whole point: each phone/tablet on the AP keeps its own
+// OS cache, so today the same hostname costs a separate satellite round trip
+// for each of them.
+typedef struct {
+    uint8_t  q[DNSFWD_CACHE_QMAX];
+    uint8_t  resp[DNSFWD_CACHE_RMAX];
+    uint16_t qlen, rlen;
+    uint32_t expire_ms;
+    bool     used;
+} cache_ent_t;
+
+static cache_ent_t s_cache[DNSFWD_CACHE_N];
+static uint32_t s_cache_hits, s_cache_miss;
+
+// Serve from cache into `out` (capacity `cap`), preserving the caller's txn id.
+// Returns the reply length, or -1 on a miss.
+static int cache_get(const uint8_t *q, int qlen, uint32_t now, uint8_t *out, int cap) {
+    for (int i = 0; i < DNSFWD_CACHE_N; i++) {
+        cache_ent_t *e = &s_cache[i];
+        if (!e->used) continue;
+        if ((int32_t)(now - e->expire_ms) >= 0) { e->used = false; continue; }  // expired
+        if (!dnsfwd_question_eq(q, qlen, e->q, e->qlen)) continue;
+        if (e->rlen > cap) return -1;
+        memcpy(out, e->resp, e->rlen);
+        s_cache_hits++;
+        return e->rlen;
+    }
+    s_cache_miss++;
+    return -1;
+}
+
+static void cache_put(const uint8_t *q, int qlen, const uint8_t *resp, int rlen, uint32_t now) {
+    if (qlen <= 0 || qlen > DNSFWD_CACHE_QMAX || rlen <= 0 || rlen > DNSFWD_CACHE_RMAX) return;
+    if (!dnsfwd_cacheable(resp, rlen)) return;
+
+    int ttl = dnsfwd_min_ttl(resp, rlen);
+    // A negative reply (NXDOMAIN/NODATA) carries no answer TTL; hold it for the
+    // floor rather than not at all, so a burst of repeats still collapses.
+    if (ttl < 0) ttl = DNSFWD_CACHE_MIN_S;
+    if (ttl < DNSFWD_CACHE_MIN_S) ttl = DNSFWD_CACHE_MIN_S;
+    if (ttl > DNSFWD_CACHE_MAX_S) ttl = DNSFWD_CACHE_MAX_S;
+
+    // Reuse the matching entry, else a free one, else the one expiring soonest.
+    int victim = -1;
+    for (int i = 0; i < DNSFWD_CACHE_N; i++)
+        if (s_cache[i].used && dnsfwd_question_eq(q, qlen, s_cache[i].q, s_cache[i].qlen)) { victim = i; break; }
+    if (victim < 0)
+        for (int i = 0; i < DNSFWD_CACHE_N; i++) if (!s_cache[i].used) { victim = i; break; }
+    if (victim < 0) {
+        victim = 0;
+        for (int i = 1; i < DNSFWD_CACHE_N; i++)
+            if ((int32_t)(s_cache[i].expire_ms - s_cache[victim].expire_ms) < 0) victim = i;
+    }
+
+    cache_ent_t *e = &s_cache[victim];
+    memcpy(e->q, q, (size_t)qlen);
+    memcpy(e->resp, resp, (size_t)rlen);
+    e->qlen = (uint16_t)qlen;
+    e->rlen = (uint16_t)rlen;
+    e->expire_ms = now + (uint32_t)ttl * 1000u;
+    e->used = true;
+}
+
+void dnsfwd_cache_stats(uint32_t *hits, uint32_t *misses) {
+    if (hits) *hits = s_cache_hits;
+    if (misses) *misses = s_cache_miss;
+}
+
 static void dnsfwd_task(void *arg) {
     int srv = socket(AF_INET, SOCK_DGRAM, 0);
     int up = socket(AF_INET, SOCK_DGRAM, 0);
@@ -54,6 +124,35 @@ static void dnsfwd_task(void *arg) {
         if (n > 0 && FD_ISSET(srv, &r)) {
             struct sockaddr_in ca; socklen_t cl = sizeof ca;
             int len = recvfrom(srv, buf, sizeof buf, 0, (struct sockaddr *)&ca, &cl);
+
+            // Answer the types the uplink can never usefully resolve right here,
+            // before spending a slot or a satellite round trip on them. A stub
+            // resolver fans out A + AAAA (+ HTTPS) per hostname, so on a page
+            // with many hosts this removes the majority of upstream queries and
+            // lets getaddrinfo() return as soon as the A record lands.
+            int qt = dnsfwd_qtype(buf, len);
+            if (dnsfwd_answer_locally(qt)) {
+                int rlen = dnsfwd_make_nodata(buf, len, (int)sizeof buf);
+                if (rlen > 0)
+                    sendto(srv, buf, rlen, 0, (struct sockaddr *)&ca, cl);
+                continue;
+            }
+
+            // Cache lookup. A hit costs ~1 ms instead of a satellite round trip
+            // (measured 610-835 ms), and it is shared across every device on the
+            // AP rather than living in one client's private OS cache.
+            int qe = dnsfwd_question_end(buf, len);
+            int qlen = qe > 12 ? qe - 12 : 0;
+            if (qlen > 0 && qlen <= DNSFWD_CACHE_QMAX) {
+                uint8_t hit[DNSFWD_CACHE_RMAX];
+                int hlen = cache_get(buf + 12, qlen, now, hit, (int)sizeof hit);
+                if (hlen > 0) {
+                    hit[0] = buf[0]; hit[1] = buf[1];   // this client's txn id
+                    sendto(srv, hit, hlen, 0, (struct sockaddr *)&ca, cl);
+                    continue;
+                }
+            }
+
             uint32_t upa = upstream_addr();
             if (len >= 12 && upa) {
                 int slot = -1;
@@ -71,6 +170,8 @@ static void dnsfwd_task(void *arg) {
                 p->cport = ca.sin_port;
                 p->oid = (buf[0] << 8) | buf[1];
                 p->sid = sid; p->t0 = now; p->used = true;
+                p->qlen = (uint16_t)((qlen > 0 && qlen <= DNSFWD_CACHE_QMAX) ? qlen : 0);
+                if (p->qlen) memcpy(p->q, buf + 12, p->qlen);
                 buf[0] = sid >> 8; buf[1] = sid & 0xFF;
                 struct sockaddr_in ua = {0};
                 ua.sin_family = AF_INET; ua.sin_addr.s_addr = upa; ua.sin_port = htons(53);
@@ -91,13 +192,14 @@ static void dnsfwd_task(void *arg) {
                     memcpy(&ca.sin_addr.s_addr, p->cip, 4);
                     ca.sin_port = p->cport;
                     sendto(srv, buf, len, 0, (struct sockaddr *)&ca, sizeof ca);
+                    if (p->qlen) cache_put(p->q, p->qlen, buf, len, now);
                     p->used = false;
                 }
             }
         }
 
         for (int i = 0; i < DNSFWD_SLOTS; i++)
-            if (s_pend[i].used && now - s_pend[i].t0 > 3000) s_pend[i].used = false;
+            if (s_pend[i].used && now - s_pend[i].t0 > DNSFWD_TIMEOUT_MS) s_pend[i].used = false;
     }
 }
 
