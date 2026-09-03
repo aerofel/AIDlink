@@ -37,8 +37,16 @@ CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
 # tuning as a side effect of a safety flag. Espressif's own help text calls 16
 # the recommended minimum in this configuration "to achieve better throughput and
 # compatibility with both stations and APs". Restore it explicitly.
-CONFIG_ESP_WIFI_RX_BA_WIN=16
-CONFIG_ESP_WIFI_TX_BA_WIN=16
+#
+# HELD AT 6 PENDING AN A/B. Raising these to 16 coincided with the uplink poller
+# failing hard at marginal signal (RSSI -83..-88, one window with rssi=0 = STA
+# dropped). RSSI itself is physical and cannot be caused by a BA window, and the
+# flash log shows the same poller lockup in 19 of 25 boots long before the
+# change -- so 16 is probably innocent. But at low SNR a larger aggregation
+# window can make retries more expensive, and that is worth ruling out on real
+# hardware rather than by argument. Restore 16 only if the A/B clears it.
+CONFIG_ESP_WIFI_RX_BA_WIN=6
+CONFIG_ESP_WIFI_TX_BA_WIN=6
 # Feed the larger block-ack windows. These are the DYNAMIC pools, which land in
 # PSRAM under SPIRAM_TRY_ALLOCATE_WIFI_LWIP; STATIC_RX_BUFFER_NUM is deliberately
 # left at 10 because those must come from internal DMA-capable SRAM.
