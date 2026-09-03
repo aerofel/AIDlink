@@ -1,5 +1,70 @@
 # AIDlink — Learning Journal
 
+## 2026-09-04 — Poller lockups are the UPLINK, not the code; Viasat endpoint map
+
+Same leg (VTBS→NWWW, F-ONET, ACI501). The feed died twice with grayed dep→arr
+and no ETA. **I got the first diagnosis wrong — recording it so nobody re-runs it.**
+
+- **WRONG: "the keep-alive handle wedges".** `poller.c` really does create `s_http`
+  once (`if (s_http) return true;`) and only ever `close()` it, never
+  `cleanup()`, so a wedged transport would be permanent. Plausible, and the flog
+  showed lockups in **19 of 25 boots** (once 2 h 40 m straight). I shipped a
+  rebuild-after-5-fails fix. **It fired 28 times and changed nothing.** Keep the
+  fix — it closes a genuine latent hole — but it was not the cause.
+- **RIGHT: the uplink Wi-Fi degrades and the poller is just its heaviest user.**
+  The evidence that settles it:
+  - `rssi=-83..-88`, and one window logged **`rssi=0`** — that is
+    `esp_wifi_sta_get_ap_info()` failing, i.e. the STA had dropped entirely.
+  - `maxms=7547 / 8022 / 10407` — these are **timeouts** against the poller's
+    8 s limit, not instant errors.
+  - Decisive: the **laptop reached the same endpoint through the ESP32's NAT at
+    0.59/2.97/2.85 s** while the poller failed — versus 61–104 ms an hour
+    earlier. The whole uplink was ~30x slower, not just the poller.
+  - The 60 s internet probe (12 s timeout) kept logging "reachable" throughout,
+    which is exactly why a single red/green cloud is misleading.
+  **Diagnostic rule: before blaming the fetch code, compare a laptop request
+  through the NAT against the device's own request. If both are slow it is the
+  uplink.** And check `rssi` in the `[poll] 60s` line first.
+- **Two firmware changes still worth making** (not done yet): back off instead of
+  retrying a failing poll at 1 Hz with an 8 s blocking timeout (it burns airtime
+  on an already-struggling link), and stop graying `dep`/`arr`/`flight`/`tail` —
+  those are static for the whole flight and should survive a transient feed gap
+  the way position already does via DR hold.
+
+### Viasat portal API on `wifi.inflight.viasat.com` (all ON the aircraft, ~170 ms)
+
+Derived from the SPA bundle `/static/assets/index-*.js`, not by guessing:
+
+| endpoint | gives |
+|---|---|
+| `/ac/flight/info` | 21 fields; we parse ~9. Unused: `service_available`, `internet_use_enabled`, `service_disable`, `mode`, `fm_authenticated`, `estimated_arrival`, `take_off_time` |
+| `/ac/device/info` | `status` ("transparent"), `status_reason`, our STA `mac`/`ip`, a `pppt` session UUID |
+| `/plans/plans.json` | 6 packages with `quota_bytes` / `quota_seconds` |
+| `/ac/captcha/enabled` | `captcha_enabled` |
+| `/ac/device/connect`, `/ac/captcha/sequence` | **do not probe** — session-mutating / consumes a token |
+
+- **The plan is TIME-limited, not byte-metered:** every package is
+  `quota_bytes: null` + `quota_seconds: 86400`. `netcore.c` justified probe
+  design "on the metered link" — that premise is false, there is no byte budget
+  to protect. The ~368 kbit/s ceiling is a rate class ("streaming excluded").
+- `/ac/device/info` confirms the whole cabin side appears to Viasat as **one
+  device** (our STA MAC, and `user_agent: "aidlink"` from our own probe).
+- The poller parses `groundSpeed`, but the live Viasat payload **has no such
+  field** — `derive.c` is load-bearing here, not a fallback.
+- Don't log the `pppt` UUID or MAC into flog / the public repo.
+
+### Three-state internet status (shipped)
+
+`netcore` stays provider-agnostic: `portal` and `down` come from the generic
+captive-portal probe (any non-204 answer = interception; no answer = dead link),
+and only `service_off` needs provider knowledge, delivered via
+`netcore_service_hint(SVC_YES/NO/UNKNOWN, reason)`. The Viasat mapping lives in
+`poller_sources.c` next to the position parsers. **A new provider = one function
+there plus one dispatch case; netcore is untouched.** Hints expire after 120 s so
+a stalled source cannot pin a stale verdict, and a payload with no service fields
+must yield UNKNOWN, never NO — asserting an outage from silence would report a
+dead uplink while the internet is fine.
+
 ## 2026-09-04 — DNS cache + AP airtime tuning; and where the uplink ceiling actually is
 
 Second in-flight round on the same Viasat leg (VTBS→NWWW). Build 68 flashed over
