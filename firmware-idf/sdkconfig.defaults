@@ -16,6 +16,16 @@ CONFIG_LWIP_IPV4_NAPT=y
 # so the aircraft position vanished while the feed and forwarding stayed healthy.
 # 16 is the lwIP maximum; it gives real headroom over the ~13-socket working set.
 CONFIG_LWIP_MAX_SOCKETS=16
+# TIME_WAIT drain rate. lwIP holds a closed connection for TCP_MSL, and the
+# socket/PCB pools above are only 16 entries and cannot be raised (16 IS the
+# lwIP maximum). At the 60 s default, a burst of failing polls parks far more
+# dead connections than the pool holds, every later socket() fails, and the
+# retries keep it saturated -- observed in flight as httpd going unreachable
+# for minutes while ICMP and NAPT stayed perfectly healthy, and only a reboot
+# clearing it. Backoff in poller.c stops producing the churn; this drains what
+# churn remains 6x faster. 10 s is ample for a one-hop cabin LAN and a
+# satellite path whose worst measured RTT is ~1.5 s.
+CONFIG_LWIP_TCP_MSL=10000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
 # Browsers send large Cookie + User-Agent + Accept headers; the 512-byte default
 # makes esp_http_server reject them ("Header fields are too long") -> blank page.

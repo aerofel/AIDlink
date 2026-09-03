@@ -199,11 +199,14 @@ static void http_client_drop(void) {
     s_http = NULL;
 }
 
-// Consecutive failures before we stop trusting the handle and rebuild it. Small
-// enough that the EFB feed recovers well inside the 30 s stale gate, large
-// enough that an ordinary flaky-RSSI blip (which close()+retry does fix, see the
-// "recovered after N fails" log line) never pays for a TLS handshake.
-#define POLL_REBUILD_AFTER_FAILS 5
+// Consecutive failures before we stop trusting the handle and rebuild it.
+// Deliberately LARGE. A rebuild forces a brand-new socket, and socket churn is
+// what exhausts the 16-entry pool in the first place (see poll_interval_ms), so
+// rebuilding often actively fed the problem: at every 5 fails this fired 28
+// times during one outage and changed nothing. Kept only for the genuine latent
+// case -- a handle whose transport really is unusable -- at a rate that cannot
+// contribute to the churn.
+#define POLL_REBUILD_AFTER_FAILS 60
 
 static bool http_client_ensure(void) {
     if (s_http) return true;
@@ -260,6 +263,37 @@ static void push_service_hint(const char *body) {
         ? poller_parse_panasonic_svc(body, &avail, reason, sizeof reason)
         : poller_parse_viasat_svc(body, &avail, reason, sizeof reason);
     netcore_service_hint(have ? (avail ? SVC_YES : SVC_NO) : SVC_UNKNOWN, reason);
+}
+
+// Back off while the fetch is failing, instead of hammering at 1 Hz.
+//
+// This is the actual cure for the lockup, and the reason two earlier theories
+// were wrong. The device has LWIP_MAX_SOCKETS=16 (already the lwIP maximum) and
+// MAX_ACTIVE_TCP=16, with TCP_MSL=60 s of TIME_WAIT. A failing poll still costs
+// a connection, so retrying every second puts ~50 connections a minute into a
+// 16-entry pool that drains over a minute: the pool saturates, every later
+// socket() fails, and the retries themselves keep it saturated. That is why it
+// NEVER recovered on its own, why a reboot always fixed it instantly, and why
+// rebuilding the HTTP client did nothing (a fresh client needs a fresh socket
+// too -- if anything it made the churn worse).
+//
+// The signature is unmistakable once you know it, and matches the note already
+// in sdkconfig.defaults: socket-based servers die together while ICMP and NAPT
+// keep working. We saw exactly that -- httpd unreachable for two minutes while
+// ping stayed at 1.5 ms, and a laptop reaching the very same endpoint through
+// our NAT in 100-230 ms while our own client timed out.
+//
+// Backoff caps at 30 s: well inside the 5-minute DR hold, so the EFB keeps a
+// dead-reckoned position throughout, and slow enough to let TIME_WAIT drain.
+#define POLL_BACKOFF_MAX_MS 30000
+
+static uint32_t poll_interval_ms(void) {
+    uint32_t base = CFG->poll_ms ? CFG->poll_ms : 1000;
+    if (!s_fail_streak) return base;
+    // 2s, 4s, 8s, 16s, 30s... (streak 1 -> 2x base, doubling, then clamped)
+    uint32_t mult = 1u << (s_fail_streak < 5 ? s_fail_streak : 5);
+    uint32_t iv = base * mult;
+    return iv > POLL_BACKOFF_MAX_MS ? POLL_BACKOFF_MAX_MS : iv;
 }
 
 static void poll_fail(uint32_t lat_ms, const char *err) {
@@ -356,7 +390,21 @@ static void arbitrate(void) {
               gps_live ? "live" : "down");
         s_live_src = src;
     }
-    if (src == SRC_NONE) { pos_mark_stale(); return; }
+    // No live source: the POSITION is stale, but the flight identity is not.
+    // dep/arr/flight/tail do not change during a flight, so blanking the route,
+    // ETA and destination clock because the feed hiccuped throws away data we
+    // still hold and tells the crew nothing. Keep publishing identity; only the
+    // position goes invalid (and the ADBP DR hold already covers that).
+    if (src == SRC_NONE) {
+        pos_state_t q; pos_get(&q);
+        possrc_ident(q.flight, sizeof q.flight, s_feed.flight, CFG->id_flight);
+        possrc_ident(q.tail,   sizeof q.tail,   s_feed.tail,   CFG->id_tail);
+        possrc_ident(q.orig,   sizeof q.orig,   s_feed.orig,   CFG->id_orig);
+        possrc_ident(q.dest,   sizeof q.dest,   s_feed.dest,   CFG->id_dest);
+        pos_set(&q);
+        pos_mark_stale();
+        return;
+    }
 
     pos_state_t p; pos_get(&p);
     p.valid = true; p.simulated = false; p.fixed = false; p.service_avail = true;
@@ -393,7 +441,7 @@ static void poller_task(void *arg) {
             uint32_t dt = t - last_sim; last_sim = t;
             sim_step(dt);
         } else {
-            if (t - last_poll >= CFG->poll_ms) { last_poll = t; poll_once(); }
+            if (t - last_poll >= poll_interval_ms()) { last_poll = t; poll_once(); }
             arbitrate();   // picks the live source, applies identity, publishes
         }
         // One summary line per minute for the persistent log: enough to
