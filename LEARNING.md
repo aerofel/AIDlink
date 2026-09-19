@@ -1,5 +1,67 @@
 # AIDlink — Learning Journal
 
+## 2026-09-19 — Poller lockup #3: socket-pool theory FALSIFIED; it is the TLS handshake, almost certainly internal SRAM
+
+VTBS→LFPG, F-ONEO ACI500, build b71 (with the backoff fix). Feed ran 07:59–08:22Z,
+then `ESP_ERR_HTTP_CONNECT` on every attempt for 2 h+ (240+ fails, four client
+rebuilds, no recovery). Diagnosed live over the cable **without rebooting**.
+
+- **The 2026-09-04 socket/TIME_WAIT diagnosis is wrong.** Its own falsification
+  test failed: httpd answered every request (1.6 ms ping, `/status`, `/flog`),
+  dnsfwd answered, and the poller was only trying twice a minute (backoff works),
+  so nothing was churning the pool. Socket exhaustion cannot explain today.
+- **Proven NOT the cause:** the uplink (laptop reached the Viasat endpoint
+  through our own NAT in 20–70 ms, HTTPS 200 with the flight JSON, TLS 1.2
+  ECDHE-RSA fine with or without SNI); DNS (the device resolved gstatic for its
+  own probe every minute, `internet: ok`); the client handle (rebuilt 4×).
+- **New fact: plain `http://wifi.inflight.viasat.com/...` now 302s to https.**
+  The poller already uses https (v9 heritage), so no impact, but do not test
+  the endpoint over http and conclude anything.
+- **The failures are FAST (41–440 ms), not timeouts.** With a 20 ms server that
+  is one TCP connect plus ~one TLS round trip, i.e. the handshake dies right
+  after ServerHello/Certificate arrives. And every diagnostic that "worked" is
+  HTTP-only: the 204 probe, the laptop-through-NAT check, httpd. **Nothing on
+  this device exercises mbedTLS except the poller.**
+- **Best-supported cause: internal SRAM.** `CONFIG_MBEDTLS_INTERNAL_MEM_ALLOC=y`
+  + `DYNAMIC_BUFFER` means every handshake AND every record read allocates from
+  internal RAM only (PSRAM is never used by TLS). Boot log shows internal free
+  heap **75 KB → 54 KB** after LVGL, before any client. Timeline matches memory
+  pressure, not the network: clean for 6 min after the first AP client, then
+  intermittent `FETCH_HEADER` at 28–90 ms (a record read failing, not the
+  server — the laptop saw no drops), `HTTP_CONNECT` creeping into the 60 s
+  windows from 08:10, a 9-fail episode 9 s after the second AP client joined
+  (08:18:33), permanent from 08:22:44. Same signature the poller.c comment
+  described before keep-alive was added; keep-alive only made it rarer.
+- **Not directly measured** — internal heap is not exposed anywhere: the portal
+  "Heap (internal)" row is `esp_get_free_heap_size()` = total incl. PSRAM
+  (8172 KB, useless), and `poll fail: ... largest block` is `ESP_LOGW` to the
+  console, which this board does not expose (native USB is NCM only).
+- **Next:** (1) put `heap_caps_get_free_size/largest_free_block(MALLOC_CAP_INTERNAL)`
+  in the `[poll] 60s` line and `/status`, and fix the hw-card label;
+  (2) candidate fix `CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y` (plain calloc: internal
+  first, PSRAM fallback via `SPIRAM_USE_MALLOC`) so a handshake can never starve;
+  verify with `grep MBEDTLS_.*MEM_ALLOC build/config/sdkconfig.h`.
+  Prediction: with (1), the failing windows show largest internal block below
+  ~20 KB; with (2), no more lockups. If (1) shows plenty of internal RAM, this
+  diagnosis is wrong too and the next suspect is the NAPT/local ephemeral-port
+  collision on the STA IP.
+
+- **Shipped as b74 (2026-09-19 18:57Z) with all three: telemetry, `MBEDTLS_DEFAULT_MEM_ALLOC`,
+  and `poller_heal` (10/20/40-min escalating self-restart on long transport
+  failure with the probe green, max 3 per power cycle, counter in RTC_NOINIT).**
+  First minutes of telemetry already support the diagnosis: internal SRAM sits
+  at ~30–35 KB free with a **7.7 KB largest block** (min 2 KB since boot), and
+  the first `FETCH_HEADER` fail sampled at **iheap 19 KB / iblk 7.5 KB**. The
+  hw card's old "Heap (internal)" row was the total (8 MB) — now both rows exist.
+- **Flashing over `/dfu` cuts the Mac's internet, and with it the Claude session
+  — that was the "connection cut".** The USB-NCM cable is the uplink. Run the
+  whole login → `/dfu` → wait-for-`usbmodem` → `idf.py flash` sequence as one
+  `nohup … & disown` script logging to a file, then tap RST; verify afterwards.
+- `idf.py flash` re-runs the build and bumps `buildnum.txt` again, so the flashed
+  build is one higher than the one you just verified with `idf.py build`.
+- Pre-existing cosmetic bug seen in the 60 s line: `age=4294967s` (uint32 wrap
+  of `t - s_feed.at_ms`) while the feed is live. Not touched.
+
 ## 2026-09-04 — Poller lockups are the UPLINK, not the code; Viasat endpoint map
 
 Same leg (VTBS→NWWW, F-ONET, ACI501). The feed died twice with grayed dep→arr

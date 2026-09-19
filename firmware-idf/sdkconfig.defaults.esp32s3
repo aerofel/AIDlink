@@ -65,3 +65,13 @@ CONFIG_LV_FONT_MONTSERRAT_40=y
 # DMA draw-buffer allocation (lvgl_port_add_disp -> NULL, the M-black-screen bug).
 # Our UI is 6 labels; 16 KB is ample.
 CONFIG_LV_MEM_SIZE_KILOBYTES=24
+
+# mbedTLS memory: DEFAULT (plain calloc) instead of INTERNAL. With
+# SPIRAM_USE_MALLOC that is "internal first, PSRAM when internal is short",
+# so a TLS handshake can no longer fail outright when Wi-Fi + lwIP + USB-NCM +
+# LVGL + connected clients have eaten internal SRAM (boot log: 75 KB -> 54 KB
+# internal before the first client). 2026-09-19: the Viasat poller (the ONLY
+# TLS user on the device) died for 2 h+ with fast ESP_ERR_HTTP_CONNECT while
+# every plain-HTTP path -- probe, httpd, laptop through our NAT -- was fine.
+# Verify it landed: grep 'MBEDTLS_DEFAULT_MEM_ALLOC 1' build/config/sdkconfig.h
+CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y

@@ -186,6 +186,14 @@ static void send_hw_card(httpd_req_t *r) {
     snprintf(v, sizeof v, "%u KB free · %u KB min",
              (unsigned)(esp_get_free_heap_size() >> 10),
              (unsigned)(esp_get_minimum_free_heap_size() >> 10));
+    hw_row(r, "Heap (total)", v);
+    // Internal SRAM is the one that matters: Wi-Fi, lwIP and (until
+    // MBEDTLS_DEFAULT_MEM_ALLOC) TLS all needed it, and the total above hides
+    // an internal starvation behind 8 MB of PSRAM.
+    snprintf(v, sizeof v, "%u KB free · %u KB min · %u KB largest block",
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >> 10),
+             (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >> 10),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >> 10));
     hw_row(r, "Heap (internal)", v);
 
     int64_t up_s = esp_timer_get_time() / 1000000;
@@ -828,6 +836,8 @@ static esp_err_t h_status(httpd_req_t *r) {
 
     uint32_t dns_hit = 0, dns_miss = 0;
     dnsfwd_cache_stats(&dns_hit, &dns_miss);
+    uint32_t ih_free = 0, ih_blk = 0;
+    poller_internal_heap(&ih_free, &ih_blk);
 
     char json[1408];
     snprintf(json, sizeof json,
@@ -835,7 +845,7 @@ static esp_err_t h_status(httpd_req_t *r) {
         "\"sta\":%s,\"ssid\":\"%s\",\"clients\":%d,\"valid\":%s,\"sim\":%s,"
         "\"lat\":%.5f,\"lon\":%.5f,\"trk\":%.1f,\"gs\":%.1f,\"alt\":%.0f,\"staip\":\"%s\","
         "\"tail\":\"%s\",\"flight\":\"%s\",\"dep\":\"%s\",\"arr\":\"%s\","
-        "\"pollok\":%s,\"pollage\":%ld,\"pollmsg\":\"%s\",\"heap\":%u"
+        "\"pollok\":%s,\"pollage\":%ld,\"pollmsg\":\"%s\",\"heap\":%u,\"iheap\":%u,\"iblk\":%u,\"heal\":%u"
         ",\"live_source\":\"%s\",\"pos_state\":\"%s\"%s}",
         (unsigned)dns_hit, (unsigned)dns_miss, netcore_inet_state_str(),
         up ? "true" : "false", ssid_e, netcore_ap_client_count(),
@@ -843,6 +853,7 @@ static esp_err_t h_status(httpd_req_t *r) {
         p.lat, p.lon, p.track_deg, p.gs_kt, p.alt_ft, staip,
         p.tail[0] ? p.tail : CFG->ac_tail, p.flight, dep, arr,
         pok ? "true" : "false", pollage, pmsg_e, (unsigned)poller_last_heap(),
+        (unsigned)ih_free, (unsigned)ih_blk, (unsigned)poller_heal_count(),
         live == SRC_GPS ? "gps" : live == SRC_FEED ? "feed" : "none",
         adbp_pos_state_str(), gpsj);
     httpd_resp_set_type(r, "application/json");

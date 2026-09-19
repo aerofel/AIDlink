@@ -23,9 +23,11 @@
 #include "esp_http_client.h"
 #include "esp_system.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "cJSON.h"
+#include "poller_heal.h"
 
 static const char *TAG = "poll";
 static aidlink_cfg_t *CFG;
@@ -55,6 +57,20 @@ static bool s_poll_ok;
 static uint32_t s_poll_at_ms;
 static char s_poll_msg[64] = "no poll yet";
 static uint32_t s_last_heap;   // free heap sampled at the last poll (diagnostics)
+
+// Internal SRAM, sampled at every poll. mbedTLS' buffers come from here (or
+// did: see MBEDTLS_DEFAULT_MEM_ALLOC in sdkconfig.defaults.esp32s3), and the
+// 2026-09-19 lockup could not be attributed because nothing exposed it: the
+// total heap counts 8 MB of PSRAM and hides an internal starvation entirely.
+// s_win_iblk_min is the smallest "largest free block" seen in the window --
+// that, not the free total, is what a failed TLS record read looks like.
+static uint32_t s_last_iheap, s_last_iblk, s_win_iblk_min;
+
+// Self-heal restarts since the last recovery, kept across a software reset so
+// the wait escalates (poller_heal.h). RTC memory is garbage after power-on:
+// trust it only behind a magic AND a software reset reason.
+#define HEAL_MAGIC 0x48454131u
+static RTC_NOINIT_ATTR uint32_t s_heal_magic, s_heal_n;
 
 // Poll diagnostics for the persistent log (spec 2026-08-13): per-minute
 // summary counters plus failure-streak edges, so a post-flight /flog shows
@@ -302,7 +318,8 @@ static void poll_fail(uint32_t lat_ms, const char *err) {
     strlcpy(s_win_lasterr, err, sizeof s_win_lasterr);
     if (s_fail_streak++ == 0) {
         s_fail_start_ms = now_ms();
-        logln("[poll] FAIL: %s (%lums, rssi %d)", err, (unsigned long)lat_ms, netcore_sta_rssi());
+        logln("[poll] FAIL: %s (%lums, rssi %d, iheap %lu, iblk %lu)", err, (unsigned long)lat_ms,
+              netcore_sta_rssi(), (unsigned long)s_last_iheap, (unsigned long)s_last_iblk);
     }
 }
 
@@ -310,7 +327,10 @@ static void poll_once(void) {
     static char body[4096];
     long http_date = 0;
     char err[40] = "";
-    s_last_heap = esp_get_free_heap_size();
+    s_last_heap  = esp_get_free_heap_size();
+    s_last_iheap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    s_last_iblk  = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!s_win_iblk_min || s_last_iblk < s_win_iblk_min) s_win_iblk_min = s_last_iblk;
     uint32_t t0 = now_ms();
     int n = http_get(body, sizeof body, &http_date, err, sizeof err);
     uint32_t lat_ms = now_ms() - t0;
@@ -329,6 +349,19 @@ static void poll_once(void) {
             logln("[poll] rebuilding HTTP client after %lu consecutive fails",
                   (unsigned long)s_fail_streak);
             http_client_drop();
+        }
+        // Last resort (poller_heal.h): a long transport-level failure while the
+        // independent internet probe is green is the lockup signature, and a
+        // reboot is the only thing that has ever cleared one. Log first: flog
+        // writes through to flash, so the reason survives the restart.
+        uint32_t streak_ms = now_ms() - s_fail_start_ms;
+        if (heal_due(streak_ms, s_heal_n, netcore_inet_state() == INET_OK, err)) {
+            logln("[poll] SELF-HEAL: feed dead %lus with uplink ok (%s, iheap %lu, iblk %lu), restart #%lu",
+                  (unsigned long)(streak_ms / 1000), err, (unsigned long)s_last_iheap,
+                  (unsigned long)s_last_iblk, (unsigned long)(s_heal_n + 1));
+            s_heal_n++; s_heal_magic = HEAL_MAGIC;
+            vTaskDelay(pdMS_TO_TICKS(500));
+            esp_restart();
         }
         return;
     }
@@ -363,6 +396,7 @@ static void poll_once(void) {
               (unsigned long)s_fail_streak, (unsigned long)((now_ms() - s_fail_start_ms) / 1000));
         s_fail_streak = 0;
     }
+    if (s_heal_n) { logln("[poll] self-heal worked after %lu restart(s)", (unsigned long)s_heal_n); s_heal_n = 0; }
     s_win_ok++;
     apply_fix(lat, lon, alt, gs, track, have_track, utc, false, flight, tail, orig, dest, actype);
     s_poll_ok = true; s_poll_at_ms = now_ms(); strlcpy(s_poll_msg, "ok", sizeof s_poll_msg);
@@ -448,15 +482,16 @@ static void poller_task(void *arg) {
         // reconstruct link quality, poll success rate and feed age offline.
         if (t - last_sum >= 60000) {
             if (s_win_ok + s_win_fail) {
-                logln("[poll] 60s ok=%lu fail=%lu maxms=%lu rssi=%d heap=%lu age=%lds src=%s%s%s",
+                logln("[poll] 60s ok=%lu fail=%lu maxms=%lu rssi=%d heap=%lu iheap=%lu iblk=%lu age=%lds src=%s%s%s",
                       (unsigned long)s_win_ok, (unsigned long)s_win_fail,
                       (unsigned long)s_win_maxms, netcore_sta_rssi(),
-                      (unsigned long)s_last_heap,
+                      (unsigned long)s_last_heap, (unsigned long)s_last_iheap,
+                      (unsigned long)s_win_iblk_min,
                       s_feed.at_ms ? (long)((t - s_feed.at_ms) / 1000) : -1,
                       s_live_src == SRC_GPS ? "gps" : s_live_src == SRC_FEED ? "feed" : "none",
                       s_win_fail ? " last=" : "", s_win_fail ? s_win_lasterr : "");
             }
-            s_win_ok = s_win_fail = s_win_maxms = 0; s_win_lasterr[0] = 0;
+            s_win_ok = s_win_fail = s_win_maxms = s_win_iblk_min = 0; s_win_lasterr[0] = 0;
             last_sum = t;
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
@@ -470,9 +505,17 @@ void poller_status(bool *ok, uint32_t *at_ms, char *msg, unsigned msgcap) {
 }
 
 uint32_t poller_last_heap(void) { return s_last_heap; }
+void poller_internal_heap(uint32_t *free_b, uint32_t *largest_b) {
+    if (free_b)    *free_b    = s_last_iheap;
+    if (largest_b) *largest_b = s_last_iblk;
+}
+uint32_t poller_heal_count(void) { return s_heal_n; }
 
 void poller_start(aidlink_cfg_t *cfg) {
     CFG = cfg;
+    if (esp_reset_reason() != ESP_RST_SW || s_heal_magic != HEAL_MAGIC) s_heal_n = 0;
+    s_heal_magic = HEAL_MAGIC;
+    if (s_heal_n) logln("[poll] booted by self-heal restart #%lu", (unsigned long)s_heal_n);
     // The v9-parity insecure TLS mode makes mbedTLS print a warning on every
     // single poll — deliberate configuration, not news. Errors still show.
     esp_log_level_set("esp-tls-mbedtls", ESP_LOG_ERROR);
