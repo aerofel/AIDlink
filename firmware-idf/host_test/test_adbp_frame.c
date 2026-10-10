@@ -76,6 +76,29 @@ int main(void) {
     assert(adbp_param_known("GPSLAT") && adbp_param_known("gpslong") && adbp_param_known("THDG"));
     assert(!adbp_param_known("WINDSPEED") && !adbp_param_known(""));
 
+    // FliteDeck FOMAX names (subscribe log 2026-10-10): every *PF is the FINE
+    // half of a coarse+fine pair and must read 0 — the coarse already carries
+    // full precision. HYBLATPF used to return the whole latitude (coarse+fine
+    // = 97 deg). ALTNDEST read as altitude and DESTQNH as the destination code.
+    {
+        pos_state_t q = {0}; aidlink_cfg_t qc = {0};
+        q.valid = true; q.lat = 48.664612; q.lon = 13.435761; q.have_track = true;
+        q.gs_kt = 450; q.alt_ft = 39972; strcpy(q.dest, "LFPG");
+        char nm[8][ADBP_MAXNAME] = { "HYBLATPF", "HYBLONGPF", "GPSLATPF", "GPSLONGPF",
+                                     "HYBLATP", "FMSLONGP", "ALTNDEST", "DESTQNH" };
+        char out[2048]; bool miss;
+        adbp_params_block(out, sizeof out, nm, 8, &q, &qc, ADBP_POS_FRESH, 0, 1, &miss);
+        assert(strstr(out, "name=\"HYBLATPF\" validity=\"1\" type=\"0\" value=\"0.000000\""));
+        assert(strstr(out, "name=\"HYBLONGPF\" validity=\"1\" type=\"0\" value=\"0.000000\""));
+        assert(strstr(out, "name=\"GPSLATPF\" validity=\"1\" type=\"0\" value=\"0.000000\""));
+        assert(strstr(out, "name=\"GPSLONGPF\" validity=\"1\" type=\"0\" value=\"0.000000\""));
+        assert(strstr(out, "name=\"HYBLATP\" validity=\"1\" type=\"0\" value=\"48.664612\""));
+        assert(strstr(out, "name=\"FMSLONGP\" validity=\"1\" type=\"0\" value=\"13.435761\""));
+        assert(strstr(out, "<parameter name=\"ALTNDEST\" validity=\"2\"/>"));
+        assert(strstr(out, "<parameter name=\"DESTQNH\" validity=\"2\"/>"));
+        assert(!adbp_param_known("ALTNDEST") && !adbp_param_known("DESTQNH"));
+    }
+
     printf("test_adbp_frame: PASS\n");
     return 0;
 }

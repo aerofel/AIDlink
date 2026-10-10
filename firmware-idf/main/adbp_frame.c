@@ -97,9 +97,15 @@ static int param_xml(char *out, size_t cap, const char *name, const pos_state_t 
     // helper macros to format
     #define VALF(fmt, x) do { snprintf(val, sizeof val, fmt, (x)); } while (0)
 
-    if (has(U, "LAT") && !has(U, "GPSLATPF")) { type = 0; VALF("%.6f", p->lat); }
-    else if (has(U, "LON") && !has(U, "GPSLONGPF")) { type = 0; VALF("%.6f", p->lon); }
-    else if (has(U, "GPSLATPF") || has(U, "GPSLONGPF") || has(U, "FINE")) { type = 0; strcpy(val, "0.000000"); }
+    // Substring matching: the more specific names must come first.
+    // *LATPF / *LONGPF (GPS, HYB) are the FINE half of a coarse+fine pair; the
+    // coarse value already carries full precision, so fine is 0. HYBLATPF used
+    // to fall into "LAT" and return the whole latitude (coarse+fine = 97 deg).
+    if (has(U, "LATPF") || has(U, "LONGPF") || has(U, "FINE")) { type = 0; strcpy(val, "0.000000"); }
+    // no source has these; ALTNDEST used to read as ALT, DESTQNH as DEST
+    else if (has(U, "QNH") || has(U, "ALTN")) { *matched = false; ncd = true; }
+    else if (has(U, "LAT")) { type = 0; VALF("%.6f", p->lat); }
+    else if (has(U, "LON")) { type = 0; VALF("%.6f", p->lon); }
     else if (has(U, "TRK") || has(U, "TRACK") || has(U, "GPSTTRKA")) {
         type = 0; if (!p->have_track) ncd = true; VALF("%.2f", norm180(p->track_deg));
     }
