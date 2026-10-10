@@ -1,5 +1,31 @@
 # AIDlink — Learning Journal
 
+## 2026-10-10 — Network side in flight (build 131): DNS cache was nearly useless
+
+- **DNS cache hit rate was ~1 %** (15 hits / 1455 misses). The cabin resolver
+  adds authority/additional records, so 28 of 30 popular names reply with
+  262–512 B, above the 256 B `DNSFWD_CACHE_RMAX`. They were never cached, and
+  every device paid ~600–700 ms per lookup. Now: 512 B (the non-EDNS maximum;
+  EDNS is stripped), 128 B keys, 128 entries in PSRAM (12 without PSRAM).
+  17 % hits 2 min after boot; repeats take 2–5 ms instead of 600–700 ms.
+- **The cabin AP drops the STA every ~1827 s after association** (reason 1,
+  like clockwork: uptime 1834, 3670, 5505, … s, predicted 16:00:55 to the
+  second). It is NOT DHCP: the logged lease is 64800 s, renewal at 32400 s.
+  It is a session timer on the cabin side. Each drop costs ~7 s.
+  `[sta] up … dhcp lease` is now logged on every association.
+- **The internet probe flagged "down" for ≥60 s on one lost probe**, while
+  traffic through the AID was flowing (seen through the AID at the same minute).
+  A drop from OK now needs two more failed probes, 5 s apart.
+- STA power save is now explicitly `WIFI_PS_NONE` (it was the IDF default,
+  MIN_MODEM).
+- The uplink sits at −77…−86 dBm on 2.4 GHz ch 1 in the cockpit. The cabin also
+  has 5 GHz (ch 64), which the S3 cannot use. The AP shares the STA's channel.
+- Throughput through the AID was 19–23 kB/s with 6 clients. The provider limit
+  (~46 kB/s per device) is shared by everyone behind the AID: one device to
+  the network. That is the provider's limit and is left alone.
+- The effective S3 config is `firmware-idf/sdkconfig`; `build/sdkconfig` no
+  longer exists, so the 2026-09-04 note saying it is authoritative is stale.
+
 ## 2026-10-10 — In-flight FOMAX ownship dropouts/offset (ACI500 F-ONEO, build 128 flashed in flight)
 
 - **FliteDeck in FOMAX mode holds TWO ADBP subscriptions per iPad**: periodic

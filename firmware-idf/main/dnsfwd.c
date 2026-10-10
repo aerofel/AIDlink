@@ -51,14 +51,15 @@ typedef struct {
     bool     used;
 } cache_ent_t;
 
-static cache_ent_t *s_cache;   // DNSFWD_CACHE_N entries, PSRAM when present (dnsfwd_start)
+static cache_ent_t *s_cache;   // s_cache_n entries, PSRAM when present (dnsfwd_start)
+static int s_cache_n;
 static uint32_t s_cache_hits, s_cache_miss;
 
 // Serve from cache into `out` (capacity `cap`), preserving the caller's txn id.
 // Returns the reply length, or -1 on a miss.
 static int cache_get(const uint8_t *q, int qlen, uint32_t now, uint8_t *out, int cap) {
     if (!s_cache) return -1;
-    for (int i = 0; i < DNSFWD_CACHE_N; i++) {
+    for (int i = 0; i < s_cache_n; i++) {
         cache_ent_t *e = &s_cache[i];
         if (!e->used) continue;
         if ((int32_t)(now - e->expire_ms) >= 0) { e->used = false; continue; }  // expired
@@ -85,13 +86,13 @@ static void cache_put(const uint8_t *q, int qlen, const uint8_t *resp, int rlen,
 
     // Reuse the matching entry, else a free one, else the one expiring soonest.
     int victim = -1;
-    for (int i = 0; i < DNSFWD_CACHE_N; i++)
+    for (int i = 0; i < s_cache_n; i++)
         if (s_cache[i].used && dnsfwd_question_eq(q, qlen, s_cache[i].q, s_cache[i].qlen)) { victim = i; break; }
     if (victim < 0)
-        for (int i = 0; i < DNSFWD_CACHE_N; i++) if (!s_cache[i].used) { victim = i; break; }
+        for (int i = 0; i < s_cache_n; i++) if (!s_cache[i].used) { victim = i; break; }
     if (victim < 0) {
         victim = 0;
-        for (int i = 1; i < DNSFWD_CACHE_N; i++)
+        for (int i = 1; i < s_cache_n; i++)
             if ((int32_t)(s_cache[i].expire_ms - s_cache[victim].expire_ms) < 0) victim = i;
     }
 
@@ -234,7 +235,8 @@ void dnsfwd_start(void *sta_netif, const char *client_dns_override) {
         strncpy(s_override, client_dns_override, sizeof s_override - 1);
     for (int i = 0; i < DNSFWD_SLOTS; i++) s_pend[i].used = false;
     s_cache = heap_caps_calloc(DNSFWD_CACHE_N, sizeof *s_cache, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-    if (!s_cache) s_cache = calloc(DNSFWD_CACHE_N, sizeof *s_cache);
+    s_cache_n = DNSFWD_CACHE_N;
+    if (!s_cache) { s_cache = calloc(DNSFWD_CACHE_N_SRAM, sizeof *s_cache); s_cache_n = DNSFWD_CACHE_N_SRAM; }
     if (!s_cache) ESP_LOGE(TAG, "no RAM for the DNS cache - forwarding uncached");
     xTaskCreate(dnsfwd_task, "dnsfwd", 4096, NULL, 5, NULL);
 }

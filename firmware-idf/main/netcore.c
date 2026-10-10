@@ -13,6 +13,8 @@
 #include "dhcpserver/dhcpserver.h"
 #include "lwip/ip4_addr.h"
 #include "lwip/sockets.h"
+#include "lwip/dhcp.h"
+#include "esp_netif_net_stack.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -243,6 +245,14 @@ static void inet_task(void *arg) {
             s_inet_state = INET_NO_UPLINK; s_inet = false; wait_ms = 60000; continue;
         }
         probe_res_t pr = http204_probe(12000);   // 12 s tolerates satellite RTT (measured 1-10 s)
+        // One lost probe on a loaded satellite link is not an outage: in flight
+        // (2026-10-10) a single timed-out probe turned the indicator red for a
+        // full minute while passenger traffic was flowing (7 such episodes in
+        // 4 h). Confirm a drop from OK before reporting it.
+        for (int k = 0; k < 2 && pr == PROBE_NOLINK && s_inet_state == INET_OK && s_sta_up; k++) {
+            vTaskDelay(pdMS_TO_TICKS(5000));
+            pr = http204_probe(12000);
+        }
 
         inet_state_t st;
         if (pr == PROBE_204)            st = INET_OK;
@@ -316,6 +326,19 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
         s_sta_ip[3] = esp_ip4_addr4_16(&e->ip_info.ip);
         s_sta_up = true;
         if (s_retry_i > 1) logln("[sta] connected after %u attempts", s_retry_i);
+        // The cabin network drops the STA every ~30.5 min (reason 1, 2026-10-10),
+        // which is where a 1 h lease would renew. Log what the server granted so
+        // the flash log can confirm or rule that out.
+        {
+            struct netif *n = esp_netif_get_netif_impl(s_sta);
+            struct dhcp *d = n ? netif_dhcp_data(n) : NULL;
+            wifi_ap_record_t ap = {0};
+            esp_wifi_sta_get_ap_info(&ap);
+            logln("[sta] up " IPSTR " ch %u rssi %d, dhcp lease %lus renew %lus",
+                  IP2STR(&e->ip_info.ip), ap.primary, ap.rssi,
+                  d ? (unsigned long)d->offered_t0_lease : 0UL,
+                  d ? (unsigned long)d->offered_t1_renew : 0UL);
+        }
         s_retry_i = 0;
         s_inet_probe_now = true;   // uplink just came up — probe internet promptly
         ESP_LOGI(TAG, "[STA] up IP=" IPSTR, IP2STR(&e->ip_info.ip));
@@ -465,6 +488,10 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
 #endif
 
     ESP_ERROR_CHECK(esp_wifi_start());
+    // A router must not doze: the IDF default (WIFI_PS_MIN_MODEM) lets the STA
+    // sleep between beacons, adding wake-up latency and buffering at the cabin
+    // AP for every forwarded packet. Power is not a constraint here.
+    esp_wifi_set_ps(WIFI_PS_NONE);
 
     // Drop the 802.11b rates on the AP. Broadcast, multicast and management
     // frames go out at the lowest supported basic rate: with 11b enabled that is

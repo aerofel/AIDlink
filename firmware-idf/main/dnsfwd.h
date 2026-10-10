@@ -35,12 +35,16 @@
 // Reply cache. Every uplink lookup costs a full satellite round trip (measured
 // 610-835 ms), and it is paid PER DEVICE: the phones and tablets on the AP each
 // keep their own OS-level cache, so nothing is shared between them today. One
-// small cache on the AID serves all of them. Sized to stay comfortably inside
-// internal SRAM on the non-PSRAM ESP32 board too: 24 * ~328 B is under 8 KB of
-// .bss, and a name or reply that does not fit is simply not cached.
-#define DNSFWD_CACHE_N     24    // entries
-#define DNSFWD_CACHE_QMAX  64    // max question bytes used as the key
-#define DNSFWD_CACHE_RMAX  256   // max reply bytes stored (a 1-name A reply is ~60-120)
+// small cache on the AID serves all of them. A name or reply that does not fit
+// is simply not cached.
+// Replies: up to 512 B, the most a non-EDNS UDP reply can be (EDNS is stripped).
+// The previous 256 B cap looked roomy for "a 1-name A reply" but the cabin
+// resolver adds authority/additional records: 28 of 30 popular names measured
+// 262-512 B in flight (2026-10-10) and were NEVER cached — hit rate ~1 %.
+#define DNSFWD_CACHE_N       128   // entries with PSRAM (~85 KB there)
+#define DNSFWD_CACHE_N_SRAM  12    // without PSRAM: ~8 KB of internal SRAM
+#define DNSFWD_CACHE_QMAX    128   // max question bytes used as the key
+#define DNSFWD_CACHE_RMAX    512   // max reply bytes stored
 #define DNSFWD_CACHE_MIN_S 5     // clamp: never cache for less than this
 #define DNSFWD_CACHE_MAX_S 300   // clamp: nor longer, so the link's own DNS can move
 
