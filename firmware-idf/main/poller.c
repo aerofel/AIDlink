@@ -39,6 +39,7 @@ static aidlink_cfg_t *CFG;
 // live feed repeats its position between ~10 s avionics updates, so naive
 // per-poll differencing flapped GS between 0 and the clamp)
 static derive_state_t s_derive;
+static derive_align_t s_align;   // per-axis epochs of the feed (derive.h)
 
 // Last fix from the Wi-Fi feed. The feed no longer writes pos_state_t directly:
 // it lands here, and arbitrate() below decides each second whether this or the
@@ -99,17 +100,30 @@ static void apply_fix(double lat, double lon, double alt, double gs, double trac
                       const char *actype) {
     uint32_t t = now_ms();
 
+    // Lat and lon change at different instants: publish both axes at the time
+    // of the newer one (velocity from the previous fix). derive keeps the raw
+    // values: its quantization estimate needs them.
+    double alat, alon;
+    bool moved = derive_align(&s_align, lat, lon, t, s_feed.gs_kt, s_feed.track_deg,
+                              s_feed.valid && s_feed.have_track, &alat, &alon);
+
     double dgs, dtrk; bool dhave;
     derive_update(&s_derive, lat, lon, t, gs, track, have_track, &dgs, &dtrk, &dhave);
     if (dgs > 1500) dgs = 1500;
 
+    // The feed serves each position until its next avionics update (every
+    // ~2-5 s). In flight a repeat is not a new fix: restamping it dates an old
+    // position "now", and the ADBP dead reckoning snapped back by up to 0.6 NM
+    // on every repeat. Stamp when the position changes; when slow or parked,
+    // a repeat is the truth and keeps the fix fresh.
+    if (moved || dgs < FG_RESID_MIN_GS) s_feed.at_ms = t;
+
     s_feed.valid = true;
-    s_feed.lat = lat; s_feed.lon = lon;
+    s_feed.lat = alat; s_feed.lon = alon;
     s_feed.alt_unknown = !isfinite(alt);
     s_feed.alt_ft = s_feed.alt_unknown ? 0 : alt;
     s_feed.gs_kt = dgs; s_feed.track_deg = dtrk; s_feed.have_track = dhave;
     if (utc_ms) s_feed.utc_ms = utc_ms;
-    s_feed.at_ms = t;
     if (flight) strlcpy(s_feed.flight, flight, sizeof s_feed.flight);
     if (tail) strlcpy(s_feed.tail, tail, sizeof s_feed.tail);
     if (orig) strlcpy(s_feed.orig, orig, sizeof s_feed.orig);

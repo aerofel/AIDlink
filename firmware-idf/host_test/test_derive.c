@@ -149,6 +149,83 @@ int main(void) {
         assert(max_gs_step < 3.0);
     }
 
+    // --- staircase feed (in-flight capture 2026-10-10, ACI500 over Romania):
+    // the cabin feed updates lat and lon at DIFFERENT instants (two avionics
+    // words), so most polls move only one axis. Summed as a polyline the
+    // staircase is up to |sin|+|cos| = 1.35x the distance flown on a 298 track:
+    // the EFB was told 530-570 kt while ADS-B said 442.
+    {
+        derive_state_t s4 = {0};
+        double crs = 298.0, kt = 442.0;
+        double tla = 45.7, tlo = 23.9, fla = q4(tla), flo = q4(tlo);
+        uint32_t tt = 1000;
+        double max_gs_dev = 0;
+        for (int i = 0; i < 300; i++) {
+            double d = kt / 3600.0;
+            tla += d * cos(crs * M_PI / 180.0) / 60.0;
+            tlo += d * sin(crs * M_PI / 180.0) / (60.0 * cos(tla * M_PI / 180.0));
+            if (i % 4 == 0) fla = q4(tla);           // lat word every 4 s
+            if (i % 4 == 2) flo = q4(tlo);           // lon word every 4 s, 2 s later
+            uint32_t jit = (uint32_t)((i * 7919) % 900);   // poll arrival jitter 0-0.9 s
+            derive_update(&s4, fla, flo, tt + jit, -1, 0, false, &gs, &trk, &ht);
+            if (i > 120 && fabs(gs - kt) > max_gs_dev) max_gs_dev = fabs(gs - kt);
+            tt += 1000;
+        }
+        printf("  staircase: gs dev %.1f trk %.1f\n", max_gs_dev, trk);
+        assert(max_gs_dev < 15.0);                   // ~3 %, was +88 kt
+        assert(ht && fabs(trk - crs) < 2.0);
+    }
+
+    // --- derive_align: the staircase is removed from the PUBLISHED position.
+    // Same feed as above (lat word every 4 s, lon word 2 s later); compare each
+    // published fix with the true position at its stamp.
+    {
+        derive_align_t al = {0};
+        double crs = 298.0, kt = 442.0, tla = 45.7, tlo = 23.9;
+        double fla = q4(tla), flo = q4(tlo);
+        double raw_max = 0, al_max = 0;
+        for (int i = 0; i < 200; i++) {
+            double d = kt / 3600.0;
+            tla += d * cos(crs * M_PI / 180.0) / 60.0;
+            tlo += d * sin(crs * M_PI / 180.0) / (60.0 * cos(tla * M_PI / 180.0));
+            if (i % 4 == 0) fla = q4(tla);
+            if (i % 4 == 2) flo = q4(tlo);
+            double ola, olo;
+            bool ch = derive_align(&al, fla, flo, 1000u * i, kt, crs, true, &ola, &olo);
+            if (i > 8 && ch) {      // a fix is stamped when it changes
+                double er = geo_dist_nm(fla, flo, tla, tlo), ea = geo_dist_nm(ola, olo, tla, tlo);
+                if (er > raw_max) raw_max = er;
+                if (ea > al_max) al_max = ea;
+            }
+        }
+        printf("  align: raw err max %.3f NM, aligned %.3f NM\n", raw_max, al_max);
+        assert(raw_max > 0.2);       // the staircase is real ...
+        assert(al_max < 0.02);       // ... and gone after alignment (quantization only)
+    }
+    {
+        derive_align_t al = {0}; double ola, olo;
+        // first fix: changed, passes through
+        assert(derive_align(&al, 10.0, 20.0, 1000, 450, 90, true, &ola, &olo) && ola == 10.0 && olo == 20.0);
+        // repeat: not changed, still the same aligned fix
+        assert(!derive_align(&al, 10.0, 20.0, 2000, 450, 90, true, &ola, &olo) && olo == 20.0);
+        // both axes change together: no correction
+        assert(derive_align(&al, 10.001, 20.001, 3000, 450, 45, true, &ola, &olo) && ola == 10.001 && olo == 20.001);
+        // lat only, 2 s after lon: lon advanced east by 0.25 NM
+        assert(derive_align(&al, 10.002, 20.001, 5000, 450, 90, true, &ola, &olo));
+        assert(ola == 10.002 && fabs(geo_dist_nm(10.002, 20.001, ola, olo) - 0.25) < 0.005 && olo > 20.001);
+        // slow: no correction
+        assert(derive_align(&al, 10.003, 20.001, 7000, 30, 90, true, &ola, &olo) && olo == 20.001);
+        // no track: no correction
+        assert(derive_align(&al, 10.004, 20.001, 9000, 450, 90, false, &ola, &olo) && olo == 20.001);
+        // lon unchanged for 20 s: it is not lagging (northbound), leave it
+        assert(derive_align(&al, 10.005, 20.001, 25000, 450, 0, true, &ola, &olo) && olo == 20.001);
+        // antimeridian: an eastbound lagging lon wraps
+        derive_align_t w = {0};
+        derive_align(&w, 0.0, 179.9999, 1000, 480, 90, true, &ola, &olo);
+        derive_align(&w, 0.001, 179.9999, 5000, 480, 90, true, &ola, &olo);
+        assert(olo < -179.9);
+    }
+
     printf("test_derive: PASS\n");
     return 0;
 }

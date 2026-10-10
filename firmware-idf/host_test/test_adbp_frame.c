@@ -72,6 +72,10 @@ int main(void) {
     adbp_wrap_push(out, sizeof out, "publishAvionicParameters", body, true, &cfg);
     assert(count_sub(out, "<?xml") == 1);
 
+    // names AIDlink answers vs names it can only answer NCD (logged per subscribe)
+    assert(adbp_param_known("GPSLAT") && adbp_param_known("gpslong") && adbp_param_known("THDG"));
+    assert(!adbp_param_known("WINDSPEED") && !adbp_param_known(""));
+
     printf("test_adbp_frame: PASS\n");
     return 0;
 }

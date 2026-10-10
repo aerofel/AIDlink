@@ -55,6 +55,10 @@ int adbp_params_block(char *out, size_t cap, char names[][ADBP_MAXNAME], int n,
                       const pos_state_t *p, const aidlink_cfg_t *cfg,
                       adbp_pstate_t state, uint32_t age_s, uint64_t stamp_ms, bool *miss);
 
+// True when AIDlink has a mapping for this parameter name; an unknown name is
+// always answered validity="2" (NCD).
+bool adbp_param_known(const char *name);
+
 // Sync response: <?xml…?>\n<response method="M" errorcode="E">BODY</response>.
 int adbp_wrap_resp(char *out, size_t cap, const char *method, int errorcode, const char *body);
 

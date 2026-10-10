@@ -122,8 +122,12 @@ static int read_request(int s, char *buf, int cap) {
     return off;
 }
 
-static void drop_subs_from_ip(uint32_t ip) {
-    for (int i = 0; i < MAX_SUBS; i++) if (s_subs[i].active && s_subs[i].ip == ip) {
+// A subscription is identified by client IP AND publishport. FliteDeck in FOMAX
+// mode holds two at once from the same iPad (periodic 1 s on one port, OnEvent
+// on another); dropping by IP alone made each subscribe cancel the other, and
+// the ownship vanished until FliteDeck re-subscribed (~every minute).
+static void drop_sub(uint32_t ip, uint16_t port) {
+    for (int i = 0; i < MAX_SUBS; i++) if (s_subs[i].active && s_subs[i].ip == ip && s_subs[i].port == port) {
         if (s_subs[i].sock >= 0) close(s_subs[i].sock);
         memset(&s_subs[i], 0, sizeof s_subs[i]); s_subs[i].sock = -1;
     }
@@ -152,6 +156,26 @@ static int take_slot(void) {
         if (s_subs[victim].sock >= 0) close(s_subs[victim].sock);
     }
     return victim;
+}
+
+// Which parameters an EFB subscribed to, and which of them AIDlink can only
+// answer NCD. Once per subscribe (rare), so the flash log can carry it.
+static void log_param_names(char names[][ADBP_MAXNAME], int np) {
+    char line[160]; int o = 0, unk = 0;
+    char ul[160]; int uo = 0;
+    for (int i = 0; i < np; i++) {
+        if (o + (int)strlen(names[i]) + 2 >= (int)sizeof line) {
+            logln("[adbp]   params: %s", line); o = 0;
+        }
+        o += snprintf(line + o, sizeof line - o, "%s%s", o ? " " : "", names[i]);
+        if (!adbp_param_known(names[i])) {
+            unk++;
+            if (uo + (int)strlen(names[i]) + 2 < (int)sizeof ul)
+                uo += snprintf(ul + uo, sizeof ul - uo, "%s%s", uo ? " " : "", names[i]);
+        }
+    }
+    if (o) logln("[adbp]   params: %s", line);
+    logln("[adbp]   %d of %d params unknown (answered NCD)%s%s", unk, np, unk ? ": " : "", unk ? ul : "");
 }
 
 static void handle_request(int cs, uint32_t peer_ip) {
@@ -184,8 +208,8 @@ static void handle_request(int cs, uint32_t peer_ip) {
         bool on_event = strstr(req, "OnEvent") != NULL;
         long pport = adbp_tag_num(req, "publishport", 0);
         long per = adbp_tag_num(req, "refreshperiod", 5000); if (per < 100) per = 5000;
-        drop_subs_from_ip(peer_ip);
         if (pport > 0) {
+            drop_sub(peer_ip, (uint16_t)pport);   // a re-subscribe replaces its own slot
             int idx = take_slot();
             if (idx >= 0) {
                 sub_t *su = &s_subs[idx]; memset(su, 0, sizeof *su);
@@ -202,6 +226,7 @@ static void handle_request(int cs, uint32_t peer_ip) {
                 // exposed to (spec 2026-08-13) — record it where /log can see it.
                 logln("[adbp] subscribe %s per=%lums pubport=%ld np=%d from %s",
                       on_event ? "OnEvent" : "periodic", (unsigned long)per, pport, np, pip);
+                log_param_names(names, np);
             } else logln("[adbp] no free subscription slot: %d EFBs already subscribed", MAX_SUBS);
         }
         build_params(body, sizeof B->body, names, np, &miss);

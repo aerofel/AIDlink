@@ -129,6 +129,23 @@ int main(void) {
     assert(fixgate_feed(&g, -22.0, 166.2, 1 * S, 0, 0, false) == FG_OK);
     assert(fixgate_feed(&g, -22.0, 166.2004, 5 * S, 15, 270, true) == FG_OK);   // opposite to "track"
 
+    // ---- staircase feed (captured 2026-10-10, ACI500 over Romania, 442 kt
+    // track 300): lat and lon words update at different instants, so a 3 s
+    // lon step (0.34 NM) can arrive 0.7 s after the lat step — "1700 kt" on
+    // paper. 530 false HOLDs in 2.5 h of real flight. Never hold this.
+    memset(&g, 0, sizeof g);
+    {
+        static const struct { uint32_t ms; double la, lo; } cap[] = {
+            {24700, 46.2602, 22.4046}, {25500, 46.2622, 22.3961}, {26299, 46.2622, 22.3961},
+            {27099, 46.2622, 22.3908}, {27900, 46.2622, 22.3908}, {28700, 46.2622, 22.3908},
+            {29500, 46.2651, 22.3908}, {30200, 46.2651, 22.3826}, {31000, 46.2651, 22.3826},
+            {31799, 46.2651, 22.3826}, {32700, 46.2679, 22.3826}, {33500, 46.2679, 22.3745},
+            {34299, 46.2698, 22.3745}, {35099, 46.2698, 22.3745}, {35900, 46.2698, 22.3745},
+        };
+        for (size_t i = 0; i < sizeof cap / sizeof cap[0]; i++)
+            assert(fixgate_feed(&g, cap[i].la, cap[i].lo, cap[i].ms, 442, 300, true) == FG_OK);
+    }
+
     puts("test_fixgate: all OK");
     return 0;
 }

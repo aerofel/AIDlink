@@ -1,5 +1,49 @@
 # AIDlink — Learning Journal
 
+## 2026-10-10 — In-flight FOMAX ownship dropouts/offset (ACI500 F-ONEO, build 128 flashed in flight)
+
+- **FliteDeck in FOMAX mode holds TWO ADBP subscriptions per iPad**: periodic
+  1000 ms on publishport 51001 (37 params) and OnEvent 5000 ms on 62000 (53
+  params). `drop_subs_from_ip()` on every subscribe made each one cancel the
+  other; FliteDeck re-subscribed every ~63 s (72 subscribe lines in 2.5 h).
+  Subscriptions are now keyed by IP + publishport.
+- **The Viasat feed updates lat and lon at DIFFERENT instants** (two avionics
+  words): 24 of 27 changes in one minute moved one axis only. The fix-to-fix
+  polyline became a staircase and GS read 530–570 kt against 442 kt (ADS-B).
+  GS now uses a polyline with vertices ≥ 2 NM apart (`DERIVE_GS_SEG_NM`).
+- **The same staircase tripped the 1200 kt jump tests**: a 0.34 NM lon step
+  arriving 0.7 s after the lat step reads as 1700 kt. That caused 530 false
+  fixgate HOLDs and derive ring resets. Both tests now allow +0.5 NM.
+- **`apply_fix()` restamped `at_ms` on repeated positions**, so ADBP DR snapped
+  back up to 0.6 NM on each repeat. It now stamps only when the position changes
+  (or below 50 kt, where a repeat is the truth).
+- **ADS-B is the debugging ground truth in flight**: `api.adsb.lol/v2/reg/<REG>`
+  (or opendata.adsb.fi) over the AID uplink. The feed was +2.5 NM along / 1.1 NM
+  left of ADS-B, falling to +1.4 / 0.4 twenty minutes later, with NIC/NACp 0
+  (GNSS interference zone, Romania). That offset is upstream in the feed's own
+  position source. AIDlink serves the feed to within 0.05 NM, and 4 decimals
+  (~10 m) is not the cause.
+- Diagnose from a recorded series: sample feed + ADBP at 1 Hz, then replay
+  through the real derive.c/fixgate.c on the host. The replay of MY samples
+  hid the GS bias; replaying the unit's own /status sequence reproduced it.
+- **The Viasat lat/lon is a PURE IRS position** (ARINC 429 words from one ADIRU),
+  not GPIRS and not a cabin GNSS. Feed − ADS-B over 3 h fits a bias + sinusoid
+  whose best period is **84 min (Schuler)**: about 2.1 NM west ± 1.6 NM. At 15:09
+  its 0.6 NM matched the MCDU's IRS2 NAV deviation, while GPIRS = FMS = ADS-B.
+  A dip in the error is a Schuler trough, not "GPS came back". Details: the local doc
+  `docs/FOMAX-POSITION-ANALYSIS-2026-10-10.md` (gitignored by `*FOMAX*`: it holds
+  crew and flight specifics); scripts in `tools/position-analysis/`.
+- ADS-B with NIC 0/NACp 0 can still be truth-grade: check it against an MCDU
+  photo, and the iPhone photo's EXIF GPS (±200 m), before using it.
+- After the flash: 138/138 valid ADBP answers, GS 449±3 kt vs ADS-B 455, 0 HOLDs.
+- **Build 129: publish each fix with both axes aligned to the newer axis's time**
+  (`derive_align`). Cross-track scatter went from 0.057 to 0.012 NM sd, and
+  backward steps from 10 to 0. Keep `derive_update` on RAW values: its
+  decimal-precision estimator reads aligned values as 6-decimal data and then
+  trusts baselines that are too short (track 2.1° → 3.9° sd on replay).
+  Remaining: derived track sd ~2.7° (the staircase also affects short track
+  baselines); position jitter ±0.1 NM is the feed's own.
+
 ## 2026-10-05 — Review of the day's own changes: two restart bugs I had introduced
 
 - **Watch-dog arithmetic must be signed.** `now - s_last` with `s_last` written by

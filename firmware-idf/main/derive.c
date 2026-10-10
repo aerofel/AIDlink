@@ -92,7 +92,7 @@ void derive_update(derive_state_t *st, double lat, double lon, uint32_t now_ms,
         double dnm  = geo_dist_nm(nw->lat, nw->lon, lat, lon);
         double dt_s = (now_ms - nw->ms) / 1000.0;
         if (dnm > DERIVE_MIN_NM && dt_s > 0.5) {
-            if (dnm / (dt_s / 3600.0) > DERIVE_MAX_GS_KT) {
+            if (dnm > DERIVE_MAX_GS_KT * (dt_s / 3600.0) + DERIVE_JUMP_SLACK_NM) {
                 // teleport: restart the baseline here, keep the filtered
                 // values, so one feed glitch doesn't poison the output
                 st->count = 0;
@@ -107,15 +107,16 @@ void derive_update(derive_state_t *st, double lat, double lon, uint32_t now_ms,
                 // time noise and quanta both vanish into it).
                 const derive_fix_t *gs_ref = nw, *trk_ref = NULL;
                 double trk_b = 0, trk_w = 0;
-                double path_nm = dnm, gs_nm = dnm;   // polyline distance to gs_ref
-                const derive_fix_t *seg_prev = nw;
+                // polyline distance to gs_ref through vertices >= DERIVE_GS_SEG_NM apart
+                double path_nm = 0;
+                double vlat = lat, vlon = lon;       // last committed vertex
                 for (int i = 1; i < st->count; i++) {
                     const derive_fix_t *e =
                         &st->ring[(st->head - i + DERIVE_RING_N) % DERIVE_RING_N];
                     if (now_ms - e->ms > DERIVE_WIN_MS) break;
-                    path_nm += geo_dist_nm(e->lat, e->lon, seg_prev->lat, seg_prev->lon);
-                    seg_prev = e;
-                    gs_ref = e; gs_nm = path_nm;
+                    double seg = geo_dist_nm(vlat, vlon, e->lat, e->lon);
+                    if (seg >= DERIVE_GS_SEG_NM) { path_nm += seg; vlat = e->lat; vlon = e->lon; }
+                    gs_ref = e;
                     if (!trk_ref) {
                         double dn = geo_dist_nm(e->lat, e->lon, lat, lon);
                         if (dn > DERIVE_MIN_NM) {
@@ -143,6 +144,7 @@ void derive_update(derive_state_t *st, double lat, double lon, uint32_t now_ms,
                     // under-measures the arc actually flown
                     double gdt_s = (now_ms - gs_ref->ms) / 1000.0;
                     if (gdt_s > 0.5) {
+                        double gs_nm = path_nm + geo_dist_nm(vlat, vlon, gs_ref->lat, gs_ref->lon);
                         double inst = gs_nm / (gdt_s / 3600.0);
                         if (inst <= DERIVE_MAX_GS_KT)
                             st->gs_f = (st->gs_f < 0) ? inst
@@ -169,4 +171,37 @@ void derive_update(derive_state_t *st, double lat, double lon, uint32_t now_ms,
     if (have_trk_in) { *trk_out = trk_in; *have_trk_out = true; }
     else if (st->trk_valid) { *trk_out = trk_out_deg(st); *have_trk_out = true; }
     else { *trk_out = 0; *have_trk_out = false; }
+}
+
+bool derive_align(derive_align_t *a, double lat, double lon, uint32_t now_ms,
+                  double gs_kt, double trk_deg, bool have_trk,
+                  double *out_lat, double *out_lon) {
+    bool changed = !a->have || lat != a->lat || lon != a->lon;
+    if (!a->have) { a->lat_ms = a->lon_ms = now_ms; }
+    else {
+        if (lat != a->lat) a->lat_ms = now_ms;
+        if (lon != a->lon) a->lon_ms = now_ms;
+    }
+    a->have = true; a->lat = lat; a->lon = lon;
+    *out_lat = lat; *out_lon = lon;
+    if (!have_trk || !(gs_kt >= DERIVE_ALIGN_MIN_GS && gs_kt <= DERIVE_MAX_GS_KT)) return changed;
+
+    // the newer axis sets the epoch; signed: the two stamps can straddle a wrap
+    bool lat_newer = (int32_t)(a->lat_ms - a->lon_ms) >= 0;
+    uint32_t lag = lat_newer ? a->lat_ms - a->lon_ms : a->lon_ms - a->lat_ms;
+    if (lag == 0 || lag > DERIVE_ALIGN_MAX_MS) return changed;
+    double nm = gs_kt * (lag / 3600000.0), r = trk_deg * M_PI / 180.0;
+    if (lat_newer) {
+        double c = cos(lat * M_PI / 180.0);
+        if (c > 1e-6) {
+            double o = lon + nm * sin(r) / (60.0 * c);
+            if (o > 180.0) o -= 360.0; else if (o < -180.0) o += 360.0;
+            *out_lon = o;
+        }
+    } else {
+        double o = lat + nm * cos(r) / 60.0;
+        if (o > 90.0) o = 90.0; else if (o < -90.0) o = -90.0;
+        *out_lat = o;
+    }
+    return changed;
 }

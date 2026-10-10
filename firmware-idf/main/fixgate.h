@@ -8,8 +8,8 @@
 //
 //  BAD     not a position at all: NaN/inf, out of range, or exactly 0,0 — what
 //          atof() makes of "", "N/A" or a missing field.
-//  HOLD    a jump no aircraft can fly (> FG_MAX_KT from the last accepted
-//          position), or — when moving with a known track — a position more
+//  HOLD    a jump no aircraft can fly (> FG_MAX_KT + FG_JUMP_SLACK_NM from the
+//          last accepted position), or — when moving with a known track — a position more
 //          than FG_RESID_NM + FG_RESID_FRAC x (distance flown) away from where
 //          the last fix, speed and track put the aircraft. The speed test alone
 //          misses a glitch that lands a few seconds after the last update (a
@@ -29,6 +29,10 @@
 #include <stdint.h>
 
 #define FG_MAX_KT         1200.0
+// Added to FG_MAX_KT x elapsed: lat and lon change at different instants and
+// polls arrive with satcom jitter, so a normal one-axis step (~0.35 NM) can
+// land well under a second after the last change.
+#define FG_JUMP_SLACK_NM  0.5
 #define FG_RESID_NM       1.0       // a standard-rate turn strays ~0.35 NM in 10 s
 #define FG_RESID_FRAC     0.25
 #define FG_RESID_MIN_GS   50.0

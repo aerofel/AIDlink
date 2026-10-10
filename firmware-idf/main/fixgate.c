@@ -10,13 +10,14 @@ bool fixgate_valid(double lat, double lon) {
     return !(lat == 0.0 && lon == 0.0);
 }
 
-// Implied speed from (lat1,lon1) at t1 to (lat2,lon2) at t2. A same-instant
-// move counts as 1 s so a glitch inside one poll still reads as a teleport.
-static double implied_kt(double lat1, double lon1, uint32_t t1,
-                         double lat2, double lon2, uint32_t t2) {
+// True when (lat1,lon1) at t1 -> (lat2,lon2) at t2 is farther than an aircraft
+// can fly: FG_MAX_KT for the elapsed time (a same-instant move counts as 1 s)
+// plus FG_JUMP_SLACK_NM for the feed's per-axis update timing.
+static bool too_far(double lat1, double lon1, uint32_t t1,
+                    double lat2, double lon2, uint32_t t2) {
     double dt_h = (double)(uint32_t)(t2 - t1) / 3600000.0;
     if (dt_h < 1.0 / 3600.0) dt_h = 1.0 / 3600.0;
-    return geo_dist_nm(lat1, lon1, lat2, lon2) / dt_h;
+    return geo_dist_nm(lat1, lon1, lat2, lon2) > FG_MAX_KT * dt_h + FG_JUMP_SLACK_NM;
 }
 
 static fg_verdict_t accept(fixgate_t *g, double lat, double lon, uint32_t now, double cur_gs) {
@@ -41,9 +42,9 @@ fg_verdict_t fixgate_feed(fixgate_t *g, double lat, double lon, uint32_t now,
                 return accept(g, lat, lon, now, cur_gs);
             return FG_HOLD;
         }
-        if (implied_kt(g->cand_lat, g->cand_lon, g->cand_ms, lat, lon, now) <= FG_MAX_KT)
+        if (!too_far(g->cand_lat, g->cand_lon, g->cand_ms, lat, lon, now))
             return accept(g, lat, lon, now, cur_gs);               // the jump was real
-        if (implied_kt(g->lat, g->lon, g->changed_ms, lat, lon, now) <= FG_MAX_KT)
+        if (!too_far(g->lat, g->lon, g->changed_ms, lat, lon, now))
             return accept(g, lat, lon, now, cur_gs);               // it was a glitch
         g->cand_lat = lat; g->cand_lon = lon; g->cand_ms = now;    // neither: hold this one
         return FG_HOLD;
@@ -56,7 +57,7 @@ fg_verdict_t fixgate_feed(fixgate_t *g, double lat, double lon, uint32_t now,
         return FG_OK;                                              // a normal repeat
     }
 
-    bool jump = implied_kt(g->lat, g->lon, g->changed_ms, lat, lon, now) > FG_MAX_KT;
+    bool jump = too_far(g->lat, g->lon, g->changed_ms, lat, lon, now);
     if (!jump && have_trk && cur_gs >= FG_RESID_MIN_GS) {
         double flown = cur_gs * (double)(uint32_t)(now - g->changed_ms) / 3600000.0;
         double plat, plon;

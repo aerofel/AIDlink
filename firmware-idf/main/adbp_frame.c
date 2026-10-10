@@ -174,6 +174,14 @@ static int param_xml(char *out, size_t cap, const char *name, const pos_state_t 
     #undef VALF
 }
 
+bool adbp_param_known(const char *name) {
+    static const pos_state_t p;
+    static const aidlink_cfg_t c;
+    char buf[256]; bool m;
+    param_xml(buf, sizeof buf, name, &p, &c, ADBP_POS_FRESH, 0, 0, &m);
+    return m;
+}
+
 int adbp_params_block(char *out, size_t cap, char names[][ADBP_MAXNAME], int n,
                       const pos_state_t *p, const aidlink_cfg_t *cfg,
                       adbp_pstate_t state, uint32_t age_s, uint64_t stamp_ms, bool *miss) {
