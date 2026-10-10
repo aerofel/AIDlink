@@ -28,6 +28,9 @@
 #include "freertos/task.h"
 #include "cJSON.h"
 #include "poller_heal.h"
+#include "fixgate.h"
+#include "supervisor.h"
+#include "usb_ncm.h"
 
 static const char *TAG = "poll";
 static aidlink_cfg_t *CFG;
@@ -44,7 +47,7 @@ static derive_state_t s_derive;
 typedef struct {
     bool     valid;
     double   lat, lon, alt_ft, gs_kt, track_deg;
-    bool     have_track;
+    bool     have_track, alt_unknown;
     uint64_t utc_ms;
     uint32_t at_ms;
     char     flight[16], tail[12], orig[8], dest[8];
@@ -78,6 +81,14 @@ static RTC_NOINIT_ATTR uint32_t s_heal_magic, s_heal_n;
 static uint32_t s_win_ok, s_win_fail, s_win_maxms;
 static char     s_win_lasterr[40];
 static uint32_t s_fail_streak, s_fail_start_ms;
+static heal_episode_t s_episode;   // degraded-episode clock for the self-heal
+static fixgate_t      s_gate;      // bad / glitch / frozen-feed gate (fixgate.h)
+static fg_verdict_t   s_gate_prev;
+// Last transport-level failure (or the self-heal boot itself). The restart
+// counter resets only once success has held HEAL_RECOVER_MS past this —
+// resetting on any single success let an intermittent link restart the unit
+// every 10 min for a whole flight without ever reaching HEAL_MAX_RESTARTS.
+static uint32_t s_last_tfail_ms;
 
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
@@ -93,7 +104,9 @@ static void apply_fix(double lat, double lon, double alt, double gs, double trac
     if (dgs > 1500) dgs = 1500;
 
     s_feed.valid = true;
-    s_feed.lat = lat; s_feed.lon = lon; s_feed.alt_ft = alt;
+    s_feed.lat = lat; s_feed.lon = lon;
+    s_feed.alt_unknown = !isfinite(alt);
+    s_feed.alt_ft = s_feed.alt_unknown ? 0 : alt;
     s_feed.gs_kt = dgs; s_feed.track_deg = dtrk; s_feed.have_track = dhave;
     if (utc_ms) s_feed.utc_ms = utc_ms;
     s_feed.at_ms = t;
@@ -137,7 +150,8 @@ static void sim_step(uint32_t dt_ms) {
     pos_state_t p; pos_get(&p);
     double gs = CFG->sim_gs; if (gs < 0) gs = 0; if (gs > 1500) gs = 1500;
     p.valid = true; p.simulated = true; p.fixed = true; p.have_track = true;
-    p.lat = CFG->sim_lat; p.lon = CFG->sim_lon; p.alt_ft = CFG->sim_alt;
+    p.lat = CFG->sim_lat; p.lon = CFG->sim_lon; p.alt_ft = CFG->sim_alt; p.alt_unknown = false;
+    p.hdop = 0;
     p.gs_kt = gs; p.track_deg = CFG->sim_trk;
     p.last_fix_ms = now_ms();
     time_t tt = time(NULL); if (tt > 1700000000) p.utc_ms = (uint64_t)tt * 1000;
@@ -284,8 +298,8 @@ static void push_service_hint(const char *body) {
 // Back off while the fetch is failing, instead of hammering at 1 Hz.
 //
 // This is the actual cure for the lockup, and the reason two earlier theories
-// were wrong. The device has LWIP_MAX_SOCKETS=16 (already the lwIP maximum) and
-// MAX_ACTIVE_TCP=16, with TCP_MSL=60 s of TIME_WAIT. A failing poll still costs
+// were wrong. The device had LWIP_MAX_SOCKETS=16 (believed to be the lwIP maximum;
+// it is not — now 32) and MAX_ACTIVE_TCP=16, with TCP_MSL=60 s of TIME_WAIT. A failing poll still costs
 // a connection, so retrying every second puts ~50 connections a minute into a
 // 16-entry pool that drains over a minute: the pool saturates, every later
 // socket() fails, and the retries themselves keep it saturated. That is why it
@@ -316,6 +330,8 @@ static void poll_fail(uint32_t lat_ms, const char *err) {
     s_win_fail++;
     if (lat_ms > s_win_maxms) s_win_maxms = lat_ms;
     strlcpy(s_win_lasterr, err, sizeof s_win_lasterr);
+    heal_episode_note_fail(&s_episode, now_ms(), netcore_inet_state() == INET_OK, err);
+    if (heal_transport_err(err)) s_last_tfail_ms = now_ms();
     if (s_fail_streak++ == 0) {
         s_fail_start_ms = now_ms();
         logln("[poll] FAIL: %s (%lums, rssi %d, iheap %lu, iblk %lu)", err, (unsigned long)lat_ms,
@@ -328,8 +344,11 @@ static void poll_once(void) {
     long http_date = 0;
     char err[40] = "";
     s_last_heap  = esp_get_free_heap_size();
-    s_last_iheap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    s_last_iblk  = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    // INTERNAL|DEFAULT, not INTERNAL|8BIT: the 32 KB SPIRAM_MALLOC_RESERVE_INTERNAL
+    // pool matches 8BIT but malloc() can never use it, so the old figure
+    // overstated what TLS and cJSON could actually get.
+    s_last_iheap = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT);
+    s_last_iblk  = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT);
     if (!s_win_iblk_min || s_last_iblk < s_win_iblk_min) s_win_iblk_min = s_last_iblk;
     uint32_t t0 = now_ms();
     int n = http_get(body, sizeof body, &http_date, err, sizeof err);
@@ -340,7 +359,7 @@ static void poll_once(void) {
         snprintf(s_poll_msg, sizeof s_poll_msg, "fetch failed: %s", err[0] ? err : "?");
         ESP_LOGW(TAG, "poll fail: %s (free heap %u, largest block %u)", err[0] ? err : "?",
                  (unsigned)esp_get_free_heap_size(),
-                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT));
         poll_fail(lat_ms, err[0] ? err : "?");
         // Rebuild periodically, not just once: if the first rebuild lands while
         // the uplink is still down it proves nothing, and we must keep offering
@@ -352,23 +371,30 @@ static void poll_once(void) {
         }
         // Last resort (poller_heal.h): a long transport-level failure while the
         // independent internet probe is green is the lockup signature, and a
-        // reboot is the only thing that has ever cleared one. Log first: flog
-        // writes through to flash, so the reason survives the restart.
-        uint32_t streak_ms = now_ms() - s_fail_start_ms;
-        if (heal_due(streak_ms, s_heal_n, netcore_inet_state() == INET_OK, err)) {
-            logln("[poll] SELF-HEAL: feed dead %lus with uplink ok (%s, iheap %lu, iblk %lu), restart #%lu",
-                  (unsigned long)(streak_ms / 1000), err, (unsigned long)s_last_iheap,
+        // reboot is the only thing that has ever cleared one. The clock is the
+        // degraded episode (brief recoveries don't reset it), so the log carries
+        // both figures. Log first: flog writes through to flash, so the reason
+        // survives the restart.
+        uint32_t episode_ms = heal_episode_ms(&s_episode, now_ms());
+        if (heal_due(episode_ms, s_heal_n, netcore_inet_state() == INET_OK, err) &&
+            heal_episode_dense(&s_episode)) {
+            logln("[poll] SELF-HEAL: feed degraded %lus (streak %lus) with uplink ok (%s, iheap %lu, iblk %lu), restart #%lu",
+                  (unsigned long)(episode_ms / 1000),
+                  (unsigned long)((now_ms() - s_fail_start_ms) / 1000), err, (unsigned long)s_last_iheap,
                   (unsigned long)s_last_iblk, (unsigned long)(s_heal_n + 1));
             s_heal_n++; s_heal_magic = HEAL_MAGIC;
             vTaskDelay(pdMS_TO_TICKS(500));
-            esp_restart();
+            usb_ncm_restart();
         }
         return;
     }
 
     // Discipline the system clock from the response's Date header (1 s grain);
     // SNTP, when it reaches a server, wins by keeping the delta under the gate.
-    if (http_date > 1750000000L) {
+    // Plausible window only (mid-2025 .. 2038, the 32-bit long limit): a portal
+    // box with a dead RTC serving a 2000-era or far-future Date must not drag
+    // the clock along.
+    if (http_date > 1750000000L && http_date < 2145916800L) {
         time_t now = time(NULL);
         long long delta = (long long)now - http_date;
         if (delta < -3 || delta > 3) {
@@ -391,25 +417,60 @@ static void poll_once(void) {
     if (!ok) { s_poll_ok = false; strlcpy(s_poll_msg, "parse failed", sizeof s_poll_msg);
                poll_fail(lat_ms, "parse"); return; }
 
+    // Gate the position before anything is published (fixgate.h). One log line
+    // per verdict change, so the flash log shows exactly when and why.
+    fg_verdict_t fg = fixgate_feed(&s_gate, lat, lon, now_ms(), s_feed.gs_kt,
+                                   s_feed.track_deg, s_feed.valid && s_feed.have_track);
+    if (fg != s_gate_prev) {
+        static const char *nm[] = { "ok", "BAD (junk or out of range)",
+                                    "HOLD (unconfirmed jump)", "FROZEN (replayed while moving)" };
+        logln("[poll] feed position %s -> %s (%.5f,%.5f)", nm[s_gate_prev], nm[fg], lat, lon);
+        // Frozen: date the fix from the position's last real change, so the EFB
+        // goes straight to an honest dead-reckoned hold from the right point and
+        // time instead of a valid "parked" aircraft.
+        if (fg == FG_FROZEN) s_feed.at_ms = s_gate.changed_ms;
+        s_gate_prev = fg;
+    }
+    if (fg == FG_BAD) { s_poll_ok = false; strlcpy(s_poll_msg, "bad position", sizeof s_poll_msg);
+                        poll_fail(lat_ms, "parse"); return; }
+
     if (s_fail_streak) {
         logln("[poll] recovered after %lu fails, %lus gap",
               (unsigned long)s_fail_streak, (unsigned long)((now_ms() - s_fail_start_ms) / 1000));
         s_fail_streak = 0;
     }
-    if (s_heal_n) { logln("[poll] self-heal worked after %lu restart(s)", (unsigned long)s_heal_n); s_heal_n = 0; }
+    if (s_episode.open) {
+        uint32_t ep = heal_episode_ms(&s_episode, now_ms());
+        heal_episode_ok(&s_episode, now_ms());
+        if (!s_episode.open) logln("[poll] degraded episode over after %lus", (unsigned long)(ep / 1000));
+    }
+    if (s_heal_n && now_ms() - s_last_tfail_ms >= HEAL_RECOVER_MS) {
+        logln("[poll] self-heal worked after %lu restart(s)", (unsigned long)s_heal_n);
+        s_heal_n = 0;
+    }
     s_win_ok++;
+    s_poll_ok = true; s_poll_at_ms = now_ms();
+    if (fg == FG_HOLD)   { strlcpy(s_poll_msg, "holding unconfirmed jump", sizeof s_poll_msg); return; }
+    if (fg == FG_FROZEN) { strlcpy(s_poll_msg, "feed frozen", sizeof s_poll_msg); return; }
     apply_fix(lat, lon, alt, gs, track, have_track, utc, false, flight, tail, orig, dest, actype);
-    s_poll_ok = true; s_poll_at_ms = now_ms(); strlcpy(s_poll_msg, "ok", sizeof s_poll_msg);
+    strlcpy(s_poll_msg, "ok", sizeof s_poll_msg);
 }
 
 // Choose the live source and publish. The ONLY writer of pos_state_t outside
 // the emulator.
 static void arbitrate(void) {
-    uint32_t t = now_ms();
+    // gps_get() FIRST: with t taken before it, a fix stamped in between on the
+    // other core made t - last_fix_ms wrap to ~4e9 and GNSS read as dead.
     gps_state_t g; gps_get(&g);
+    uint32_t t = now_ms();
 
-    bool gps_live  = CFG->gps_enable && g.present && g.fix != NMEA_FIX_NONE &&
-                     (t - g.last_fix_ms) < 5000;
+    static gps_gate_t s_gate_gps;
+    bool gps_fresh = CFG->gps_enable && g.present && (t - g.last_fix_ms) < 5000;
+    bool was_live = s_gate_gps.live;
+    bool gps_live  = possrc_gps_gate(&s_gate_gps, gps_fresh, g.fix, g.hdop, t);
+    if (gps_live != was_live)
+        logln("[gps] quality gate %s (fix %s, hdop %.1f, %d sats)", gps_live ? "OPEN" : "closed",
+              g.fix == NMEA_FIX_3D ? "3D" : g.fix == NMEA_FIX_2D ? "2D" : "none", g.hdop, g.sats_used);
     bool feed_live = s_feed.valid && (t - s_feed.at_ms) < CFG->stale_ms;
 
     possrc_t src = possrc_choose(gps_live, feed_live, CFG->gps_pref);
@@ -431,6 +492,13 @@ static void arbitrate(void) {
     // position goes invalid (and the ADBP DR hold already covers that).
     if (src == SRC_NONE) {
         pos_state_t q; pos_get(&q);
+        // A frozen feed (fixgate) dates s_feed back to the position's last real
+        // change. When the retained fix is that feed position, take that date,
+        // or the ADBP hold would dead-reckon from the last REPLAYED poll and
+        // trail the aircraft by the 30 s it took to call the feed frozen.
+        if (s_feed.valid && q.lat == s_feed.lat && q.lon == s_feed.lon &&
+            (int32_t)(q.last_fix_ms - s_feed.at_ms) > 0)
+            q.last_fix_ms = s_feed.at_ms;
         possrc_ident(q.flight, sizeof q.flight, s_feed.flight, CFG->id_flight);
         possrc_ident(q.tail,   sizeof q.tail,   s_feed.tail,   CFG->id_tail);
         possrc_ident(q.orig,   sizeof q.orig,   s_feed.orig,   CFG->id_orig);
@@ -443,12 +511,15 @@ static void arbitrate(void) {
     pos_state_t p; pos_get(&p);
     p.valid = true; p.simulated = false; p.fixed = false; p.service_avail = true;
     if (src == SRC_GPS) {
-        p.lat = g.lat; p.lon = g.lon; p.alt_ft = g.alt_ft;
+        p.lat = g.lat; p.lon = g.lon; p.alt_ft = g.alt_ft; p.alt_unknown = false;
+        p.hdop = g.hdop;
         p.gs_kt = g.gs_kt; p.track_deg = g.track_deg; p.have_track = true;
         if (g.utc_ms) p.utc_ms = g.utc_ms;
         p.last_fix_ms = g.last_fix_ms;
     } else {
         p.lat = s_feed.lat; p.lon = s_feed.lon; p.alt_ft = s_feed.alt_ft;
+        p.alt_unknown = s_feed.alt_unknown;
+        p.hdop = 0;
         p.gs_kt = s_feed.gs_kt; p.track_deg = s_feed.track_deg;
         p.have_track = s_feed.have_track;
         if (s_feed.utc_ms) p.utc_ms = s_feed.utc_ms;
@@ -469,7 +540,10 @@ possrc_t poller_live_source(void) { return s_live_src; }
 
 static void poller_task(void *arg) {
     uint32_t last_poll = 0, last_sim = now_ms(), last_sum = now_ms();
+    // 120 s: one poll can legitimately take DNS retries + the 8 s HTTP timeout.
+    sup_watch(SUP_POLLER, 120000);
     for (;;) {
+        sup_beat(SUP_POLLER);
         uint32_t t = now_ms();
         if (CFG->sim_enable) {
             uint32_t dt = t - last_sim; last_sim = t;
@@ -481,18 +555,35 @@ static void poller_task(void *arg) {
         // One summary line per minute for the persistent log: enough to
         // reconstruct link quality, poll success rate and feed age offline.
         if (t - last_sum >= 60000) {
+            uint32_t tn = now_ms();   // not t: poll_once() above may have stamped a newer fix
             if (s_win_ok + s_win_fail) {
                 logln("[poll] 60s ok=%lu fail=%lu maxms=%lu rssi=%d heap=%lu iheap=%lu iblk=%lu age=%lds src=%s%s%s",
                       (unsigned long)s_win_ok, (unsigned long)s_win_fail,
                       (unsigned long)s_win_maxms, netcore_sta_rssi(),
                       (unsigned long)s_last_heap, (unsigned long)s_last_iheap,
                       (unsigned long)s_win_iblk_min,
-                      s_feed.at_ms ? (long)((t - s_feed.at_ms) / 1000) : -1,
+                      s_feed.at_ms ? (long)((tn - s_feed.at_ms) / 1000) : -1,
                       s_live_src == SRC_GPS ? "gps" : s_live_src == SRC_FEED ? "feed" : "none",
                       s_win_fail ? " last=" : "", s_win_fail ? s_win_lasterr : "");
             }
             s_win_ok = s_win_fail = s_win_maxms = s_win_iblk_min = 0; s_win_lasterr[0] = 0;
             last_sum = t;
+            // Every 10 min: each task's stack headroom (bytes never touched) and
+            // the internal-heap low-water mark, so a post-flight flog shows which
+            // margin is shrinking long before anything overflows.
+            static unsigned s_sum_n;
+            if (++s_sum_n % 10 == 1) {
+                static const char *T[] = { "adbp", "poller", "dnsfwd", "display", "httpd",
+                                           "inetprobe", "button", "sys_evt", "tiT", "gps", "sup" };
+                char line[180]; int o = snprintf(line, sizeof line, "[mem] imin=%u stack free:",
+                    (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT));
+                for (unsigned i = 0; i < sizeof T / sizeof T[0] && o < (int)sizeof line - 16; i++) {
+                    TaskHandle_t h = xTaskGetHandle(T[i]);
+                    if (h) o += snprintf(line + o, sizeof line - o, " %s %u", T[i],
+                                         (unsigned)uxTaskGetStackHighWaterMark(h));
+                }
+                logln("%s", line);
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -515,7 +606,10 @@ void poller_start(aidlink_cfg_t *cfg) {
     CFG = cfg;
     if (esp_reset_reason() != ESP_RST_SW || s_heal_magic != HEAL_MAGIC) s_heal_n = 0;
     s_heal_magic = HEAL_MAGIC;
-    if (s_heal_n) logln("[poll] booted by self-heal restart #%lu", (unsigned long)s_heal_n);
+    if (s_heal_n) {
+        logln("[poll] booted by self-heal restart #%lu", (unsigned long)s_heal_n);
+        s_last_tfail_ms = now_ms();   // the restart counts as the latest failure
+    }
     // The v9-parity insecure TLS mode makes mbedTLS print a warning on every
     // single poll — deliberate configuration, not news. Errors still show.
     esp_log_level_set("esp-tls-mbedtls", ESP_LOG_ERROR);

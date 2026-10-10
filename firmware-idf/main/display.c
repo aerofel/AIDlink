@@ -25,6 +25,7 @@
 #include "paneldrv.h"
 #include "flightview.h"
 #include "log.h"
+#include "supervisor.h"
 
 static const char *TAG = "disp";
 
@@ -48,9 +49,14 @@ static void display_task(void *arg)
     // The heartbeat below surfaces pool usage in /log; the stuck-lock warning
     // distinguishes "render task hung" from "our refresh crashed".
     int lockfail = 0;
+    // Beat only after a refresh completed under the LVGL lock: a render task
+    // hung on a full pool (lv_assert's while(1)) holds the lock forever, and
+    // this loop alone keeps running — the 2026-07-09 frozen-screen signature.
+    sup_watch(SUP_DISPLAY, 30000);
     for (int tick = 0;; tick++) {
         if (lvgl_port_lock(100)) {
             lockfail = 0;
+            sup_beat(SUP_DISPLAY);
             if (tick % 5 == 0) {
                 flightview_t v;
                 flightview_build(&v);

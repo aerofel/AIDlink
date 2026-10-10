@@ -6,6 +6,7 @@
 // unit-tested on the host with a plain C compiler.
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 
 // ARINC 834 AID Web API version, reported to EFB probes (getAPIVersion) and
@@ -85,8 +86,19 @@ typedef struct {
 // prefix 26 -> 0xFFFFFFC0, prefix 29 -> 0xFFFFFFF8, prefix 0 -> 0.
 uint32_t cfg_netmask_from_prefix(uint8_t prefix);
 
+// Check a configuration before it is saved. Appends one human-readable reason
+// per problem to err ("; "-separated) and returns how many were found; 0 = ok.
+// Catches what would otherwise brick connectivity after the reboot: a mask or
+// pool that does not fit the AID subnet, a port of 0, a sub-8-char AP
+// passphrase (which used to turn the AP silently OPEN), DR timings out of range.
+int cfg_validate(const aidlink_cfg_t *c, char *err, size_t cap);
+
 // Load config from NVS, seeding defaults for any missing key.
 void cfg_load(aidlink_cfg_t *c);
 
 // Persist config to NVS. Returns 0 on success, -1 on error.
 int cfg_save(const aidlink_cfg_t *c);
+// Replace the live config with *next and persist it, atomically with respect
+// to every other cfg_save() (the user key, the poller). On a failed NVS write
+// the live config is left exactly as it was. Returns 0 on success.
+int cfg_commit(aidlink_cfg_t *live, const aidlink_cfg_t *next);

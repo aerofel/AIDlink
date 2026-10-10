@@ -20,6 +20,12 @@ esp_netif_t *netcore_ap_netif(void);
 // (Wi-Fi AP + USB-NCM share it); on the classic ESP32 it is the SoftAP itself.
 // Never NULL after netcore_start().
 esp_netif_t *netcore_downstream_netif(void);
+// The AID's own IPv4 (SoftAP / bridge), network order; 0 if not set yet.
+uint32_t netcore_downstream_ip(void);
+// True when a connected socket's LOCAL address is the AID's own IP, i.e. the
+// peer reached us over the SoftAP or the USB cable — not over the cabin uplink
+// (a network shared with strangers) and not over IPv6 link-local on any side.
+bool netcore_sock_is_downstream(int fd);
 
 // The L2 bridge netif (S3 only), or NULL when bridging isn't built. USB-NCM
 // attaches itself to this as a bridge port.

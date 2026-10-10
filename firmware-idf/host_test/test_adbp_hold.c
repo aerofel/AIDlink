@@ -5,6 +5,7 @@
 #include <assert.h>
 #include <string.h>
 #include <stdio.h>
+#include <math.h>
 #include "adbp_frame.h"
 
 #define STALE   30000u
@@ -86,6 +87,54 @@ int main(void) {
     assert(strstr(out, "name=\"GPSLATP\" validity=\"2\"/>"));
     assert(!strstr(out, "value=\"-22.270000\""));
     assert(strstr(out, "name=\"GNSS_AVAIL\" validity=\"1\" type=\"6\" value=\"0\""));
+    assert(strstr(out, "name=\"FOM\" validity=\"2\"/>"));          // quality follows position
+    assert(strstr(out, "name=\"HDOP\" validity=\"2\"/>"));
+
+    // ---------- integrity limit + WOW per state; real GNSS HDOP ----------
+    char qn[3][ADBP_MAXNAME]; strcpy(qn[0], "GPSHIL"); strcpy(qn[1], "WOW"); strcpy(qn[2], "HDOP");
+    p.gs_kt = 480;
+    adbp_params_block(out, sizeof out, qn, 3, &p, &cfg, ADBP_POS_FRESH, 1, 0, &miss);
+    assert(strstr(out, "name=\"GPSHIL\" validity=\"1\" type=\"0\" value=\"0.10\""));
+    assert(strstr(out, "name=\"WOW\" validity=\"1\""));
+    adbp_params_block(out, sizeof out, qn, 3, &p, &cfg, ADBP_POS_DR, 120, 0, &miss);
+    assert(strstr(out, "name=\"GPSHIL\" validity=\"1\" type=\"0\" value=\"16.10\""));   // 480 kt x 2 min
+    adbp_params_block(out, sizeof out, qn, 3, &p, &cfg, ADBP_POS_NCD, 400, 0, &miss);
+    assert(strstr(out, "name=\"GPSHIL\" validity=\"2\"/>"));
+    assert(strstr(out, "name=\"WOW\" validity=\"2\"/>"));
+    p.hdop = 1.7;                                                       // GNSS source
+    adbp_params_block(out, sizeof out, qn, 3, &p, &cfg, ADBP_POS_FRESH, 1, 0, &miss);
+    assert(strstr(out, "name=\"HDOP\" validity=\"1\" type=\"0\" value=\"1.7\""));
+    p.hdop = 0;
+
+    // ---------- dead reckoning across the antimeridian ----------
+    // 179.95E eastbound at 480 kt for 30 s used to come out as 180.0176
+    pos_state_t d; memset(&d, 0, sizeof d);
+    d.valid = true; d.have_track = true; d.lat = -15.0; d.lon = 179.95;
+    d.gs_kt = 480; d.track_deg = 90;
+    adbp_dead_reckon(&d, 30);
+    assert(d.lon < -179.9 && d.lon >= -180.0);
+    d.lon = -179.95; d.track_deg = 270;                     // westbound
+    adbp_dead_reckon(&d, 30);
+    assert(d.lon > 179.9 && d.lon <= 180.0);
+    d.lon = 166.46; d.track_deg = 90;                       // no crossing: unchanged math
+    adbp_dead_reckon(&d, 30);
+    assert(fabs(d.lon - 166.529) < 0.002);                  // 4 NM east at 15S = 0.069 deg
+
+    // ---------- altitude ----------
+    char an[1][ADBP_MAXNAME]; strcpy(an[0], "GPSALT");
+    pos_state_t a; memset(&a, 0, sizeof a);
+    a.valid = true; a.lat = 1; a.lon = 1;
+    a.alt_ft = 0;                                           // sea-level field: real 0
+    adbp_params_block(out, sizeof out, an, 1, &a, &cfg, ADBP_POS_FRESH, 1, 0, &miss);
+    assert(strstr(out, "name=\"GPSALT\" validity=\"1\" type=\"0\" value=\"0\""));
+    assert(!strstr(out, "31000"));
+    a.alt_ft = -11;                                         // below sea level (AMS)
+    adbp_params_block(out, sizeof out, an, 1, &a, &cfg, ADBP_POS_FRESH, 1, 0, &miss);
+    assert(strstr(out, "value=\"-11\""));
+    a.alt_ft = 0; a.alt_unknown = true;                     // source has none: NCD
+    adbp_params_block(out, sizeof out, an, 1, &a, &cfg, ADBP_POS_FRESH, 1, 0, &miss);
+    assert(strstr(out, "name=\"GPSALT\" validity=\"2\""));
+    assert(!strstr(out, "31000"));
 
     printf("test_adbp_hold: PASS\n");
     return 0;

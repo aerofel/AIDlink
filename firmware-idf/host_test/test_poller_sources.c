@@ -94,6 +94,10 @@ int main(void) {
 
     // missing lat/lon -> fail
     assert(!poller_parse_viasat("{\"altitude\":{\"value\":\"100\"}}", &lat, &lon, &alt, &gs, &track, &ht, &utc, flight, tail, orig, dest, actype));
+    // position without altitude: NAN ("none"), not 0 (which is a real sea-level value)
+    assert(poller_parse_viasat("{\"latitude\":{\"value\":\"-22.0\"},\"longitude\":{\"value\":\"166.0\"}}",
+                               &lat, &lon, &alt, &gs, &track, &ht, &utc, flight, tail, orig, dest, actype));
+    assert(isnan(alt));
 
     // --- Real Viasat /ac/flight/info capture (2026-02-27, F-ONEA NWWW->NFFN):
     // full attr/updated_at/value wrapping, "+0000" time suffix, NO groundSpeed
@@ -116,6 +120,21 @@ int main(void) {
     assert(utc == 1772230488000ULL);               // 2026-02-27T22:14:48Z
     assert(actype[0] == 0);                        // no type field in the live capture
 
+    // --- junk values are absent, not 0 ---
+    const char *vj = "{\"latitude\":{\"value\":\"-22.0\"},\"longitude\":{\"value\":\"166.0\"},"
+                     "\"groundSpeed\":{\"value\":\"\"},\"altitude\":{\"value\":\"N/A\"}}";
+    gs = 123; alt = 0;
+    assert(poller_parse_viasat(vj, &lat, &lon, &alt, &gs, &track, &ht, &utc, flight, tail, orig, dest, actype));
+    assert(gs == -1);                      // "" -> derive GS from fixes, not 0 kt
+    assert(isnan(alt));                    // "N/A" -> unknown altitude, not sea level
+    assert(!poller_parse_viasat("{\"latitude\":{\"value\":\"N/A\"},\"longitude\":{\"value\":\"166\"}}",
+                                &lat, &lon, &alt, &gs, &track, &ht, &utc, flight, tail, orig, dest, actype));
+    // --- time zone suffix honoured: 22:14:48+11:00 == 11:14:48Z ---
+    const char *vz = "{\"latitude\":{\"value\":\"-22\"},\"longitude\":{\"value\":\"166\"},"
+                     "\"current_time\":{\"value\":\"2026-02-27T22:14:48+11:00\"}}";
+    assert(poller_parse_viasat(vz, &lat, &lon, &alt, &gs, &track, &ht, &utc, flight, tail, orig, dest, actype));
+    assert(utc == 1772230488000ULL - 11ULL * 3600000ULL);
+
     // --- Panasonic flat td_id_* with deg*1000 sign encoding ---
     memset(flight, 0, sizeof flight); memset(tail, 0, sizeof tail);
     const char *p = "{\"td_id_fltdata_present_position_latitude\":\"00007980\","   //  7.980
@@ -128,7 +147,7 @@ int main(void) {
     assert(fabs(lat - 7.980) < 1e-6);
     assert(fabs(lon - (-5.000)) < 1e-6);   // 80005000 -> -5.000
     assert(fabs(gs - 470) < 1e-6);
-    assert(ht && fabs(track - 120) < 1e-6);
+    assert(!ht);                           // true_heading is NOT track (crab angle)
     assert(strcmp(flight, "SB800") == 0 && strcmp(tail, "F-ONEA") == 0);
 
     test_service_state();

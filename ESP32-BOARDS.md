@@ -1,28 +1,29 @@
 # ESP32 Boards — Detected Specs & USB-Networking Feasibility
 
 _Generated 2026-07-05 from live `esptool` + macOS USB enumeration; Board 3 added
-2026-07-06, Board 4 added 2026-07-23. All silicon values read live from the chips,
-not assumed._
+2026-07-06, Board 4 added 2026-07-23, Board 6 added 2026-10-05. All silicon values
+read live from the chips, not assumed. Board 5 is a second T3-S3 (MAC
+`ac:27:6e:cd:59:5c`), identical to Board 4._
 
 ## At a glance
 
-| | **Board 1 — Classic ESP32** | **Board 2 — ESP32-S3 devkit** | **Board 3 — LilyGO T-Display-S3** | **Board 4 — LilyGO T3-S3 (LoRa)** |
-|---|---|---|---|---|
-| Silicon (detected) | ESP32-D0WD-V3, rev **v3.1** | ESP32-S3 (QFN56), rev **v0.2** | ESP32-S3 (QFN56), rev **v0.2** | ESP32-S3 (QFN56), rev **v0.2** — **`S3FH4R2`** (flash + PSRAM in package) |
-| CPU | Dual-core Xtensa **LX6**, up to 240 MHz | Dual-core Xtensa **LX7**, up to 240 MHz | Dual-core Xtensa **LX7**, up to 240 MHz | Dual-core Xtensa **LX7**, up to 240 MHz |
-| SRAM | 520 KB | 512 KB | 512 KB | 512 KB |
-| **PSRAM** | none (this module) | **8 MB embedded** (octal, "R8") | **8 MB embedded** (octal, "R8") | **2 MB embedded, QUAD** (AP_3v3, "R2") ⚠️ not octal |
-| **Flash** | **4 MB** | **16 MB** ("N16") | **16 MB** (quad, Winbond `ef/4018`) | **4 MB embedded** (quad, XMC `46/4016`) |
-| Wi-Fi | 802.11 b/g/n, 2.4 GHz | 802.11 b/g/n, 2.4 GHz | 802.11 b/g/n, 2.4 GHz | 802.11 b/g/n, 2.4 GHz |
-| Bluetooth | **BT Classic (BR/EDR) + BLE 4.2** | **BLE 5.0 only** (no Classic) | **BLE 5.0 only** (no Classic) | **BLE 5.0 only** (no Classic) |
-| **Display** | — | — | **1.9″ ST7789 170×320 IPS**, i80 8-bit bus | 0.96″ **SSD1306** 128×64 OLED, I²C **`0x3C`** on SDA 18 / SCL 17 (probed) |
-| **Sub-GHz radio** | — | — | — | **LoRa module on SPI2** (CS 7 / RST 8 / BUSY 34) |
-| **Native USB** | **No** — needs external UART bridge | **Yes** — USB-OTG + USB-Serial-JTAG | **Yes** — the **only** port (no UART bridge) | **Yes** — the **only** port (no UART bridge) |
-| Crystal | 40 MHz | 40 MHz | 40 MHz | 40 MHz |
-| MAC (base) | `44:1d:64:f5:9f:88` | `e8:3d:c1:f7:a2:58` | `d0:cf:13:32:2f:48` | `1c:db:d4:bd:1f:1c` |
-| Attached as | `/dev/cu.usbserial-0001` | `/dev/cu.usbmodem5AE60430151` | `/dev/cu.usbmodem1101` (stock) → **USB-NCM** once AIDlink runs | `/dev/cu.usbmodem1CDBD4BD1F1C1` (factory FW) → `/dev/cu.usbmodem101` in ROM download mode |
-| USB bridge in path | **Silicon Labs CP2102** (VID `0x10C4`) | **WCH CH343** (VID `0x1A86`, PID `0x55D3`) | **none** — native USB-Serial-JTAG (VID `0x303A`, PID `0x1001`) | **none** — native USB (VID `0x303A`, PID `0x1001`, product string `LilyGo TLora_T3S3_V1`) |
-| Current firmware | **AIDlink v9** (huge_app, 3 MB app) | AIDlink ESP-IDF | **AIDlink ESP-IDF + flight display** (flashed 2026-07-06) | **AIDlink ESP-IDF + OLED display** (flashed 2026-07-23, `sdkconfig.t3s3` quad profile) |
+| | **Board 1 — Classic ESP32** | **Board 2 — ESP32-S3 devkit** | **Board 3 — LilyGO T-Display-S3** | **Board 4 — LilyGO T3-S3 (LoRa)** | **Board 6 — LilyGO T-Display-S3 Touch** |
+|---|---|---|---|---|---|
+| Silicon (detected) | ESP32-D0WD-V3, rev **v3.1** | ESP32-S3 (QFN56), rev **v0.2** | ESP32-S3 (QFN56), rev **v0.2** | ESP32-S3 (QFN56), rev **v0.2** — **`S3FH4R2`** (flash + PSRAM in package) | ESP32-S3 (QFN56), rev **v0.2** |
+| CPU | Dual-core Xtensa **LX6**, up to 240 MHz | Dual-core Xtensa **LX7**, up to 240 MHz | Dual-core Xtensa **LX7**, up to 240 MHz | Dual-core Xtensa **LX7**, up to 240 MHz | Dual-core Xtensa **LX7**, up to 240 MHz |
+| SRAM | 520 KB | 512 KB | 512 KB | 512 KB | 512 KB |
+| **PSRAM** | none (this module) | **8 MB embedded** (octal, "R8") | **8 MB embedded** (octal, "R8") | **2 MB embedded, QUAD** (AP_3v3, "R2") ⚠️ not octal | **8 MB embedded** (octal, "R8") |
+| **Flash** | **4 MB** | **16 MB** ("N16") | **16 MB** (quad, Winbond `ef/4018`) | **4 MB embedded** (quad, XMC `46/4016`) | **16 MB** (quad, Winbond `ef/4018`) |
+| Wi-Fi | 802.11 b/g/n, 2.4 GHz | 802.11 b/g/n, 2.4 GHz | 802.11 b/g/n, 2.4 GHz | 802.11 b/g/n, 2.4 GHz | 802.11 b/g/n, 2.4 GHz |
+| Bluetooth | **BT Classic (BR/EDR) + BLE 4.2** | **BLE 5.0 only** (no Classic) | **BLE 5.0 only** (no Classic) | **BLE 5.0 only** (no Classic) | **BLE 5.0 only** (no Classic) |
+| **Display** | — | — | **1.9″ ST7789 170×320 IPS**, i80 8-bit bus | 0.96″ **SSD1306** 128×64 OLED, I²C **`0x3C`** on SDA 18 / SCL 17 (probed) | **1.9″ ST7789 170×320 IPS**, i80 8-bit bus + **CST816T capacitive touch**, I²C **`0x15`** on SDA 18 / SCL 17 (chip id `0xB5`, read live) |
+| **Sub-GHz radio** | — | — | — | **LoRa module on SPI2** (CS 7 / RST 8 / BUSY 34) | — |
+| **Native USB** | **No** — needs external UART bridge | **Yes** — USB-OTG + USB-Serial-JTAG | **Yes** — the **only** port (no UART bridge) | **Yes** — the **only** port (no UART bridge) | **Yes** — the **only** port (no UART bridge) |
+| Crystal | 40 MHz | 40 MHz | 40 MHz | 40 MHz | 40 MHz |
+| MAC (base) | `44:1d:64:f5:9f:88` | `e8:3d:c1:f7:a2:58` | `d0:cf:13:32:2f:48` | `1c:db:d4:bd:1f:1c` | `98:c3:77:a5:32:00` |
+| Attached as | `/dev/cu.usbserial-0001` | `/dev/cu.usbmodem5AE60430151` | `/dev/cu.usbmodem1101` (stock) → **USB-NCM** once AIDlink runs | `/dev/cu.usbmodem1CDBD4BD1F1C1` (factory FW) → `/dev/cu.usbmodem101` in ROM download mode | `/dev/cu.usbmodem1101` (factory FW) → **USB-NCM** once AIDlink runs |
+| USB bridge in path | **Silicon Labs CP2102** (VID `0x10C4`) | **WCH CH343** (VID `0x1A86`, PID `0x55D3`) | **none** — native USB-Serial-JTAG (VID `0x303A`, PID `0x1001`) | **none** — native USB (VID `0x303A`, PID `0x1001`, product string `LilyGo TLora_T3S3_V1`) | **none** — native USB-Serial-JTAG (VID `0x303A`, PID `0x1001`) |
+| Current firmware | **AIDlink v9** (huge_app, 3 MB app) | AIDlink ESP-IDF | **AIDlink ESP-IDF + flight display** (flashed 2026-07-06) | **AIDlink ESP-IDF + OLED display** (flashed 2026-07-23, `sdkconfig.t3s3` quad profile) | **AIDlink ESP-IDF + flight display + touch** (flashed 2026-10-05, default octal profile) |
 
 ---
 
@@ -145,7 +146,7 @@ USB mode:    USB-Serial/JTAG
 
 ---
 
-## Flashing a running unit with no hands (Boards 3/4/5)
+## Flashing a running unit with no hands (Boards 3/4/5/6)
 
 These boards have a **single USB-C and no UART bridge**, and once AIDlink is
 running TinyUSB turns that port into USB-NCM — so there is no serial port for
@@ -158,8 +159,11 @@ Everything below exists to work around that.
 AIDLINK_PASS=... tools/flash-aid.sh firmware-idf/build
 ```
 
-It finds the NCM interface, logs into the portal, hits `/dfu`, waits for the ROM
-port, flashes the app slot, and waits for the unit to answer again.
+It finds the NCM interface and logs into the portal. It then GETs `/dfu` for
+its single-use confirmation token and POSTs the token back, waits for the ROM
+port, flashes the app slot, and waits for the unit to answer again. Since
+2026-10-05 a bare GET of `/dfu` only shows the confirmation page, so the
+pre-token version of this script no longer triggers anything.
 
 ### The two rules that make it work
 
@@ -181,6 +185,12 @@ port, flashes the app slot, and waits for the unit to answer again.
    `0x310000`. A unit still on the pre-flog table needs `0x8000
    partition-table.bin` added ONCE to the same write_flash; NVS is untouched
    (the table is 0xC00 bytes at 0x8000).
+   ⚠ Again on 2026-10-05: `coredump` at `0x390000` (128 KB, ends `0x3B0000`, so it
+   fits the 4 MB T3-S3). This one is **optional**. A unit on the older table runs
+   normally and just keeps no crash dumps; the same one-time `0x8000` write
+   enables them. Board 6 has the new table.
+   The script's `--flash_size 16MB` is harmless on the 4 MB boards: esptool only
+   rewrites the size field of an image written at the bootloader offset (0x0).
 
 ### What still cannot be automated
 
@@ -299,6 +309,62 @@ Build:
 idf.py -B build.t3s3 -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.t3s3" \
        -DSDKCONFIG=build.t3s3/sdkconfig build
 ```
+
+---
+
+## Board 6 — LilyGO T-Display-S3 Touch (the touch unit)
+
+**Detected by esptool 4.11 (2026-10-05):**
+```
+Chip type:   ESP32-S3 (QFN56) (revision v0.2)
+Features:    WiFi, BLE, Embedded PSRAM 8MB (AP_3v3)
+Crystal:     40MHz     MAC: 98:c3:77:a5:32:00     Flash: 16MB (quad, ef/4018)
+USB mode:    USB-Serial/JTAG
+eFuse:       PKG_VERSION 0, WAFER v0.2, FLASH_TYPE quad, PSRAM_CAP 8M, PSRAM_VENDOR AP_3v3
+```
+
+- **Same silicon, flash and panel as Board 3:** an N16R8-class S3 with 16 MB quad
+  flash, 8 MB octal PSRAM and the 1.9″ ST7789 on the i80 bus, using Board 3's
+  exact pin map. It runs the **default (octal) build**, so no new sdkconfig profile.
+- **Identified from the factory image, then on the bus.** The app at `0x10000`
+  was LilyGO's `T-Display-S3/examples/factory/factory.ino` (arduino-lib-builder,
+  ESP-IDF v4.4.7, built 2024-03-05). The factory partition table was
+  `nvs 20K / otadata 8K / app0 6400K / app1 6400K / spiffs 3456K / coredump 64K`.
+  AIDlink's touch driver then read **chip id `0xB5` = CST816T** at I²C `0x15`.
+- **Touch pin map** (LilyGO `pin_config.h`, confirmed by the live chip-id read):
+  SDA **18**, SCL **17**, INT **16**, RST **21**.
+  ⚠️ **16 and 21 are Board 3's GNSS RX and PPS.** On this variant they belong to
+  the touch controller, so **no wired GNSS is declared** for this model. If one is
+  ever wanted, these header GPIOs are still free: 1, 2, 3, 10, 11, 12, 13, 43, 44.
+- **How AIDlink uses it:** `touch.c` pulses RST, reads the chip id with a bounded
+  I²C read (never `i2c_master_probe`, see Board 4) and turns off the CST816's
+  auto-sleep. After that the button task polls the finger count every 20 ms. The
+  whole screen acts as a second user key: a **tap** shows an info overlay (GNSS
+  detail, or the uplink's SSID/RSSI, internet status and AP clients when there is
+  no receiver), and a **hold** swaps the position source (that needs GNSS, so it
+  does nothing here). The physical user key on GPIO14 does the same. Whether touch
+  is present is decided at **runtime** and shown in the portal's Hardware card. If
+  the controller does not answer, the board runs exactly like Board 3.
+- **Why the RST pulse matters:** while a CST816 is in auto-sleep it does not answer
+  I²C at all until someone touches it or it is reset. After any soft restart
+  (`/dfu`, self-heal, portal save) it is still asleep from the previous run, so a
+  passive probe would wrongly report "no touch".
+
+### First install from the factory firmware (2026-10-05)
+
+- On a stock board, `esptool --before default_reset` reaches the ROM directly over
+  the USB-Serial-JTAG. No 1200-baud touch is needed, unlike the T3-S3, whose
+  factory app holds USB as a TinyUSB CDC port.
+- `erase_flash` is **refused with `--no-stub`** (*"ESP32-S3 ROM does not support
+  function erase_flash"*). Instead, write bootloader + table + app, then run
+  `erase_region 0x9000 0x7000` to wipe the factory NVS/otadata that now sits under
+  AIDlink's `nvs` + `phy_init`.
+- **`--after watchdog_reset` started the app with no RST tap.** It is the first
+  way out of the downloader on these boards that did not need a hand. The next
+  `tools/flash-aid.sh` cycle (`/dfu` → app slot → reset) also came back on its own.
+- AIDlink is up: USB-NCM `Espressif Device` (PID `0x4000`), lease
+  `172.20.1.2/26`, a clean display bring-up in `/log`, and a Hardware card that
+  reads `lilygo-tdisplay-s3-touch`, 16 MB flash, 8 MB PSRAM, touch detected `0xB5`.
 
 ---
 

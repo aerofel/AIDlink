@@ -8,6 +8,9 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include "esp_log.h"
+#include <stdlib.h>
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #define NS "aidlink"
 static const char *TAG = "cfg";
@@ -40,7 +43,13 @@ static void get_ip(nvs_handle_t h, const char *k, uint8_t ip[4]) {
     if (nvs_get_blob(h, k, tmp, &len) == ESP_OK && len == 4) memcpy(ip, tmp, 4);
 }
 
+// The web save, the poller (perf profile) and the user key (source preference)
+// all write config; one at a time, so a commit never interleaves another's keys.
+// Created in cfg_load(), which runs at boot before any of those tasks exist.
+static SemaphoreHandle_t s_save_mux;
+
 void cfg_load(aidlink_cfg_t *c) {
+    if (!s_save_mux) s_save_mux = xSemaphoreCreateMutex();
     memset(c, 0, sizeof(*c));
     // --- seed defaults (used as-is when a key is absent from NVS) ---
     c->sta_dhcp = true;
@@ -135,7 +144,31 @@ void cfg_load(aidlink_cfg_t *c) {
     nvs_close(h);
 }
 
+static int cfg_save_locked(const aidlink_cfg_t *c);
+
 int cfg_save(const aidlink_cfg_t *c) {
+    xSemaphoreTake(s_save_mux, portMAX_DELAY);
+    int r = cfg_save_locked(c);
+    xSemaphoreGive(s_save_mux);
+    if (r) ESP_LOGE("cfg", "NVS save failed");
+    return r;
+}
+
+int cfg_commit(aidlink_cfg_t *live, const aidlink_cfg_t *next) {
+    aidlink_cfg_t *old = malloc(sizeof *old);
+    if (!old) return -1;
+    xSemaphoreTake(s_save_mux, portMAX_DELAY);
+    memcpy(old, live, sizeof *old);
+    memcpy(live, next, sizeof *live);
+    int r = cfg_save_locked(live);
+    if (r) memcpy(live, old, sizeof *live);   // NVS failed: nothing changes
+    xSemaphoreGive(s_save_mux);
+    free(old);
+    if (r) ESP_LOGE("cfg", "NVS commit failed - config unchanged");
+    return r;
+}
+
+static int cfg_save_locked(const aidlink_cfg_t *c) {
     nvs_handle_t h;
     if (nvs_open(NS, NVS_READWRITE, &h) != ESP_OK) return -1;
     esp_err_t e = ESP_OK;

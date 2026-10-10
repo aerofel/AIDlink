@@ -4,7 +4,7 @@ set(srcs "aidlink_main.c" "config.c" "config_util.c"
          "dnsfwd.c" "dnsfwd_util.c" "netcore.c" "usb_ncm.c"
          "auth.c" "web.c" "web_util.c" "pos.c"
          "adbp.c" "adbp_frame.c"
-         "poller.c" "poller_sources.c" "poller_heal.c" "nmea.c" "gps.c" "possrc.c" "gpsqual.c" "button.c" "geo.c" "services.c" "log.c"
+         "poller.c" "poller_sources.c" "poller_heal.c" "fixgate.c" "nmea.c" "gps.c" "possrc.c" "gpsqual.c" "button.c" "touch.c" "geo.c" "services.c" "log.c" "supervisor.c"
          "flog.c" "flog_core.c"
          "statusled.c" "board.c" "display.c" "airports.c"
          "tzdb.c" "tzdb_data.c" "derive.c" "eta.c" "font_arrow.c" "font_cloud.c" "font_tod.c" "font_eta.c"
@@ -17,7 +17,12 @@ set(srcs "aidlink_main.c" "config.c" "config_util.c"
          "font_aid8.c" "font_aid12.c" "font_aid16.c")
 set(reqs nvs_flash esp_wifi esp_netif esp_event lwip
          esp_http_server esp_http_client esp-tls json
-         mbedtls esp_timer esp_app_format mdns)
+         mbedtls esp_timer esp_app_format mdns
+         # GPIO + UART for the wired GNSS and user key, on EVERY target: the
+         # classic ESP32 build stopped compiling when gps.c landed because
+         # these only came in through the S3-only "driver" line below.
+         esp_driver_gpio esp_driver_uart
+         espcoredump spi_flash)
 
 # TinyUSB (USB-NCM) only exists on targets with native USB-OTG.
 if(CONFIG_SOC_USB_OTG_SUPPORTED)

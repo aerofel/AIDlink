@@ -43,6 +43,19 @@ static const board_t PROF_TDISPLAY_S3 = {
     .btn_gpio = 14,                   // user key, unused by the rest of the firmware
 };
 
+// Same panel, pins and layout as the plain T-Display-S3 — the Touch variant
+// only adds a CST816 on I2C. Its INT (16) and RST (21) take exactly the two
+// GPIOs Board 3 uses for GNSS RX and PPS, so this model has no wired GNSS.
+static const board_t PROF_TDISPLAY_S3_TOUCH = {
+    .name = "lilygo-tdisplay-s3-touch",
+    .disp_desc = "ST7789 320x170 display + CST816 touch",
+    DISP(panel_st7789, layout_tdisplay)
+    .led = LED_NONE, .led_gpio = -1,             // GPIO48 is LCD D7 here too
+    .gps_rx = -1, .gps_tx = -1, .gps_pps = -1,
+    .btn_gpio = 14,
+    .touch = TOUCH_CST816, .touch_sda = 18, .touch_scl = 17, .touch_rst = 21,
+};
+
 static const board_t PROF_T3S3 = {
     .name = "lilygo-t3s3",
     .disp_desc = "SSD1306 128x64 OLED",
@@ -65,6 +78,7 @@ static const struct { uint8_t mac[6]; const board_t *b; } FLEET[] = {
     { {0xd0,0xcf,0x13,0x32,0x2f,0x48}, &PROF_TDISPLAY_S3 },  // Board 3: T-Display-S3
     { {0x1c,0xdb,0xd4,0xbd,0x1f,0x1c}, &PROF_T3S3        },  // Board 4: T3-S3 (LoRa) #1
     { {0xac,0x27,0x6e,0xcd,0x59,0x5c}, &PROF_T3S3        },  // Board 5: T3-S3 (LoRa) #2
+    { {0x98,0xc3,0x77,0xa5,0x32,0x00}, &PROF_TDISPLAY_S3_TOUCH },  // Board 6: T-Display-S3 Touch
 };
 
 // Unknown unit: never drive display pins blind. Probing a WS2812 on GPIO48 is
@@ -84,10 +98,11 @@ const board_t *board_get(void) {
     cached = &GENERIC;
     for (unsigned i = 0; i < sizeof FLEET / sizeof FLEET[0]; i++)
         if (memcmp(mac, FLEET[i].mac, 6) == 0) { cached = FLEET[i].b; break; }
-    ESP_LOGI("board", "%02x:%02x:%02x:%02x:%02x:%02x -> %s (display=%s led=%s)",
+    ESP_LOGI("board", "%02x:%02x:%02x:%02x:%02x:%02x -> %s (display=%s led=%s touch=%s)",
              mac[0], mac[1], mac[2], mac[3], mac[4], mac[5], cached->name,
              cached->panel ? "yes" : "none",
              cached->led == LED_WS2812 ? "ws2812"
-                                       : (cached->led == LED_GPIO ? "gpio" : "none"));
+                                       : (cached->led == LED_GPIO ? "gpio" : "none"),
+             cached->touch == TOUCH_CST816 ? "cst816" : "none");
     return cached;
 }

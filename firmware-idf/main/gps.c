@@ -3,6 +3,7 @@
 #include "gps.h"
 #include <string.h>
 #include "board.h"
+#include "supervisor.h"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_log.h"
@@ -108,7 +109,9 @@ static void gps_task(void *arg) {
     ESP_LOGI(TAG, "listening on UART1 rx=%d tx=%d pps=%d @ %d baud",
              b->gps_rx, b->gps_tx, b->gps_pps, GPS_BAUD);
 
+    sup_watch(SUP_GPS, 30000);
     for (;;) {
+        sup_beat(SUP_GPS);
         int got = uart_read_bytes(GPS_UART, buf, sizeof buf, pdMS_TO_TICKS(200));
         for (int i = 0; i < got; i++) {
             char ch = (char)buf[i];
@@ -117,7 +120,11 @@ static void gps_task(void *arg) {
                     line[li] = 0;
                     if (nmea_checksum_ok(line)) {
                         nmea_line(&n, line);
-                        publish(&n, n.have_pos && n.rmc_valid);
+                        // Only a GGA (the sentence that carries the position)
+                        // may refresh the fix time: GSV/GSA arrive every second
+                        // too, and kept an old position "live" if GGA stopped.
+                        bool gga = strlen(line) > 6 && !strncmp(line + 3, "GGA", 3);
+                        publish(&n, n.have_pos && n.rmc_valid && gga);
                     } else {
                         xSemaphoreTake(s_mux, portMAX_DELAY);
                         s_gps.csum_errors++;

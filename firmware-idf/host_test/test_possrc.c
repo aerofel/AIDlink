@@ -57,9 +57,31 @@ static void test_identity_precedence(void) {
     assert(!strcmp(d, "ABCDEFGHIJK"));
 }
 
+// GNSS quality gate: in after 10 s of good 3D, out on loss or HDOP > 10.
+static void test_gps_gate(void) {
+    gps_gate_t g = {0};
+    uint32_t t = 1000;
+    assert(!possrc_gps_gate(&g, true, 2, 1.0, t));              // 2D never opens it
+    assert(!possrc_gps_gate(&g, true, 3, 20.0, t += 1000));     // window antenna: bad HDOP
+    assert(!possrc_gps_gate(&g, true, 3, 1.2, t += 1000));      // good from here...
+    assert(!possrc_gps_gate(&g, true, 3, 1.2, t += 9999));      // ...9.999 s: not yet
+    assert( possrc_gps_gate(&g, true, 3, 1.2, t += 1));         // 10 s: open
+    assert( possrc_gps_gate(&g, true, 2, 8.0, t += 1000));      // 2D, HDOP 8: stays (hysteresis)
+    assert(!possrc_gps_gate(&g, true, 3, 12.0, t += 1000));     // HDOP > 10: closed
+    assert(!possrc_gps_gate(&g, true, 3, 1.0, t += 1000));      // good again: must re-earn 10 s
+    assert(!possrc_gps_gate(&g, true, 3, 1.0, t += 5000));
+    assert(!possrc_gps_gate(&g, true, 2, 1.0, t += 1000));      // a 2D blip restarts the clock
+    assert(!possrc_gps_gate(&g, true, 3, 1.0, t += 1000));
+    assert(!possrc_gps_gate(&g, true, 3, 1.0, t += 9000));
+    assert( possrc_gps_gate(&g, true, 3, 1.0, t += 1000));
+    assert(!possrc_gps_gate(&g, false, 3, 1.0, t += 1000));     // stale: closed at once
+    assert(!possrc_gps_gate(&g, true, 1, 0.0, t += 1000));      // no fix
+}
+
 int main(void) {
     test_choose();
     test_identity_precedence();
+    test_gps_gate();
     printf("test_possrc OK\n");
     return 0;
 }

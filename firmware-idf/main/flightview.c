@@ -85,18 +85,20 @@ void flightview_build(flightview_t *v)
     // --- position ---------------------------------------------------------
     if (p.valid) {
         v->have_pos = true;
-        double av = fabs(p.lat);
+        // Round to 1/100 minute BEFORE splitting degrees from minutes, so
+        // 33.99999 deg shows 34°00.00, not 33°60.00.
+        long hm = lround(fabs(p.lat) * 6000.0);
         snprintf(v->lat_h, sizeof v->lat_h, "%s", p.lat >= 0 ? "N" : "S");
-        snprintf(v->lat_v, sizeof v->lat_v, "%02d\xC2\xB0%05.2f",
-                 (int)av, (av - (int)av) * 60.0);
-        av = fabs(p.lon);
+        snprintf(v->lat_v, sizeof v->lat_v, "%02ld\xC2\xB0%05.2f", hm / 6000, (hm % 6000) / 100.0);
+        hm = lround(fabs(p.lon) * 6000.0);
         snprintf(v->lon_h, sizeof v->lon_h, "%s", p.lon >= 0 ? " E" : " W");
-        snprintf(v->lon_v, sizeof v->lon_v, "%03d\xC2\xB0%05.2f",
-                 (int)av, (av - (int)av) * 60.0);
+        snprintf(v->lon_v, sizeof v->lon_v, "%03ld\xC2\xB0%05.2f", hm / 6000, (hm % 6000) / 100.0);
 
-        // altitude rounded to 10 ft — raw feet jitter isn't information
+        // altitude rounded to 10 ft — raw feet jitter isn't information.
+        // Unknown altitude (feed has none) shows dashes, never a fake "0".
         char buf[16];
-        snprintf(buf, sizeof buf, "%d", (int)(lround(p.alt_ft / 10.0) * 10));
+        if (p.alt_unknown) snprintf(buf, sizeof buf, "---");
+        else snprintf(buf, sizeof buf, "%d", (int)(lround(p.alt_ft / 10.0) * 10));
         size_t bl = strlen(buf);
         if (bl > 2) {
             memcpy(v->alt_lead, buf, bl - 2);
@@ -192,7 +194,7 @@ void flightview_build(flightview_t *v)
         struct tm tmu;
         gmtime_r(&us, &tmu);
         etap_out_t po = etap_update(&s_etap, perf, p.lat, p.lon,
-                                    p.valid ? p.alt_ft : -1,
+                                    p.valid && !p.alt_unknown ? p.alt_ft : -1,
                                     olat, olon, alat, alon,
                                     dest_elev, tot_nm, v->dist_nm, p.gs_kt,
                                     eta_made_good_kt(&s_eta), utc / 1000.0,
@@ -301,5 +303,16 @@ void flightview_status(fv_status_t *s)
                    (now - g.last_rx_ms) < 2000;
         snprintf(s->overlay_l2, sizeof s->overlay_l2, "%s  PPS %s",
                  cons, pps ? "ok" : "--");
+    } else if (ovl == BTN_OVL_LINK) {
+        s->overlay = 3;
+        if (s->link == FV_LINK_UP)
+            snprintf(s->overlay_l1, sizeof s->overlay_l1, "%.20s  %d dBm",
+                     CFG->sta_ssid, netcore_sta_rssi());
+        else
+            snprintf(s->overlay_l1, sizeof s->overlay_l1, "UPLINK %s",
+                     s->link == FV_LINK_SCANNING ? "SCANNING" : "DOWN");
+        int n = netcore_ap_client_count();
+        snprintf(s->overlay_l2, sizeof s->overlay_l2, "INTERNET %s  %d client%s",
+                 s->internet ? "ok" : "--", n, n == 1 ? "" : "s");
     }
 }

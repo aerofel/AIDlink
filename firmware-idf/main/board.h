@@ -20,6 +20,11 @@ typedef enum {
     LED_GPIO,     // plain single-colour LED, active high (T3-S3, GPIO37)
 } led_kind_t;
 
+typedef enum {
+    TOUCH_NONE = 0,
+    TOUCH_CST816, // Hynitron CST816 capacitive, I2C 0x15 (T-Display-S3 Touch)
+} touch_kind_t;
+
 typedef struct {
     const char *name;                     // e.g. "lilygo-t3s3"
     const char *disp_desc;                // portal text, NULL when headless
@@ -34,6 +39,10 @@ typedef struct {
     // Board-3-only (on the T3-S3 it is QWIIC SCL *and* LoRa DIO3).
     int         gps_rx, gps_tx, gps_pps;
     int         btn_gpio;                 // user key, -1 = none
+    // Touch controller this model MAY carry; touch.c confirms it at boot.
+    // Pins are only read when touch != TOUCH_NONE (rst -1 = not wired).
+    touch_kind_t touch;
+    int         touch_sda, touch_scl, touch_rst;
 } board_t;
 
 // Identify the board from the eFuse base MAC. Never NULL; cached after the

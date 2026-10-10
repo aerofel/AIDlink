@@ -28,6 +28,13 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 idf_build_set_property(COMPILE_DEFINITIONS "IP_NAPT_TIMEOUT_MS_UDP=120000" APPEND)
 idf_build_set_property(COMPILE_DEFINITIONS "IP_NAPT_TIMEOUT_MS_ICMP=10000" APPEND)
 idf_build_set_property(COMPILE_DEFINITIONS "IP_NAPT_TIMEOUT_MS_TCP=600000" APPEND)
+# NAPT's public port range, moved off lwIP's own ephemeral range (0xC000+):
+# inbound translation runs BEFORE local delivery, so a passenger mapping that
+# lands on the port of one of the unit's own outgoing connections (the poller's
+# TLS session, an ADBP push) could hijack it. 30000-45000 also stays clear of
+# every listener here (53, 67, 80, 5353, ADBP 24000).
+idf_build_set_property(COMPILE_DEFINITIONS "IP_NAPT_PORT_RANGE_START=30000" APPEND)
+idf_build_set_property(COMPILE_DEFINITIONS "IP_NAPT_PORT_RANGE_END=45000" APPEND)
 # ---------------------------------------------------------------------------
 
 project(aidlink)

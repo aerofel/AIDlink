@@ -5,6 +5,7 @@
 // ARINC-834 <parameter> encoding, sync <response>, and the push <method> frame
 // with the self-referential length="" fixed-point iteration + framing options.
 #include "adbp_frame.h"
+#include "geo.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -31,13 +32,8 @@ static double norm180(double d) { while (d > 180) d -= 360; while (d < -180) d +
 void adbp_dead_reckon(pos_state_t *p, double dt_s) {
     if (!p->valid || p->fixed || !p->have_track) return;
     if (!(p->gs_kt > 1.0 && p->gs_kt <= 1500.0)) return;
-    double dist_nm = p->gs_kt * (dt_s / 3600.0);
-    double d = dist_nm / 3440.065;                    // angular distance (earth radius nm)
-    double lat = p->lat * M_PI / 180.0, lon = p->lon * M_PI / 180.0, trk = p->track_deg * M_PI / 180.0;
-    double lat2 = asin(sin(lat) * cos(d) + cos(lat) * sin(d) * cos(trk));
-    double lon2 = lon + atan2(sin(trk) * sin(d) * cos(lat), cos(d) - sin(lat) * sin(lat2));
-    p->lat = lat2 * 180.0 / M_PI;
-    p->lon = lon2 * 180.0 / M_PI;
+    // geo_dest wraps the longitude: across the antimeridian 180.02 -> -179.98
+    geo_dest(p->lat, p->lon, p->track_deg, p->gs_kt * (dt_s / 3600.0), &p->lat, &p->lon);
 }
 
 adbp_pstate_t adbp_classify(bool valid, uint32_t last_fix_ms, uint32_t now_ms,
@@ -114,20 +110,35 @@ static int param_xml(char *out, size_t cap, const char *name, const pos_state_t 
         type = 0; double gs = (p->gs_kt >= 0 && p->gs_kt <= 1500) ? p->gs_kt : 0; VALF("%.1f", gs);
     }
     else if ((has(U, "ALT") && !has(U, "CORRECTION")) || has(U, "BARO_CORRECTION_ALTITUDE1")) {
-        type = 0; double a = p->alt_ft > 1.0 ? p->alt_ft : 31000; VALF("%.0f", a);
+        // Real value whenever the source has one — including 0 and negative
+        // (sea-level / below-sea-level fields). The v9 "31000 if none" stand-in
+        // also caught alt=0 and told the EFB "FL310, valid" on the ground.
+        type = 0; if (p->alt_unknown) ncd = true; VALF("%.0f", p->alt_ft);
     }
     else if (has(U, "GNSS_AVAIL") || (has(U, "AVAIL"))) { type = 6; VALF("%d", state != ADBP_POS_NCD ? 1 : 0); ncd = false; }
+    // Quality / integrity follow the position: when lat/lon are NCD these are
+    // NCD too (they used to read FOM 8.0, HDOP 0.8, HIL 0.1 NM "valid" beside
+    // a position the EFB had been told not to use).
     else if (has(U, "FOM")) {
-        type = 0; ncd = false;
+        type = 0;
         if (state == ADBP_POS_DR) { double f = 8.0 + 2.0 * age_s; if (f > 999.0) f = 999.0; VALF("%.1f", f); }
         else strcpy(val, "8.0");
     }
     else if (has(U, "HDOP") || has(U, "VDOP") || has(U, "DILUTION")) {
-        type = 0; ncd = false;
-        if (state == ADBP_POS_DR) { double h = 0.8 + 0.01 * age_s; if (h > 9.9) h = 9.9; VALF("%.1f", h); }
-        else strcpy(val, "0.8");
+        type = 0;
+        double h0 = p->hdop > 0 ? p->hdop : 0.8;      // the receiver's own when GNSS feeds us
+        if (state == ADBP_POS_DR) { double h = h0 + 0.01 * age_s; if (h > 9.9) h = 9.9; VALF("%.1f", h); }
+        else VALF("%.1f", h0);
     }
-    else if (has(U, "INTEGRITYLIMIT") || has(U, "GPSHIL")) { type = 0; strcpy(val, "0.10"); ncd = false; }
+    else if (has(U, "INTEGRITYLIMIT") || has(U, "GPSHIL")) {
+        // During DR the honest bound is the distance flown since the last fix:
+        // a turn or speed change in that time is error the EFB cannot see.
+        type = 0;
+        double hil = 0.10;
+        if (state == ADBP_POS_DR && p->gs_kt > 0) hil += p->gs_kt * age_s / 3600.0;
+        if (hil > 99.99) hil = 99.99;
+        VALF("%.2f", hil);
+    }
     else if (has(U, "ACID") || has(U, "TAIL") || has(U, "REGIST") || has(U, "ACREG")) {
         type = 7; const char *s = p->tail[0] ? p->tail : cfg->ac_tail;
         char e[32]; adbp_xml_esc(e, sizeof e, s); snprintf(val, sizeof val, "%s", e); if (!s[0]) ncd = true;
@@ -149,7 +160,10 @@ static int param_xml(char *out, size_t cap, const char *name, const pos_state_t 
         type = 7; adbp_xml_esc(val, sizeof val, cfg->ac_type); if (!cfg->ac_type[0]) ncd = true;
     }
     else if (has(U, "WOW") || has(U, "WHEEL") || has(U, "WONW") || has(U, "PBRK") || has(U, "DOOR")) {
-        type = 6; strcpy(val, "0"); ncd = false;
+        // Still the v9 constant ("airborne, doors closed") while there is a
+        // position — no source reports it, and how FliteDeck reacts to NCD
+        // here is unverified — but NCD with the position, not "valid" beside it.
+        type = 6; strcpy(val, "0");
     }
     else { *matched = false; ncd = true; }   // unknown -> NCD
 

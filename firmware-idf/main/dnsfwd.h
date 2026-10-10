@@ -56,6 +56,8 @@ typedef struct {
     // "queries only" contract of dnsfwd_question_end() stays intact.
     uint8_t  q[DNSFWD_CACHE_QMAX];
     uint16_t qlen;
+    uint32_t upa;      // resolver the query went to (network order): replies
+                       // from anywhere else are dropped, never cached
 } dnsfwd_pend_t;
 
 // Cache counters, for /status.
@@ -79,6 +81,8 @@ bool dnsfwd_answer_locally(int qtype);
 // empty NOERROR reply — NODATA, meaning "this name exists, it just has no record
 // of this type". Returns the reply length, or -1 if the query is not rewritable.
 int dnsfwd_make_nodata(uint8_t *msg, int len, int cap);
+// Same, as SERVFAIL (RCODE 2). Used when no upstream resolver is known.
+int dnsfwd_make_servfail(uint8_t *msg, int len, int cap);
 
 // Offset just past the first question (header + QNAME + QTYPE + QCLASS), or -1
 // if `msg` is not a well-formed single-question query. The bytes from offset 12

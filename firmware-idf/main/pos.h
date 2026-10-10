@@ -16,8 +16,10 @@ typedef struct {
     bool     service_avail; // upstream position service reachable
     double   lat, lon;      // degrees
     double   alt_ft;        // feet
+    bool     alt_unknown;   // source gave no altitude (alt_ft is then 0) -> ADBP NCD
     double   gs_kt;         // knots
     double   track_deg;     // degrees true
+    double   hdop;          // receiver HDOP when GNSS is the source; 0 = none
     uint64_t utc_ms;        // fix time, ms since epoch (0 = unknown)
     uint32_t last_fix_ms;   // monotonic ms (esp_timer) of last fix — freshness gate
     char     flight[16];

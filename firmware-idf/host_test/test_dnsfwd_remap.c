@@ -120,6 +120,16 @@ int main(void) {
     CHECK(dnsfwd_make_nodata(q, 11, (int)sizeof q) == -1);
     CHECK(dnsfwd_make_nodata(q, len, 12) == -1);   // no room for the question
 
+    // ---- SERVFAIL synthesis (no uplink resolver) --------------------------
+    len = mkquery(q, DNS_TYPE_A, true);
+    rlen = dnsfwd_make_servfail(q, len, (int)sizeof q);
+    CHECK(rlen == len);
+    CHECK((q[2] & 0x80) != 0);                     // QR = response
+    CHECK((q[3] & 0x0F) == 2);                     // RCODE = SERVFAIL
+    CHECK((q[3] & 0x80) != 0);                     // RA
+    CHECK(q[6] == 0 && q[7] == 0);                 // no answers
+    CHECK(dnsfwd_make_servfail(q, 11, (int)sizeof q) == -1);
+
     // ---- cache key: question extraction + case-insensitive compare ---------
     uint8_t q1[512], q2[512];
     int l1 = mkquery(q1, DNS_TYPE_A, true);

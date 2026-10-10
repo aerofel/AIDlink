@@ -130,6 +130,15 @@ bool dnsfwd_cacheable(const uint8_t *msg, int len) {
     return rcode == 0 || rcode == 3;            // NOERROR or NXDOMAIN
 }
 
+// Same rewrite with RCODE=SERVFAIL: "I cannot resolve anything right now".
+// Answered at once when there is no uplink resolver, so a client's stub moves
+// on (or fails fast) instead of sitting through its own multi-second timeout.
+int dnsfwd_make_servfail(uint8_t *msg, int len, int cap) {
+    int e = dnsfwd_make_nodata(msg, len, cap);
+    if (e > 0) msg[3] = 0x82;   // RA=1, RCODE=2
+    return e;
+}
+
 int dnsfwd_make_nodata(uint8_t *msg, int len, int cap) {
     int e = question_end(msg, len);
     if (e < 0 || e > cap) return -1;

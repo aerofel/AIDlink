@@ -126,8 +126,17 @@ solution that can be hundreds of metres out while HDOP says so plainly.
 **User key (GPIO14).** Hold ≥ 1 s to swap the preferred source (persisted, with
 an on-screen confirmation); tap for a ~4 s overlay showing fix, satellites used /
 in view, HDOP, the constellations actually solving, and PPS. Both are inert
-without a detected receiver. Hold rather than tap because a stray press would
-otherwise silently change what feeds the EFB.
+without a detected receiver — then a tap instead shows a ~4 s **uplink** overlay
+(SSID + RSSI, internet reachability, AP client count). Hold rather than tap
+because a stray press would otherwise silently change what feeds the EFB.
+
+**Touch screen (T-Display-S3 Touch).** The CST816 capacitive panel is read as a
+second user key: the whole screen taps and holds exactly like GPIO14 (`touch.c`,
+polled at 20 ms from the button task, auto-sleep disabled). The profile only
+says a controller *may* be there — it is reset and identified at boot, and the
+portal's Hardware card shows the result ("CST816 detected (chip id 0xB5)" or
+"not detected — touch disabled"). Its INT/RST lines are GPIO16/21, the pins
+Board 3 uses for GNSS RX/PPS, so the Touch variant has no wired GNSS.
 
 **Portal.** The GNSS card appears **only once a receiver has answered** —
 detection decides visibility, not the board profile. Three tiles in the header
@@ -160,6 +169,54 @@ software-controllable. If your board's RGB LED is on a different pin, change
 The LED is gated per-board in `board.c` (eFuse MAC → features): on the LilyGO
 T-Display-S3 GPIO48 is LCD data line D7, so the WS2812 driver must not run there.
 
+## Unattended operation (watchdogs, restarts, post-mortem)
+
+Nobody can touch the unit in flight, so every way of getting stuck ends in a
+recovery, and every recovery leaves a trace in the flash log (`/flog`):
+
+- **Hung task:** `supervisor.c` restarts the unit when adbp, the poller, dnsfwd,
+  the display (refresh under the LVGL lock) or GNSS stop looping (30 s; the
+  poller 120 s). The reason is parked in RTC memory and logged after the boot
+  (`[sup] restarted: adbp was silent 31s`); the supervisor takes no application
+  lock, since the hung task may hold it. At most 3 restarts without 30 healthy
+  minutes; after that it only reports.
+- **CPU starved / busy loop** (LVGL's out-of-memory assert is a `while(1)`): the
+  task watchdog panics after 10 s (`reset=task_wdt` in the boot marker).
+- **Panic:** the core dump goes to the `coredump` partition (128 KB at
+  0x390000). Download it from `/coredump` and decode it with
+  `esp-coredump info_corefile --core-format raw --core aidlink-core.bin build/aidlink.elf`.
+  A unit still on the older partition table runs normally, just without dumps;
+  adding `0x8000 partition-table.bin` to one flash enables them (NVS untouched).
+- **Planned restarts** (self-heal, supervisor, portal save) detach USB first
+  (`usb_ncm_restart()`). A restart with the host still attached can leave
+  macOS holding a dead NCM device until a physical RST. A panic cannot detach
+  first, so after a panic the cable link may need an RST tap; Wi-Fi is unaffected.
+- **Bad feed data** (`fixgate.c`): junk or out-of-range positions are rejected.
+  A jump that is impossible, or off the dead-reckoned track by more than
+  1 NM + 25 % of the distance flown, is held until the next update confirms it.
+  A position replayed for 30 s while moving at ≥ 200 kt is dated back to its last
+  real change, so the EFB gets an honest dead-reckoned hold rather than a parked,
+  "valid" aircraft.
+
+## Exposure and defaults (hardening, 2026-10-05)
+
+- **Uplink side sees nothing.** The portal (httpd `open_fn` checks the socket's
+  local address), ADBP and the DNS forwarder (both bound to the AID IP) answer
+  only over the SoftAP and the USB cable. They do not answer on the cabin
+  network the unit uplinks to, nor over IPv6. mDNS announces `<name>.local` on
+  the AID side only; on the S3 it is registered on the bridge so it resolves for
+  AP and cable clients.
+- **Saves are validated as a whole** (`cfg_validate`, host-tested). The subnet,
+  mask, DHCP pool, ports, DR timings, an AP passphrase of 8–63 characters and
+  credential lengths are all checked. If anything fails, nothing is applied and
+  every reason is listed. A failed NVS write never reports "Saved".
+- **Login:** 5 failed attempts lock the login for 30 s.
+- **The flash log always records events.** "Live capture" only drives the
+  `/log` view, and per-request lines (each ADBP poll or HTTP hit) stay in RAM so
+  they don't cycle the 512 KB flash log in hours.
+- **A `[mem]` line every 10 minutes** in the flash log gives each task's stack
+  headroom and the internal-heap low-water mark.
+
 ## Onboard flight display (LilyGO T-Display-S3)
 
 Boards flagged `has_display` in `board.c` drive the 1.9″ ST7789 (320×170
@@ -184,7 +241,7 @@ there); the classic ESP32 build contains zero LVGL/esp_lcd code.
 
 **Memory budget (hard-won):** the display shares internal SRAM with
 WiFi + TinyUSB + the L2 bridge. LVGL's pool is capped at 16 KB
-(`CONFIG_LV_MEM_SIZE_KILOBYTES` — the 64 KB default is a *static* BSS array
+(`CONFIG_LV_MEM_SIZE`, in bytes — now 32 KB; the 64 KB default is a *static* BSS array
 that starved the DMA draw buffer and made `lvgl_port_add_disp` return NULL =
 black screen), and rendering uses a single 320×20 partial buffer. Display
 bring-up mirrors every step into the web `/log` ring — the only "console"
@@ -192,9 +249,11 @@ this board has.
 
 **T-Display-S3 reflashing:** the single USB-C is USB-NCM while AIDlink runs.
 Two routes into the ROM downloader:
-1. **Remote (preferred):** `curl -b <cookies> http://172.20.1.1/dfu` — the
-   auth-gated `/dfu` endpoint forces download-boot and restarts. Then
-   `idf.py -p /dev/cu.usbmodem* flash`.
+1. **Remote (preferred):** `AIDLINK_PASS=… ../tools/flash-aid.sh build` does the
+   whole cycle. `/dfu` is two-step (2026-10-05): a GET only returns a
+   confirmation page with a single-use token (valid 2 min); a POST of that
+   `tok` is what forces download-boot and restarts. A restored or prefetched
+   browser tab can therefore never send a unit into the downloader.
 2. **Physical:** hold **BOT** (GPIO0), tap RST, release.
 
 Either way, after flashing over the native USB the S3 usually **re-latches
@@ -211,10 +270,11 @@ Pure logic is host-unit-tested with plain `clang` (no on-target harness needed):
 cd firmware-idf
 CJ=~/esp/esp-idf/components/json/cJSON
 clang -Imain -o /tmp/t host_test/test_config_subnet.c   main/config_util.c   && /tmp/t
+clang -Imain -o /tmp/t host_test/test_config_validate.c main/config_util.c   && /tmp/t
 clang -Imain -o /tmp/t host_test/test_dnsfwd_remap.c    main/dnsfwd_util.c   && /tmp/t
 clang -Imain -o /tmp/t host_test/test_web_util.c        main/web_util.c      && /tmp/t
-clang -Imain -o /tmp/t host_test/test_adbp_frame.c      main/adbp_frame.c -lm && /tmp/t
-clang -Imain -o /tmp/t host_test/test_adbp_hold.c       main/adbp_frame.c -lm && /tmp/t
+clang -Imain -o /tmp/t host_test/test_adbp_frame.c      main/adbp_frame.c main/geo.c -lm && /tmp/t
+clang -Imain -o /tmp/t host_test/test_adbp_hold.c       main/adbp_frame.c main/geo.c -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_flog_core.c       main/flog_core.c      && /tmp/t
 clang -Imain -o /tmp/t host_test/test_geo.c             main/geo.c        -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_airports.c        main/airports.c main/geo.c -lm && /tmp/t
@@ -227,6 +287,8 @@ clang -Imain -o /tmp/t host_test/test_eta.c             main/eta.c        -lm &&
 clang -Imain -o /tmp/t host_test/test_perfdb.c          main/perfdb.c main/perfdb_data.c -lm && /tmp/t
 clang -Imain -o /tmp/t host_test/test_eta_profile.c     main/eta_profile.c main/perfdb.c main/perfdb_data.c main/eta.c main/geo.c -lm && /tmp/t
 clang -Imain -I$CJ -o /tmp/t host_test/test_poller_sources.c main/poller_sources.c $CJ/cJSON.c -lm && /tmp/t
+clang -Imain -o /tmp/t host_test/test_poller_heal.c     main/poller_heal.c    && /tmp/t
+clang -Imain -o /tmp/t host_test/test_fixgate.c         main/fixgate.c main/geo.c -lm && /tmp/t
 ```
 
 Beyond unit tests, `host_test/replay_eta.c` replays a REAL cached flight
@@ -252,12 +314,15 @@ See `../docs/eta-estimator.md`.
 | `gps.*` | GNSS receiver: UART1 + PPS, publishes `gps_state_t`; no source policy |
 | `possrc.*` | pure source-choice + per-field identity precedence (host-tested) |
 | `gpsqual.*` | pure fix-quality → display colour band (host-tested) |
-| `button.*` | user-key debounce, long/short gestures (boards that declare one) |
+| `button.*` | user-key debounce, long/short gestures (physical key and/or touch panel) |
+| `supervisor.*` | task liveness: adbp/poller/dnsfwd/display/gps beat every loop; a silent task -> logged, USB-detached restart (max 3 without 30 healthy min) |
+| `fixgate.*` | feed position gate: junk/out-of-range rejected, impossible jumps held until confirmed, a replayed ("frozen") fix while moving dated back to its last real change (host-tested) |
+| `touch.*` | CST816 capacitive touch, probed at boot, read as a second user key (T-Display-S3 Touch) |
 | `services.*` | mDNS advertisement |
 | `log.*` | device traffic-log ring buffer (web `/log`) |
 | `statusled.*` | onboard RGB status LED (boards that have one) |
-| `board.*` | board identity by eFuse MAC → per-board hardware (LED, display, GNSS pins, user key) |
-| `display.*` | T-Display-S3 flight display (esp_lcd i80 ST7789 + LVGL) |
+| `board.*` | board identity by eFuse MAC → per-board hardware (LED, display, GNSS pins, user key, touch) |
+| `display.*` | T-Display-S3 (+ Touch) flight display (esp_lcd i80 ST7789 + LVGL) |
 | `airports.*` | embedded IATA/ICAO → lat/lon/elevation gazetteer (host-tested) |
 | `tzdb.*` / `tzdb_data.c` | 1° world timezone grid + offset transitions, generated from IANA data (host-tested; regenerate ~2028) |
 | `derive.*` | GS/track from successive fixes: per-axis quantization estimate, precision-adaptive bearing baseline over a position ring, polyline GS, wrap-safe weighted EMA (host-tested) |

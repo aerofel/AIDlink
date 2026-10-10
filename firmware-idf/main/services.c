@@ -4,6 +4,7 @@
 #include <string.h>
 #include <ctype.h>
 #include "mdns.h"
+#include "netcore.h"
 #include "esp_netif_sntp.h"
 #include "esp_log.h"
 
@@ -32,6 +33,13 @@ void services_start(const aidlink_cfg_t *cfg) {
     mdns_instance_name_set("AIDlink");
     mdns_service_add(NULL, "_http", "_tcp", 80, NULL, 0);
     mdns_service_add(NULL, "_aidlink-adbp", "_tcp", cfg->adbp_port, NULL, 0);
+    // Not on the cabin uplink (CONFIG_MDNS_PREDEF_NETIF_STA=n): no reason to
+    // announce the unit to strangers. On the S3 the AID IP lives on the L2
+    // bridge, which mdns does not know by default — register it, so
+    // <name>.local resolves for SoftAP and cable clients.
+    esp_netif_t *br = netcore_bridge_netif();
+    if (br && mdns_register_netif(br) == ESP_OK)
+        mdns_netif_action(br, MDNS_EVENT_ENABLE_IP4 | MDNS_EVENT_ANNOUNCE_IP4);
     ESP_LOGI(TAG, "[mDNS] http://%s.local/  (adbp on %u)", host, cfg->adbp_port);
 
     // SNTP: disciplines the clock whenever the uplink actually reaches the

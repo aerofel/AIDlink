@@ -224,8 +224,10 @@ sane range, then dead-reckons the pushed position at 1 Hz so it advances smoothl
 
 ## Flight display (ESP32-S3 with LCD)
 
-On boards with a screen (LilyGO **T-Display-S3**, auto-detected by MAC), the ESP-IDF firmware drives a
-320×170 flight display fed entirely by the live position source:
+On boards with a screen (LilyGO **T-Display-S3** and **T-Display-S3 Touch**, auto-detected by MAC), the
+ESP-IDF firmware drives a 320×170 flight display fed entirely by the live position source. On the Touch
+variant the whole screen doubles as the user key: tap for a GNSS (or, without a receiver, uplink) overlay,
+hold to swap the position source.
 
 | Row | Shows |
 |-----|-------|

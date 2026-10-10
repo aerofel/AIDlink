@@ -1,5 +1,141 @@
 # AIDlink — Learning Journal
 
+## 2026-10-05 — Review of the day's own changes: two restart bugs I had introduced
+
+- **Watch-dog arithmetic must be signed.** `now - s_last` with `s_last` written by
+  the other core can be "negative" by 1 ms, and unsigned that reads as 49 days of
+  silence. It is the same class of bug I had just fixed in `arbitrate()`: any
+  cross-task timestamp comparison wants `(int32_t)(a - b)`.
+- **"No failure for 2 min" is a bad episode-close rule** on satcom, where
+  isolated timeouts are normal. Add a density condition (≥ 50 % of polls failed)
+  before restarting.
+- **A new "unknown" flag has to reach every consumer** (ADBP, display, ETA),
+  not just the one that motivated it.
+- **Feed-derived GS needs ~60 s to converge from cold** (272→440→471 kt at
+  15/30/45 s). A freeze test must warm up first, or the dead-reckoning error
+  says more about the EMA than about the gate.
+- Reviewing my own diff with a fresh agent found what the hardware tests could
+  not: the races and density rules that only bite over hours of flight.
+
+## 2026-10-05 — Hardening round: exposure, validation, memory, integrity
+
+- **httpd `open_fn` + `getsockname()` is the place to restrict the portal by
+  interface.** esp_http_server always binds dual-stack ANY; a dual-stack listener
+  reports IPv4 peers as `::ffff:a.b.c.d`, so check that mapping before comparing.
+  For ADBP and DNS, just bind the AID IP.
+- **mDNS on an S3 bridge needs `mdns_register_netif(bridge)` +
+  `MDNS_EVENT_ENABLE_IP4`.** Without it `aidlink.local` never resolved for AP or
+  cable clients, which nobody had noticed because the EFB uses the IP.
+- **The "Live capture" checkbox gated the flash log too**: one untick silenced
+  post-flight evidence. `logln()` now always feeds the flash sink;
+  `logln_ram()` is for per-request noise.
+- **`SPIRAM_MALLOC_ALWAYSINTERNAL` 16 KB → 4 KB took the largest internal block
+  from 24 to 31 KB** with no regression in the feed, ADBP or portal tests.
+  Moving the static rings and buffers to PSRAM (`heap_caps_malloc` at init,
+  with an internal fallback for the classic ESP32) freed another ~40 KB.
+- **A `[mem]` stack report pays for itself at once.** lwIP's `tiT` had 1276 B
+  left on the bench before any NAT load, so its stack went to 4 KB.
+- **`long` is 32-bit on Xtensa**: a 2040 epoch bound compiled to "always true"
+  (`-Wtype-limits` caught it). Use 2038.
+- **Heredocs with `'EOF'` keep `\\` literally**, which breaks C macro line
+  continuations in generated test files.
+
+## 2026-10-05 — Step 3: supervisor, fixgate, coredump, two-step /dfu, tested by fault injection
+
+- **Testing watchdogs needs fault injection.** A throwaway build adds `/fi`: suspend
+  a named task (`xTaskGetHandle` + `vTaskSuspend`) or spin a prio-4 loop on core 1.
+  Build it into a scratch dir and restore `web.c` afterwards; never commit it.
+- **My first diagnosis of the stuck board was wrong.** I blamed the supervisor
+  blocking on a lock; `/flog` then showed it had restarted on time. The cable link
+  died AFTER the restart. Read the flash log before theorising. The lock-free
+  supervisor stayed anyway, because the risk is real.
+- **Any planned `esp_restart()` should detach USB first** (`usb_ncm_restart()`).
+  After a cable flash, 3/3 detached restarts recovered; the bare one wedged. A
+  panic can't detach, so a panic during a dfu-flash session needs an RST tap.
+- **`web_start()` called `log_set_enable(cfg->log_enable)`** and silently dropped
+  every boot-time `logln` on display boards until `display_start()`. Capture is now
+  decided once in `app_main`.
+- **A speed-only glitch test is blind when updates are sparse.** A 1.5 NM sidestep
+  5 s after the last update reads as 1195 kt. A dead-reckoned residual
+  (1 NM + 25 % of distance flown) catches it, and a 3°/s turn with a lagging track
+  stays well under.
+- **Backdating a frozen feed is not enough if the arbiter re-stamps.** The
+  SRC_NONE branch kept the last published `last_fix_ms` (the replayed poll), so
+  dead reckoning ran 30 s short: a steady 4 NM at 480 kt. A test measuring error
+  against the true track found it; validity bits alone would have looked fine.
+- **esptool's `--flash_size` only patches an image written at the bootloader
+  offset**, so `flash-aid.sh`'s 16 MB flag is harmless on the 4 MB T3-S3.
+- **zsh again:** `G="curl …"; $G url` runs nothing. Use a shell function.
+- **Portal sessions are single-token**, so a Python login in the middle of a curl
+  sequence turns every later curl into a 302.
+
+## 2026-10-05 — Full robustness review (docs/FIRMWARE-REVIEW-2026-10-05.md)
+
+- **The LVGL pool is 64 KB, not 24 KB.** `CONFIG_LV_MEM_SIZE=65536` overrides the
+  deprecated `LV_MEM_SIZE_KILOBYTES` (lvgl's `lv_conf_kconfig.h` prefers the
+  former). Always confirm in the map (`work_mem_int`), not in sdkconfig.defaults.
+- **`/log` and `/flog` hold the log mutexes while they send over the network.**
+  `logln()` waits forever on those mutexes and is called from ADBP, the display
+  (under the LVGL lock), the poller and the Wi-Fi event handler. One slow portal
+  client can stall all of them. This is a prime suspect for past "stuck" events.
+- **lwIP ignores `SO_SNDTIMEO` for `connect()`.** ADBP's push connect blocks
+  through all SYN retries when an EFB has left.
+- **Self-heal episode bug:** resetting `s_heal_n` on any success means the
+  10/20/40-minute escalation never escalates. Reset it only when the episode closes.
+- **Dead-reckoned longitude is not wrapped**: east of 180° it reads 180.0176.
+  `norm180()` exists but is not called on `lon2`.
+- Measured heap numbers include the 32 KB `RESERVE_INTERNAL` pool, which
+  `malloc` cannot use.
+- **Fixes shipped the same day.** After moving the LVGL pool to 32 KB, internal
+  heap went 17→49 KB free and the minimum 8→42 KB. LVGL sits at 47% with the
+  full flight UI.
+- **How to reproduce the log-lock stall on the bench:**
+  1. Grow the flash log past the TCP buffers (~90 KB; 1500 ADBP requests do it,
+     at one log line each).
+  2. Open `/flog` with a 1 KB `SO_RCVBUF` and never read from it.
+  3. Time ADBP `getParameters` meanwhile.
+
+  The old build blocked for 83 s; the fix answers in 0.01 s. With only a small
+  log, everything fits in the socket buffers and nothing stalls, so a short
+  bench log hides the bug.
+- **macOS does not drop SYNs when a listener's accept queue is full**: the
+  handshake still completes. Simulating an EFB that left silently needs pf, so
+  root.
+- **Bench flight test:** serve Viasat-shaped JSON from the Mac on :8088 and set
+  `srcType=2`, `vsUrl=http://172.20.1.2:8088/...` by replaying the portal form
+  (parse every input, change two fields, POST it all back, restore afterwards).
+  This exercises the poller, the ADBP output and the display end-to-end with no
+  uplink.
+
+## 2026-10-05 — Board 6 (T-Display-S3 Touch): CST816T as a second user key; classic ESP32 build fixed
+
+- **Identify a LilyGO board from its factory app:** `read_flash 0x10000` +
+  `strings` gave the example path (`T-Display-S3/examples/factory/factory.ino`),
+  which pinned the model before any probe firmware ran.
+- **CST816 auto-sleep makes passive probes lie.** A sleeping controller NACKs
+  I²C until it is touched or reset, and soft restarts don't reset it. Pulse RST
+  (GPIO21), then read the chip id (0xA7) with a timeout, then write 0xFE=1
+  (auto-sleep off) so 20 ms polling of 0x02 (finger count) keeps working.
+  This unit is **CST816T, id 0xB5**.
+- **Touch INT/RST = GPIO16/21 = Board 3's GNSS RX/PPS.** The pins are
+  fleet-safe for GNSS on every board except this one, so the Touch profile
+  declares no GNSS.
+- **Make touch useful without GNSS:** the tap used to be inert with no
+  receiver. It now shows an uplink overlay (SSID/RSSI, internet, AP clients) on
+  every board, so a touch-only board never has a dead screen.
+- **`/log` is off until `display_start()`**, so anything logged earlier in
+  boot (touch init included) is dropped. Report runtime detection in the
+  portal's Hardware card instead.
+- **Classic ESP32 build had been broken since gps.c landed** (`driver/gpio.h`
+  not found). GPIO/UART only came in through the S3-only `driver` requirement.
+  Added `esp_driver_gpio esp_driver_uart` to the base REQUIRES. S3 image and
+  DIRAM are byte-identical with and without it.
+- **ROM-only flashing:** `erase_flash` is unsupported with `--no-stub`; use
+  `erase_region`. `--after watchdog_reset` left the downloader with no RST tap.
+- **zsh doesn't word-split `$var`.** Looping `idf.py $args` over profiles made
+  build dirs literally named `" build-esp32 -DIDF_TARGET=…"`. Use arrays or
+  write each command out.
+
 ## 2026-09-19 — Poller lockup #3: socket-pool theory FALSIFIED; it is the TLS handshake, almost certainly internal SRAM
 
 VTBS→LFPG, F-ONEO ACI500, build b71 (with the backoff fix). Feed ran 07:59–08:22Z,

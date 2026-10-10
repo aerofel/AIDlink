@@ -38,6 +38,28 @@ static volatile bool s_scanning;       // a Wi-Fi scan is in progress
 esp_netif_t *netcore_sta_netif(void) { return s_sta; }
 esp_netif_t *netcore_ap_netif(void) { return s_ap; }
 
+uint32_t netcore_downstream_ip(void) {
+    esp_netif_ip_info_t i;
+    esp_netif_t *n = netcore_downstream_netif();
+    return (n && esp_netif_get_ip_info(n, &i) == ESP_OK) ? i.ip.addr : 0;
+}
+
+bool netcore_sock_is_downstream(int fd) {
+    struct sockaddr_storage ss; socklen_t sl = sizeof ss;
+    if (getsockname(fd, (struct sockaddr *)&ss, &sl) != 0) return false;
+    uint32_t a = 0;
+    if (ss.ss_family == AF_INET) {
+        a = ((struct sockaddr_in *)&ss)->sin_addr.s_addr;
+    } else if (ss.ss_family == AF_INET6) {      // dual-stack listener: ::ffff:a.b.c.d
+        const uint8_t *b = (const uint8_t *)&((struct sockaddr_in6 *)&ss)->sin6_addr;
+        static const uint8_t v4map[12] = {0,0,0,0,0,0,0,0,0,0,0xff,0xff};
+        if (memcmp(b, v4map, 12) != 0) return false;   // real IPv6 (link-local etc.)
+        memcpy(&a, b + 12, 4);
+    } else return false;
+    uint32_t mine = netcore_downstream_ip();
+    return mine && a == mine;
+}
+
 esp_netif_t *netcore_bridge_netif(void) {
 #if AIDLINK_BRIDGE
     return s_br;
@@ -92,12 +114,20 @@ bool netcore_sta_ipinfo(char *ip, char *gw, char *mask, char *dns) {
 // Scan uplink networks. The STA is put into a scannable state first: pause
 // auto-reconnect and stop any in-progress connection attempt (the driver rejects
 // a scan while "STA is connecting"). Returns 0 on success; fills *count.
+//
+// With the uplink UP the scan runs without disconnecting (the driver allows a
+// scan while associated): dropping the cabin uplink just to list networks cut
+// the feed and every client for seconds. The radio still visits each channel,
+// so AP clients see a short stall either way.
 int netcore_scan(wifi_ap_record_t *recs, uint16_t max, uint16_t *count) {
     *count = 0;
     s_scanning = true;
-    s_no_reconnect = true;
-    esp_wifi_disconnect();
-    vTaskDelay(pdMS_TO_TICKS(120));   // let the connecting state clear
+    bool was_up = s_sta_up;
+    if (!was_up) {
+        s_no_reconnect = true;
+        esp_wifi_disconnect();
+        vTaskDelay(pdMS_TO_TICKS(120));   // let the connecting state clear
+    }
     wifi_scan_config_t sc = { .show_hidden = true };
     esp_err_t e = esp_wifi_scan_start(&sc, true);   // blocking
     if (e == ESP_OK) {
@@ -109,9 +139,11 @@ int netcore_scan(wifi_ap_record_t *recs, uint16_t max, uint16_t *count) {
     } else {
         ESP_LOGW(TAG, "scan_start failed: %s", esp_err_to_name(e));
     }
-    s_no_reconnect = false;
     s_scanning = false;
-    if (s_have_ssid) esp_wifi_connect();   // resume connecting to the uplink
+    if (!was_up) {
+        s_no_reconnect = false;
+        if (s_have_ssid) esp_wifi_connect();   // resume connecting to the uplink
+    }
     return e == ESP_OK ? 0 : -1;
 }
 
@@ -232,13 +264,42 @@ static void inet_task(void *arg) {
 
 bool netcore_inet_up(void) { return s_inet; }
 
+// STA reconnect with backoff. Reconnecting the instant the driver gives up made
+// the single radio scan almost continuously while the cabin network was down
+// (IFE reboot, gate): the SoftAP kept leaving its channel and the EFB stalled.
+// 1, 2, 5, 10, then every 30 s; reset on a lease.
+static const uint16_t RETRY_S[] = { 1, 2, 5, 10, 30 };
+static unsigned s_retry_i;
+static esp_timer_handle_t s_retry_tmr;
+
+static void retry_cb(void *arg) {
+    if (s_have_ssid && !s_no_reconnect && !s_sta_up) esp_wifi_connect();
+}
+
 static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
         if (s_have_ssid && !s_no_reconnect) esp_wifi_connect();
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_sta_up = false;
         s_inet = false;
-        if (s_have_ssid && !s_no_reconnect) esp_wifi_connect();
+        // Not just s_inet: the self-heal and the display read the STATE, which
+        // otherwise kept saying "ok" until the probe's next pass (up to ~72 s).
+        if (s_inet_state != INET_NO_UPLINK) logln("internet: no uplink (STA disconnected)");
+        s_inet_state = INET_NO_UPLINK;
+        if (s_have_ssid && !s_no_reconnect) {
+            wifi_event_sta_disconnected_t *e = data;
+            unsigned i = s_retry_i < sizeof RETRY_S / sizeof RETRY_S[0]
+                       ? s_retry_i : sizeof RETRY_S / sizeof RETRY_S[0] - 1;
+            // The reason code tells roaming / beacon loss / auth failure apart in
+            // a post-flight flog; log the first and then every 10th of a streak.
+            if (s_retry_i % 10 == 0)
+                logln("[sta] disconnected: reason %d, rssi %d, retry in %us (attempt %u)",
+                      e->reason, e->rssi, RETRY_S[i], s_retry_i + 1);
+            s_retry_i++;
+            if (s_retry_tmr) { esp_timer_stop(s_retry_tmr);
+                               esp_timer_start_once(s_retry_tmr, (uint64_t)RETRY_S[i] * 1000000ULL); }
+            else esp_wifi_connect();
+        }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *e = data;
         logln("AP client joined %02X:%02X:%02X:%02X:%02X:%02X",
@@ -254,6 +315,8 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
         s_sta_ip[2] = esp_ip4_addr3_16(&e->ip_info.ip);
         s_sta_ip[3] = esp_ip4_addr4_16(&e->ip_info.ip);
         s_sta_up = true;
+        if (s_retry_i > 1) logln("[sta] connected after %u attempts", s_retry_i);
+        s_retry_i = 0;
         s_inet_probe_now = true;   // uplink just came up — probe internet promptly
         ESP_LOGI(TAG, "[STA] up IP=" IPSTR, IP2STR(&e->ip_info.ip));
     }
@@ -350,6 +413,8 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
     ESP_ERROR_CHECK(esp_wifi_init(&wcfg));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_evt, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_evt, NULL, NULL));
+    const esp_timer_create_args_t ta = { .callback = retry_cb, .name = "sta_retry" };
+    esp_timer_create(&ta, &s_retry_tmr);
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
     s_sta = esp_netif_create_default_wifi_sta();
@@ -370,6 +435,11 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
     wifi_config_t sta = {0};
     strlcpy((char *)sta.sta.ssid, c->sta_ssid, sizeof(sta.sta.ssid));
     strlcpy((char *)sta.sta.password, c->sta_pass, sizeof(sta.sta.password));
+    // A cabin has several APs under one SSID. The zero-init default (fast scan)
+    // joined the FIRST one heard from channel 1 up, however weak (-77..-88 dBm
+    // seen in flight); scan them all and take the strongest.
+    sta.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+    sta.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
 
     // AP config
@@ -377,9 +447,15 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
     strlcpy((char *)ap.ap.ssid, c->ap_ssid, sizeof(ap.ap.ssid));
     ap.ap.ssid_len = strlen(c->ap_ssid);
     strlcpy((char *)ap.ap.password, c->ap_pass, sizeof(ap.ap.password));
-    ap.ap.max_connection = 8;
+    // The portal's AP settings, applied (they used to be stored and ignored).
+    int maxc = c->ap_max_clients > 0 ? c->ap_max_clients : 8;
+    ap.ap.max_connection = maxc > 10 ? 10 : maxc;
+    ap.ap.ssid_hidden = c->ap_hidden ? 1 : 0;
     ap.ap.authmode = strlen(c->ap_pass) >= 8 ? WIFI_AUTH_WPA2_PSK : WIFI_AUTH_OPEN;
-    ap.ap.channel = 0;  // follow STA
+    // Single radio: once the STA is associated the AP follows the uplink's
+    // channel regardless; ap_channel only applies while there is no uplink.
+    ap.ap.channel = (c->ap_channel >= 1 && c->ap_channel <= 13) ? c->ap_channel : 0;
+    ap.ap.csa_count = 3;   // announce a channel change to clients (follow-STA)
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
 
 #if AIDLINK_BRIDGE
@@ -425,6 +501,7 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
              netcore_bridge_netif() ? " (bridged AP+USB)" : "");
 
     dnsfwd_start(s_sta, c->ap_client_dns);
-    xTaskCreate(inet_task, "inetprobe", 3072, NULL, 2, NULL);
+    // 4 KB: runs a whole esp_http_client request plus logln() on this stack.
+    xTaskCreate(inet_task, "inetprobe", 4096, NULL, 2, NULL);
     return s_sta;
 }

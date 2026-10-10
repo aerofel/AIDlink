@@ -14,6 +14,12 @@ void usb_ncm_start(const aidlink_cfg_t *c);
 // Cleanly detach from the USB host (TinyUSB uninstall) — call before rebooting
 // into the ROM downloader (/dfu) so the port re-enumerates reliably.
 void usb_ncm_stop(void);
+// Planned software restart (self-heal, supervisor, portal save): detach from
+// the USB host first, then restart. A restart with the host still attached
+// intermittently leaves macOS holding a dead NCM device — the cable link stays
+// down until a physical RST (LEARNING.md 2026-08-13; reproduced 2026-10-05).
+// Plain esp_restart() on boards without native USB.
+void usb_ncm_restart(void);
 
 // If a USB-cable host is currently connected, fill mac_str (>=18) and ip_str
 // (>=16) and return true; else false. Always false on non-USB targets.

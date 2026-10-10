@@ -7,10 +7,14 @@
 // upstream is resolved per query, so DNS follows STA reconnects and never goes
 // stale in a client's DHCP lease.
 #include "dnsfwd.h"
+#include "supervisor.h"
+#include "netcore.h"
 #include <string.h>
 #include "lwip/sockets.h"
 #include "lwip/ip4_addr.h"
 #include "esp_netif.h"
+#include "esp_heap_caps.h"
+#include <stdlib.h>
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -47,12 +51,13 @@ typedef struct {
     bool     used;
 } cache_ent_t;
 
-static cache_ent_t s_cache[DNSFWD_CACHE_N];
+static cache_ent_t *s_cache;   // DNSFWD_CACHE_N entries, PSRAM when present (dnsfwd_start)
 static uint32_t s_cache_hits, s_cache_miss;
 
 // Serve from cache into `out` (capacity `cap`), preserving the caller's txn id.
 // Returns the reply length, or -1 on a miss.
 static int cache_get(const uint8_t *q, int qlen, uint32_t now, uint8_t *out, int cap) {
+    if (!s_cache) return -1;
     for (int i = 0; i < DNSFWD_CACHE_N; i++) {
         cache_ent_t *e = &s_cache[i];
         if (!e->used) continue;
@@ -68,7 +73,7 @@ static int cache_get(const uint8_t *q, int qlen, uint32_t now, uint8_t *out, int
 }
 
 static void cache_put(const uint8_t *q, int qlen, const uint8_t *resp, int rlen, uint32_t now) {
-    if (qlen <= 0 || qlen > DNSFWD_CACHE_QMAX || rlen <= 0 || rlen > DNSFWD_CACHE_RMAX) return;
+    if (!s_cache || qlen <= 0 || qlen > DNSFWD_CACHE_QMAX || rlen <= 0 || rlen > DNSFWD_CACHE_RMAX) return;
     if (!dnsfwd_cacheable(resp, rlen)) return;
 
     int ttl = dnsfwd_min_ttl(resp, rlen);
@@ -108,13 +113,20 @@ static void dnsfwd_task(void *arg) {
     int srv = socket(AF_INET, SOCK_DGRAM, 0);
     int up = socket(AF_INET, SOCK_DGRAM, 0);
     if (srv < 0 || up < 0) { ESP_LOGE(TAG, "socket() failed"); vTaskDelete(NULL); return; }
+    // Listen on the AID's own address (SoftAP / bridge), not INADDR_ANY: the
+    // uplink side is a cabin network shared with strangers, and an open
+    // resolver there is both an abuse vector and a way to crowd our slots.
     struct sockaddr_in sa = {0};
     sa.sin_family = AF_INET; sa.sin_addr.s_addr = htonl(INADDR_ANY); sa.sin_port = htons(53);
+    uint32_t mine = netcore_downstream_ip();
+    if (mine) sa.sin_addr.s_addr = mine;
     if (bind(srv, (struct sockaddr *)&sa, sizeof sa) < 0) ESP_LOGE(TAG, "bind :53 failed");
-    ESP_LOGI(TAG, "forwarder up on :53");
+    ESP_LOGI(TAG, "forwarder up on " IPSTR ":53", IP2STR((esp_ip4_addr_t *)&sa.sin_addr.s_addr));
 
     static uint8_t buf[1400];
+    sup_watch(SUP_DNSFWD, 30000);
     for (;;) {
+        sup_beat(SUP_DNSFWD);
         fd_set r; FD_ZERO(&r); FD_SET(srv, &r); FD_SET(up, &r);
         int mx = (srv > up ? srv : up) + 1;
         struct timeval tv = { .tv_sec = 1, .tv_usec = 0 };
@@ -154,6 +166,11 @@ static void dnsfwd_task(void *arg) {
             }
 
             uint32_t upa = upstream_addr();
+            if (len >= 12 && !upa) {            // no uplink resolver: fail fast
+                int rlen = dnsfwd_make_servfail(buf, len, (int)sizeof buf);
+                if (rlen > 0) sendto(srv, buf, rlen, 0, (struct sockaddr *)&ca, cl);
+                continue;
+            }
             if (len >= 12 && upa) {
                 int slot = -1;
                 for (int i = 0; i < DNSFWD_SLOTS; i++) if (!s_pend[i].used) { slot = i; break; }
@@ -169,7 +186,7 @@ static void dnsfwd_task(void *arg) {
                 memcpy(p->cip, &ca.sin_addr.s_addr, 4);
                 p->cport = ca.sin_port;
                 p->oid = (buf[0] << 8) | buf[1];
-                p->sid = sid; p->t0 = now; p->used = true;
+                p->sid = sid; p->t0 = now; p->used = true; p->upa = upa;
                 p->qlen = (uint16_t)((qlen > 0 && qlen <= DNSFWD_CACHE_QMAX) ? qlen : 0);
                 if (p->qlen) memcpy(p->q, buf + 12, p->qlen);
                 buf[0] = sid >> 8; buf[1] = sid & 0xFF;
@@ -180,12 +197,19 @@ static void dnsfwd_task(void *arg) {
         }
 
         if (n > 0 && FD_ISSET(up, &r)) {
-            int len = recvfrom(up, buf, sizeof buf, 0, NULL, NULL);
+            struct sockaddr_in fa; socklen_t fl = sizeof fa;
+            int len = recvfrom(up, buf, sizeof buf, 0, (struct sockaddr *)&fa, &fl);
             if (len >= 12) {
                 uint16_t sid = (buf[0] << 8) | buf[1];
                 int slot = dnsfwd_slot_of(sid);
                 dnsfwd_pend_t *p = &s_pend[slot];
-                if (p->used && p->sid == sid) {
+                // Only the resolver we asked, from :53, answering the question
+                // we asked: otherwise a guessed sid is enough to plant an answer
+                // in a cache every client shares for up to 5 min.
+                bool genuine = fa.sin_addr.s_addr == p->upa && fa.sin_port == htons(53) &&
+                               (!p->qlen || (len >= 12 + p->qlen &&
+                                dnsfwd_question_eq(buf + 12, p->qlen, p->q, p->qlen)));
+                if (p->used && p->sid == sid && genuine) {
                     buf[0] = p->oid >> 8; buf[1] = p->oid & 0xFF;  // restore client's id
                     struct sockaddr_in ca = {0};
                     ca.sin_family = AF_INET;
@@ -209,5 +233,8 @@ void dnsfwd_start(void *sta_netif, const char *client_dns_override) {
     if (client_dns_override && client_dns_override[0])
         strncpy(s_override, client_dns_override, sizeof s_override - 1);
     for (int i = 0; i < DNSFWD_SLOTS; i++) s_pend[i].used = false;
+    s_cache = heap_caps_calloc(DNSFWD_CACHE_N, sizeof *s_cache, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_cache) s_cache = calloc(DNSFWD_CACHE_N, sizeof *s_cache);
+    if (!s_cache) ESP_LOGE(TAG, "no RAM for the DNS cache - forwarding uncached");
     xTaskCreate(dnsfwd_task, "dnsfwd", 4096, NULL, 5, NULL);
 }

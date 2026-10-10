@@ -3,6 +3,7 @@
 #include "button.h"
 #include "board.h"
 #include "gps.h"
+#include "touch.h"
 #include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -24,7 +25,7 @@ static uint32_t       s_ovl_until;
 static uint32_t now_ms(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
 
 btn_overlay_t button_overlay(void) {
-    if (s_ovl != BTN_OVL_NONE && now_ms() >= s_ovl_until) s_ovl = BTN_OVL_NONE;
+    if (s_ovl != BTN_OVL_NONE && (int32_t)(now_ms() - s_ovl_until) >= 0) s_ovl = BTN_OVL_NONE;
     return s_ovl;
 }
 
@@ -50,9 +51,10 @@ static void on_long_press(void) {
     show(BTN_OVL_SOURCE, OVL_SOURCE_MS);
 }
 
+// Without a receiver the tap still answers, with the one thing every board
+// has: the uplink. Otherwise a touch-only board would have a dead screen.
 static void on_short_tap(void) {
-    if (!gps_available()) return;
-    show(BTN_OVL_DETAIL, OVL_DETAIL_MS);
+    show(gps_available() ? BTN_OVL_DETAIL : BTN_OVL_LINK, OVL_DETAIL_MS);
 }
 
 static void button_task(void *arg) {
@@ -64,7 +66,8 @@ static void button_task(void *arg) {
     bool     long_fired = false;
 
     for (;;) {
-        int raw = gpio_get_level(pin);
+        // Key and touch panel are one input: either one held = pressed.
+        int raw = (pin >= 0 && gpio_get_level(pin) == 0) || touch_pressed() ? 0 : 1;
         uint32_t t = now_ms();
 
         if (raw != last_raw) { last_raw = raw; last_change = t; }
@@ -92,17 +95,22 @@ static void button_task(void *arg) {
 
 void button_start(aidlink_cfg_t *cfg) {
     const board_t *b = board_get();
-    if (b->btn_gpio < 0) return;      // no user key on this model — stay inert
+    bool touch = touch_start();
+    if (b->btn_gpio < 0 && !touch) return;   // no input on this model — stay inert
 
     CFG = cfg;
-    gpio_config_t in = {
-        .pin_bit_mask = 1ULL << b->btn_gpio,
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_ENABLE,
-        .pull_down_en = GPIO_PULLDOWN_DISABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&in);
-    ESP_LOGI(TAG, "user key on GPIO%d (hold %d ms = swap source)", b->btn_gpio, LONG_MS);
-    xTaskCreate(button_task, "button", 3072, NULL, 4, NULL);
+    if (b->btn_gpio >= 0) {
+        gpio_config_t in = {
+            .pin_bit_mask = 1ULL << b->btn_gpio,
+            .mode = GPIO_MODE_INPUT,
+            .pull_up_en = GPIO_PULLUP_ENABLE,
+            .pull_down_en = GPIO_PULLDOWN_DISABLE,
+            .intr_type = GPIO_INTR_DISABLE,
+        };
+        gpio_config(&in);
+        ESP_LOGI(TAG, "user key on GPIO%d (hold %d ms = swap source)", b->btn_gpio, LONG_MS);
+    }
+    // 4 KB: the long press runs cfg_save() (NVS) on this stack, and the poll
+    // includes an I2C transaction on touch boards.
+    xTaskCreate(button_task, "button", 4096, NULL, 4, NULL);
 }

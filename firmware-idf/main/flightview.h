@@ -74,8 +74,8 @@ typedef struct {
     // while falling back. Layouts pick the glyph from this, never from config.
     fv_src_t source;
     fv_gq_t  gps_quality;   // meaningful only when source == FV_SRC_GPS
-    // Transient banner raised by the user key; empty strings when inactive.
-    int  overlay;            // 0 = none, 1 = source banner, 2 = GPS detail
+    // Transient banner raised by the user key or touch; empty when inactive.
+    int  overlay;            // 0 = none, 1 = source banner, 2 = GPS detail, 3 = uplink
     char overlay_l1[40], overlay_l2[40];
 } fv_status_t;
 

@@ -43,8 +43,12 @@ COOK="$(mktemp)"; trap 'rm -f "$COOK"' EXIT
 # --- authenticate, then force download-boot ----------------------------------
 curl -fsS -m 8 --interface "$IFACE" -c "$COOK" -o /dev/null \
      -X POST -d "u=$USER&p=$PASS" "http://$GW/login" || true
-code=$(curl -s -m 8 --interface "$IFACE" -b "$COOK" -o /dev/null -w '%{http_code}' "http://$GW/dfu")
-[ "$code" = "200" ] || { echo "/dfu returned $code — wrong password, or portal down"; exit 1; }
+# /dfu is two-step: GET returns a confirmation page with a single-use token,
+# POST with that token is what actually reboots into the downloader.
+TOK=$(curl -s -m 8 --interface "$IFACE" -b "$COOK" "http://$GW/dfu" | grep -oE "name='tok' value='[0-9a-f]+'" | grep -oE "[0-9a-f]{32}")
+[ -n "$TOK" ] || { echo "/dfu gave no confirmation token — wrong password, portal down, or pre-token firmware"; exit 1; }
+code=$(curl -s -m 8 --interface "$IFACE" -b "$COOK" -o /dev/null -w '%{http_code}' -X POST -d "tok=$TOK" "http://$GW/dfu")
+[ "$code" = "200" ] || { echo "/dfu POST returned $code"; exit 1; }
 echo "/dfu accepted — waiting for the ROM downloader"
 
 # --- wait for the ROM port ----------------------------------------------------

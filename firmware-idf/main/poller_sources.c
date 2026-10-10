@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 #include "cJSON.h"
 
 // --- ISO8601 "YYYY-MM-DDThh:mm:ss" -> epoch ms UTC (0 if unparseable) ---
@@ -19,11 +20,25 @@ static long days_from_civil(int y, int m, int d) {
     unsigned doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     return era * 146097 + (long)doe - 719468;
 }
+// Honours a trailing zone: "Z", "+0000", "+11:00", "-0530" (none = UTC).
+// The suffix used to be ignored, so a local-time stamp shifted the clock by
+// the zone offset.
 static uint64_t iso_to_epoch_ms(const char *s) {
-    int Y, Mo, D, h, mi, se;
-    if (!s || sscanf(s, "%d-%d-%dT%d:%d:%d", &Y, &Mo, &D, &h, &mi, &se) != 6) return 0;
+    int Y, Mo, D, h, mi, se, n = 0;
+    if (!s || sscanf(s, "%d-%d-%dT%d:%d:%d%n", &Y, &Mo, &D, &h, &mi, &se, &n) != 6) return 0;
+    if (Y < 1970 || Mo < 1 || Mo > 12 || D < 1 || D > 31 || h > 23 || mi > 59 || se > 60) return 0;
+    const char *z = s + n;
+    if (*z == '.') { z++; while (*z >= '0' && *z <= '9') z++; }   // fractional seconds
+    long off_s = 0;
+    if (*z == '+' || *z == '-') {
+        int oh = 0, om = 0;
+        if (sscanf(z + 1, "%2d:%2d", &oh, &om) == 2 || sscanf(z + 1, "%2d%2d", &oh, &om) == 2 ||
+            sscanf(z + 1, "%2d", &oh) == 1)
+            off_s = (oh * 3600L + om * 60L) * (*z == '-' ? -1 : 1);
+    }
     long days = days_from_civil(Y, Mo, D);
-    return ((uint64_t)days * 86400 + h * 3600 + mi * 60 + se) * 1000ULL;
+    int64_t t = (int64_t)days * 86400 + h * 3600 + mi * 60 + se - off_s;
+    return t > 0 ? (uint64_t)t * 1000ULL : 0;
 }
 
 // Viasat: field may be a nested object {"value":"X"} or a direct scalar. Return
@@ -39,7 +54,16 @@ static bool viasat_num(const cJSON *root, const char *key, double *out) {
     cJSON *v = viasat_scalar(root, key);
     if (!v) return false;
     if (cJSON_IsNumber(v)) { *out = v->valuedouble; return true; }
-    if (cJSON_IsString(v) && v->valuestring) { *out = atof(v->valuestring); return true; }
+    // A string must BE a number: "" or "N/A" used to read as 0 — a ground speed
+    // of 0 kt (dead reckoning off) or a 0,0 position. Absent is honest.
+    if (cJSON_IsString(v) && v->valuestring) {
+        char *end;
+        double d = strtod(v->valuestring, &end);
+        if (end == v->valuestring) return false;
+        while (*end == ' ') end++;
+        if (*end) return false;
+        *out = d; return true;
+    }
     return false;
 }
 static bool viasat_str(const cJSON *root, const char *key, char *out, size_t cap) {
@@ -58,7 +82,7 @@ bool poller_parse_viasat(const char *json, double *lat, double *lon, double *alt
     if (viasat_num(root, "latitude", &la) && viasat_num(root, "longitude", &lo)) {
         *lat = la; *lon = lo; ok = true;
         double t;
-        *alt = viasat_num(root, "altitude", &t) ? t : 0;
+        *alt = viasat_num(root, "altitude", &t) ? t : NAN;   // NAN = feed has none
         *gs = viasat_num(root, "groundSpeed", &t) ? t : -1;   // -1 => derive
         *track = 0; *have_track = false;                       // Viasat has no track
         viasat_str(root, "flightNumber", flight, 16);
@@ -135,10 +159,12 @@ bool poller_parse_panasonic(const char *json, double *lat, double *lon, double *
     if (slat && slon) {
         *lat = pan_ll(slat); *lon = pan_ll(slon); ok = true;
         const char *s;
-        *alt = (s = pan_str(root, "td_id_fltdata_altitude")) ? atof(s) : 0;
+        *alt = (s = pan_str(root, "td_id_fltdata_altitude")) ? atof(s) : NAN;
         *gs = (s = pan_str(root, "td_id_fltdata_ground_speed")) ? atof(s) : -1;
-        if ((s = pan_str(root, "td_id_fltdata_true_heading"))) { *track = atof(s); *have_track = true; }
-        else { *track = 0; *have_track = false; }
+        // true_heading is where the nose points, not where the aircraft goes: a
+        // 10-15 deg crab in a Pacific jet stream steered the EFB's dead reckoning
+        // 7-10 NM off over a 5-min hold. Track is derived from the fixes instead.
+        *track = 0; *have_track = false;
         if ((s = pan_str(root, "td_id_fltdata_flight_number"))) strncpy(flight, s, 15);
         if ((s = pan_str(root, "td_id_airframe_tail_number"))) strncpy(tail, s, 11);
         if ((s = pan_str(root, "td_id_airframe_model"))) strncpy(actype, s, 7);   // best-effort key

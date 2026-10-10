@@ -15,6 +15,11 @@
 #include "adbp.h"
 #include "gps.h"
 #include "button.h"
+#include "supervisor.h"
+#include "sdkconfig.h"
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+#include "esp_core_dump.h"
+#endif
 #include "poller.h"
 #include "services.h"
 #include "log.h"
@@ -40,6 +45,20 @@ void app_main(void) {
     cfg_load(&cfg);
     flog_init();               // persistent flash log (no-op without a flog partition)
     log_set_sink(flog_line);   // every captured logln line also lands on flash
+    // Capture from here on. It used to start in web_start() with the saved
+    // setting (off by default) and only came on in display_start(), so boot-
+    // time evidence — self-heal / supervisor restarts, a stored core dump,
+    // touch detection — was logged while capture was off and silently lost.
+    // Display boards always capture (display.c forces it too).
+    log_set_enable(cfg.log_enable || board_get()->panel != NULL);
+    supervisor_start();        // task liveness: restart on a hung adbp/poller/dnsfwd/display/gps
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+    {   // make a stored post-mortem visible in the flash log
+        size_t a, sz;
+        if (esp_core_dump_image_check() == ESP_OK && esp_core_dump_image_get(&a, &sz) == ESP_OK && sz)
+            logln("[boot] core dump stored (%u bytes) - download /coredump", (unsigned)sz);
+    }
+#endif
 
     // First-boot credential seed: default login admin / password (salted SHA-256).
     if (cfg.auth_hash[0] == 0) {
@@ -57,7 +76,7 @@ void app_main(void) {
     web_start(&cfg);
     adbp_start(&cfg);      // ARINC-834 ADBP position feed
     gps_start();           // wired GNSS receiver (boards that declare pins)
-    button_start(&cfg);    // user key: hold swaps position source
+    button_start(&cfg);    // user key + touch panel: hold swaps position source
     poller_start(&cfg);    // position source poller + emulator
     services_start(&cfg);  // mDNS: <dev_name>.local + service advertisement
     statusled_start();     // onboard RGB status LED (boards that have one)

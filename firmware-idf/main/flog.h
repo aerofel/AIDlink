@@ -22,7 +22,7 @@ bool flog_available(void);
 void flog_line(const char *line);
 
 // Stream the whole log oldest->newest as text chunks into emit(). Thread-safe.
-void flog_dump(void (*emit)(const char *chunk, int len, void *ctx), void *ctx);
+void flog_dump(bool (*emit)(const char *chunk, int len, void *ctx), void *ctx);
 
 // Erase everything and restart with a fresh boot marker.
 void flog_clear(void);

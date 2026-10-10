@@ -115,14 +115,21 @@ void flog_line(const char *line) {
     xSemaphoreGive(s_mux);
 }
 
-void flog_dump(void (*emit)(const char *chunk, int len, void *ctx), void *ctx) {
+void flog_dump(bool (*emit)(const char *chunk, int len, void *ctx), void *ctx) {
     if (!s_part) return;
-    xSemaphoreTake(s_mux, portMAX_DELAY);
     // Emit sectors in ascending seq order (== chronological write order).
     // O(n²) selection over ≤128 headers — trivial at dump time.
+    //
+    // The mutex covers one sector's selection + read, never emit(): emit sends
+    // over the network, and flog_line() — i.e. every logln() in ADBP, the
+    // display, the poller and the Wi-Fi event task — waits on this mutex. A
+    // client that stopped reading mid-dump used to stall them all for minutes.
+    // A sector recycled between passes carries a newer seq, so it is still
+    // emitted in order (or not at all), never twice.
     static uint8_t pay[FLOG_PAY_SIZE];
     uint32_t last_seq = 0;
     for (int pass = 0; pass < s_nsec; pass++) {
+        xSemaphoreTake(s_mux, portMAX_DELAY);
         int pick = -1; uint32_t pick_seq = 0;
         for (int i = 0; i < s_nsec; i++) {
             flog_hdr_t h;
@@ -130,14 +137,15 @@ void flog_dump(void (*emit)(const char *chunk, int len, void *ctx), void *ctx) {
             if (h.magic != FLOG_MAGIC || h.rsv != 0 || h.seq <= last_seq) continue;
             if (pick < 0 || h.seq < pick_seq) { pick = i; pick_seq = h.seq; }
         }
-        if (pick < 0) break;
+        if (pick < 0) { xSemaphoreGive(s_mux); break; }
         last_seq = pick_seq;
-        if (esp_partition_read(s_part, (size_t)pick * FLOG_SEC_SIZE + FLOG_HDR_SIZE,
-                               pay, sizeof pay) != ESP_OK) continue;
+        bool ok = esp_partition_read(s_part, (size_t)pick * FLOG_SEC_SIZE + FLOG_HDR_SIZE,
+                                     pay, sizeof pay) == ESP_OK;
+        xSemaphoreGive(s_mux);
+        if (!ok) continue;
         int used = flog_append_off(pay, sizeof pay);
-        if (used > 0) emit((const char *)pay, used, ctx);
+        if (used > 0 && !emit((const char *)pay, used, ctx)) break;   // client gone
     }
-    xSemaphoreGive(s_mux);
 }
 
 void flog_clear(void) {

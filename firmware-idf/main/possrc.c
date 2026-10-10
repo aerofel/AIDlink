@@ -25,3 +25,15 @@ void possrc_ident(char *dst, size_t cap, const char *feed, const char *manual) {
     while (n < cap - 1 && src[n]) { dst[n] = src[n]; n++; }
     dst[n] = 0;
 }
+
+bool possrc_gps_gate(gps_gate_t *g, bool fresh, int fix, double hdop, uint32_t now) {
+    bool good = fresh && fix == 3 && hdop > 0 && hdop <= GATE_IN_HDOP;
+    if (good && !g->good) g->good_since = now;
+    g->good = good;
+    if (g->live) {
+        if (!fresh || fix < 2 || !(hdop > 0 && hdop <= GATE_OUT_HDOP)) g->live = false;
+    } else if (good && (uint32_t)(now - g->good_since) >= GATE_IN_MS) {
+        g->live = true;
+    }
+    return g->live;
+}

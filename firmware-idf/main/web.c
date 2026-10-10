@@ -13,6 +13,8 @@
 #include "poller.h"
 #include "auth.h"
 #include "netcore.h"
+#include "lwip/sockets.h"
+#include "esp_netif.h"
 #include "dnsfwd.h"
 #include "pos.h"
 #include "poller.h"
@@ -21,6 +23,7 @@
 #include "log.h"
 #include "usb_ncm.h"
 #include "board.h"
+#include "touch.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -40,6 +43,10 @@
 #include "soc/rtc_cntl_reg.h"   // FORCE_DOWNLOAD_BOOT for /dfu
 #endif
 #include "esp_timer.h"
+#include "esp_flash.h"
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+#include "esp_core_dump.h"
+#endif
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "buildnum.h"
@@ -64,13 +71,16 @@ static void chunkf(httpd_req_t *r, const char *fmt, ...) {
     if (buf[0]) httpd_resp_sendstr_chunk(r, buf);
 }
 
-// v9 esc(): escapes only " < > &  (NOT ') — reproduce exactly for byte parity.
+// HTML-escape for text and attribute values. Escapes ' too: form fields are
+// single-quoted, and v9's unescaped ' truncated any value containing one — an
+// AP passphrase cut below 8 chars on the next Save silently made the AP OPEN.
 static char *esc(char *dst, size_t cap, const char *src) {
     size_t o = 0;
     for (const char *p = src ? src : ""; *p && o + 1 < cap; p++) {
         const char *rep = NULL;
         switch (*p) { case '"': rep = "&quot;"; break; case '<': rep = "&lt;"; break;
-                      case '>': rep = "&gt;"; break; case '&': rep = "&amp;"; break; default: break; }
+                      case '>': rep = "&gt;"; break; case '&': rep = "&amp;"; break;
+                      case '\'': rep = "&#39;"; break; default: break; }
         if (rep) { size_t rl = strlen(rep); if (o + rl + 1 > cap) break; memcpy(dst + o, rep, rl); o += rl; }
         else dst[o++] = *p;
     }
@@ -151,6 +161,15 @@ static void send_hw_card(httpd_req_t *r) {
                                   : (b->led == LED_GPIO ? " · GPIO status LED" : ""));
     hw_row(r, "Board", v);
 
+    // Runtime result, not the profile: the profile says a controller MAY be
+    // there, this row says whether it answered at boot.
+    if (b->touch != TOUCH_NONE) {
+        int id = touch_chip_id();
+        if (id >= 0) snprintf(v, sizeof v, "CST816 detected (chip id 0x%02X) · whole screen = user key", id);
+        else         snprintf(v, sizeof v, "not detected — touch disabled");
+        hw_row(r, "Touch", v);
+    }
+
     snprintf(v, sizeof v, "%s rev v%d.%d", model, ci.revision / 100, ci.revision % 100);
     hw_row(r, "Chip", v);
 
@@ -191,9 +210,9 @@ static void send_hw_card(httpd_req_t *r) {
     // MBEDTLS_DEFAULT_MEM_ALLOC) TLS all needed it, and the total above hides
     // an internal starvation behind 8 MB of PSRAM.
     snprintf(v, sizeof v, "%u KB free · %u KB min · %u KB largest block",
-             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >> 10),
-             (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >> 10),
-             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) >> 10));
+             (unsigned)(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT) >> 10),
+             (unsigned)(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT) >> 10),
+             (unsigned)(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT) >> 10));
     hw_row(r, "Heap (internal)", v);
 
     int64_t up_s = esp_timer_get_time() / 1000000;
@@ -495,9 +514,11 @@ static esp_err_t h_root(httpd_req_t *r) {
                  "empty — the feed always wins and overrides these. GNSS supplies no "
                  "identity at all, so without these a GPS-only unit has no tail, flight "
                  "number or route (and therefore no distance-to-go or ETA).<br>In use now: ");
-        chunkf(r, "tail <b>%s</b> · flight <b>%s</b> · route <b>%s</b> → <b>%s</b>",
-               ip.tail[0] ? ip.tail : "—", ip.flight[0] ? ip.flight : "—",
-               ip.orig[0] ? ip.orig : "—", ip.dest[0] ? ip.dest : "—");
+        // Feed-supplied strings: escape them like any other untrusted text.
+        char et[40], ef[40], eo[24], ed[24];
+        esc(et, sizeof et, ip.tail[0] ? ip.tail : "—");   esc(ef, sizeof ef, ip.flight[0] ? ip.flight : "—");
+        esc(eo, sizeof eo, ip.orig[0] ? ip.orig : "—");   esc(ed, sizeof ed, ip.dest[0] ? ip.dest : "—");
+        chunkf(r, "tail <b>%s</b> · flight <b>%s</b> · route <b>%s</b> → <b>%s</b>", et, ef, eo, ed);
         chunk(r, "</div></div>");
     }
 
@@ -512,7 +533,7 @@ static esp_err_t h_root(httpd_req_t *r) {
     chunk(r, "<div class='bar'><button type='submit'>Save &amp; reboot</button><button class='ghost' type='button' onclick='location.reload()'>Reload</button>");
 #if SOC_USB_SERIAL_JTAG_SUPPORTED
     chunk(r, "<button class='ghost' type='button' style='margin-left:auto' "
-             "onclick=\"if(confirm('Enter firmware update mode?\\n\\nThe device reboots into the USB bootloader and stays OFF the network until new firmware is flashed over the cable and RST is pressed once.'))location.href='/dfu'\">"
+             "onclick=\"location.href='/dfu'\">"
              "&#11014; Firmware update…</button>");
 #endif
     chunk(r, "</div></form>");
@@ -521,17 +542,19 @@ static esp_err_t h_root(httpd_req_t *r) {
     chunk(r, "<div class='card'><h2>📡 Device traffic log <span class='text-muted' style='font-weight:400;font-size:.7rem'>— ADBP + HTTP from EFB clients (auto-refresh)</span></h2>");
     chunk(r, "<textarea id='logbox' readonly style='width:100%;height:240px;background:#070d1a;border:1px solid var(--line);border-radius:8px;color:#9fe7f5;font-family:SF Mono,ui-monospace,monospace;font-size:.74rem;padding:.6rem;white-space:pre;overflow:auto'></textarea>");
     chunkf(r, "<div style='margin-top:.4rem;display:flex;gap:.5rem;align-items:center;flex-wrap:wrap'>"
-              "<label class='tog' style='margin:0'><input type='checkbox' id='logEn' %s onchange=\"fetch('/logtoggle?on='+(this.checked?1:0))\"><span>Live capture</span></label>"
+              "<label class='tog' style='margin:0'><input type='checkbox' id='logEn' %s onchange=\"fetch('/logtoggle',{method:'POST',body:'on='+(this.checked?1:0)})\"><span>Live capture</span></label>"
               "<button class='ghost' type='button' onclick='poll()'>Refresh</button>"
               "<button class='ghost' type='button' onclick='copyLog()'>📋 Copy</button>"
               "<a href='/log' target='_blank' style='color:var(--cy);font-size:.8rem'>open raw ↗</a>",
            c->log_enable ? "checked" : "");
     if (flog_available())
         chunkf(r, "<a href='/flog' target='_blank' style='color:var(--cy);font-size:.8rem'>⬇ flight log (%lu KB) ↗</a>"
-                  "<a href='/flog?clear=1' onclick=\"return confirm('Erase the persisted flight log?')\" "
+                  "<a href='#' onclick=\"if(confirm('Erase the persisted flight log?'))"
+                  "fetch('/flog',{method:'POST',body:'clear=1'}).then(function(){location.reload()});return false\" "
                   "style='color:var(--mut);font-size:.8rem'>clear</a>",
                (unsigned long)(flog_used_bytes() / 1024));
-    chunk(r, "</div><div class='note'>With <b>Live capture</b> on, every log line is also written to a "
+    chunk(r, "</div><div class='note'><b>Live capture</b> fills the traffic view above (it includes every "
+             "EFB/HTTP request). Independently of it, every event line is always written to a "
              "dedicated flash partition that survives reboots and power-off — pull <b>flight log</b> "
              "after a flight to analyse poll failures, position-state transitions and EFB pushes.</div></div>");
     chunk(r, "<footer><a href='/log' style='color:var(--cy)' target='_blank'>▸ traffic log (ADBP + HTTP probes)</a> · aidlink · ESP32 · ");
@@ -642,6 +665,43 @@ static esp_err_t h_login_get(httpd_req_t *r) {
     return ESP_OK;
 }
 
+// Failed-login tracking PER CLIENT: one global counter let any device on the
+// AP keep the crew locked out by failing five times every 30 s. Failures also
+// expire (LOGIN_FAIL_FORGET_MS), so scattered typos never add up to a lockout.
+#define LOGIN_SLOTS          8
+#define LOGIN_MAX_FAILS      5
+#define LOGIN_LOCK_MS        30000u
+#define LOGIN_FAIL_FORGET_MS 600000u
+typedef struct { uint32_t ip, last_ms, locked_until; uint8_t fails; } login_slot_t;
+static login_slot_t s_login[LOGIN_SLOTS];
+
+static uint32_t peer_ip4(httpd_req_t *r) {
+    struct sockaddr_storage ss; socklen_t sl = sizeof ss;
+    if (getpeername(httpd_req_to_sockfd(r), (struct sockaddr *)&ss, &sl) != 0) return 0;
+    if (ss.ss_family == AF_INET) return ((struct sockaddr_in *)&ss)->sin_addr.s_addr;
+    if (ss.ss_family == AF_INET6) {
+        uint32_t a; memcpy(&a, (const uint8_t *)&((struct sockaddr_in6 *)&ss)->sin6_addr + 12, 4);
+        return a;
+    }
+    return 0;
+}
+
+static login_slot_t *login_slot(uint32_t ip, uint32_t now) {
+    login_slot_t *free_s = NULL, *oldest = &s_login[0];
+    for (int i = 0; i < LOGIN_SLOTS; i++) {
+        login_slot_t *s = &s_login[i];
+        if (s->ip && (uint32_t)(now - s->last_ms) > LOGIN_FAIL_FORGET_MS &&
+            (int32_t)(now - s->locked_until) >= 0) memset(s, 0, sizeof *s);   // forgotten
+        if (s->ip == ip && ip) return s;
+        if (!s->ip && !free_s) free_s = s;
+        if ((int32_t)(s->last_ms - oldest->last_ms) < 0) oldest = s;
+    }
+    login_slot_t *s = free_s ? free_s : oldest;
+    memset(s, 0, sizeof *s);
+    s->ip = ip;
+    return s;
+}
+
 static esp_err_t h_login_post(httpd_req_t *r) {
     char body[256] = {0};
     int n = r->content_len < (int)sizeof body - 1 ? r->content_len : (int)sizeof body - 1;
@@ -651,14 +711,31 @@ static esp_err_t h_login_post(httpd_req_t *r) {
     web_form_field(body, "u", u, sizeof u);
     web_form_field(body, "p", p, sizeof p);
     bool remember = web_form_field(body, "remember", rem, sizeof rem);
+    // Lockout instead of a sleep: a vTaskDelay here stalled the single httpd
+    // task for every client (and a script could keep it stalled).
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    login_slot_t *ls = login_slot(peer_ip4(r), now);
+    if (ls->locked_until && (int32_t)(now - ls->locked_until) < 0) {
+        httpd_resp_set_status(r, "429 Too Many Requests");
+        httpd_resp_set_type(r, "text/plain; charset=utf-8");
+        httpd_resp_sendstr(r, "Too many failed logins - wait 30 s and try again.\n");
+        return ESP_OK;
+    }
     if (auth_login(CFG, u, p, remember, cookie, sizeof cookie)) {
+        memset(ls, 0, sizeof *ls);
         httpd_resp_set_status(r, "302 Found");
         httpd_resp_set_hdr(r, "Set-Cookie", cookie);
         httpd_resp_set_hdr(r, "Location", "/");
         httpd_resp_send(r, NULL, 0);
         return ESP_OK;
     }
-    vTaskDelay(pdMS_TO_TICKS(700));
+    ls->last_ms = now;
+    if (++ls->fails >= LOGIN_MAX_FAILS) {
+        ls->fails = 0;
+        ls->locked_until = now + LOGIN_LOCK_MS;
+        logln("[web] login locked for 30 s for " IPSTR " after %d failed attempts",
+              IP2STR((esp_ip4_addr_t *)&ls->ip), LOGIN_MAX_FAILS);
+    }
     send_login_form(r, true);
     return ESP_OK;
 }
@@ -688,7 +765,7 @@ static void fld_ip(const char *body, const char *k, char *dst, size_t cap) {
 static void reboot_task(void *arg) {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(600));   // let the response flush + socket close
-    esp_restart();
+    usb_ncm_restart();
 }
 
 static esp_err_t h_save(httpd_req_t *r) {
@@ -700,9 +777,46 @@ static esp_err_t h_save(httpd_req_t *r) {
     int off = 0, got;
     while (off < len && (got = httpd_req_recv(r, body + off, len - off)) > 0) off += got;
     body[off] = 0;
+    // A body cut short (link drop, recv timeout) reads every checkbox after the
+    // cut as OFF — NAPT, login, winds... — and would be saved and rebooted into.
+    if (off != len) {
+        free(body);
+        logln("[web] /save rejected: body %d of %d bytes", off, len);
+        httpd_resp_send_err(r, HTTPD_400_BAD_REQUEST, "incomplete form, nothing saved — retry");
+        return ESP_OK;
+    }
 
-    aidlink_cfg_t *c = CFG;
+    // Parse into a COPY and commit only if the whole form validates: a typo in
+    // the mask or a blank port used to be saved and rebooted into, leaving the
+    // unit unreachable over both the AP and the cable.
+    aidlink_cfg_t *c = malloc(sizeof *c);
+    if (!c) { free(body); httpd_resp_send_500(r); return ESP_OK; }
+    memcpy(c, CFG, sizeof *c);
+    static char err[700];
+    err[0] = 0;
+    int nerr = 0;
+    #define SAVE_ERR(msg) do { size_t o_ = strlen(err); \
+        snprintf(err + o_, sizeof err - o_, "%s%s", o_ ? "; " : "", (msg)); nerr++; } while (0)
     char v[160];
+    // Raw lengths BEFORE the strlcpy truncation: a 70-char password was saved
+    // cut to the login form's limit and could never be typed again.
+    static const struct { const char *k; size_t max; const char *what; } LIM[] = {
+        { "staSsid", 32, "Uplink SSID longer than 32" }, { "staPass", 64, "Uplink password longer than 64" },
+        { "apSsid", 32, "AP SSID longer than 32" },       { "apPass", 63, "AP passphrase longer than 63" },
+        { "authUser", 23, "Login user longer than 23" },  { "authPass", 63, "Login password longer than 63" },
+        { "devName", 31, "Device name longer than 31" },  { "vsUrl", 127, "Source URL longer than 127" },
+    };
+    for (unsigned i = 0; i < sizeof LIM / sizeof LIM[0]; i++)
+        if (fld(body, LIM[i].k, v, sizeof v) && strlen(v) > LIM[i].max) SAVE_ERR(LIM[i].what);
+    static const char *PORTS[] = { "adbpPort", "dsPort" };
+    for (unsigned i = 0; i < 2; i++) if (fld(body, PORTS[i], v, sizeof v)) {
+        // Text that cannot be stored in the u16 (garbage, > 65535). Empty or 0
+        // is reported by cfg_validate (the stored value is then 0).
+        char *end; long pv = strtol(v, &end, 10);
+        if (v[0] && (*end || pv < 0 || pv > 65535))
+            SAVE_ERR(i ? "EFB publish port must be 1-65535" : "ADBP port must be 1-65535");
+    }
+    bool pass_changed = false;
     if (fld(body, "staSsid", v, sizeof v)) strlcpy(c->sta_ssid, v, sizeof c->sta_ssid);
     if (fld(body, "staPass", v, sizeof v)) strlcpy(c->sta_pass, v, sizeof c->sta_pass);
     c->sta_dhcp = fld(body, "staDhcp", v, sizeof v);
@@ -761,7 +875,7 @@ static esp_err_t h_save(httpd_req_t *r) {
     if (fld(body, "authPass", v, sizeof v) && v[0]) {
         auth_rand_hex(c->auth_salt, 8);
         auth_hash(c->auth_salt, v, c->auth_hash);
-        auth_reset_session();
+        pass_changed = true;          // sessions are reset only once this commits
     }
     // clamps (v9)
     if (c->ap_max_clients < 1) c->ap_max_clients = 1;
@@ -772,11 +886,48 @@ static esp_err_t h_save(httpd_req_t *r) {
     if (c->ap_lease_min < 1) c->ap_lease_min = 1;
     if (c->poll_ms < 250) c->poll_ms = 250;
     if (c->poll_ms > 60000) c->poll_ms = 60000;
-    if (c->stale_ms < 1000) c->stale_ms = 1000;
-    if (c->dr_hold_ms > 3600000) c->dr_hold_ms = 3600000;   // DR is a bounded lie: cap 1 h
+    // stale_ms / dr_hold_ms are range-checked by cfg_validate (5-60 s, 0-600 s):
+    // the old 1 h clamp allowed an hour of straight-line DR marked valid.
     free(body);
 
-    cfg_save(c);
+    char verr[500];
+    if (cfg_validate(c, verr, sizeof verr)) {
+        size_t o_ = strlen(err);
+        snprintf(err + o_, sizeof err - o_, "%s%s", o_ ? "; " : "", verr);
+        nerr++;
+    }
+    #undef SAVE_ERR
+    if (nerr) {
+        free(c);
+        logln("[web] /save rejected: %.150s", err);
+        no_cache(r);
+        httpd_resp_set_status(r, "400 Bad Request");
+        httpd_resp_set_type(r, "text/html; charset=utf-8");
+        chunk(r, "<meta charset='utf-8'><meta name='viewport' content='width=device-width'>"
+                 "<body style='background:#070b14;color:#eaf2ff;font-family:system-ui;padding:12vh 16px 0;max-width:640px;margin:auto'>"
+                 "<h2 style='color:#f87171'>Not saved</h2><p>Nothing was changed. Fix these and save again:</p><ul>");
+        // one <li> per "; "-separated reason
+        for (char *s = err, *nx; s && *s; s = nx) {
+            nx = strstr(s, "; ");
+            if (nx) { *nx = 0; nx += 2; }
+            chunk(r, "<li>"); esc_chunk(r, s); chunk(r, "</li>");
+        }
+        chunk(r, "</ul><p><a href='javascript:history.back()' style='color:#22d3ee'>&larr; Back to the form</a></p></body>");
+        httpd_resp_sendstr_chunk(r, NULL);
+        return ESP_OK;
+    }
+
+    // Commit, and only reboot if the flash write actually succeeded: with NVS
+    // full the page used to say "Saved" and reboot into the OLD settings.
+    int cr = cfg_commit(CFG, c);    // swap + save under the config lock
+    free(c);
+    if (cr != 0) {
+        logln("[web] /save: NVS write FAILED - nothing applied");
+        httpd_resp_send_err(r, HTTPD_500_INTERNAL_SERVER_ERROR,
+                            "could not write the settings to flash - nothing changed");
+        return ESP_OK;
+    }
+    if (pass_changed) auth_reset_session();
     no_cache(r);
     httpd_resp_set_type(r, "text/html; charset=utf-8");
     // Same "Saved ✓" look as v9, but instead of a fixed meta-refresh (which races
@@ -794,7 +945,12 @@ static esp_err_t h_save(httpd_req_t *r) {
         "setTimeout(t,5000);</script></body>");
     // Reboot from a separate task so this handler returns and httpd closes the
     // connection cleanly (the client renders the page before we reset).
-    xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL);
+    if (xTaskCreate(reboot_task, "reboot", 2048, NULL, 5, NULL) != pdPASS) {
+        // No RAM for the helper task: the settings are saved but would only
+        // apply at the next power cycle. Restart from here instead.
+        vTaskDelay(pdMS_TO_TICKS(600));
+        usb_ncm_restart();
+    }
     return ESP_OK;
 }
 
@@ -839,6 +995,11 @@ static esp_err_t h_status(httpd_req_t *r) {
     uint32_t ih_free = 0, ih_blk = 0;
     poller_internal_heap(&ih_free, &ih_blk);
 
+    // Feed-supplied identity: a stray quote used to break the JSON and freeze
+    // the portal's status strip.
+    char jt[40], jf[40], jd[24], ja[24];
+    json_esc(jt, sizeof jt, p.tail[0] ? p.tail : CFG->ac_tail); json_esc(jf, sizeof jf, p.flight);
+    json_esc(jd, sizeof jd, dep); json_esc(ja, sizeof ja, arr);
     char json[1408];
     snprintf(json, sizeof json,
         "{\"dnshit\":%u,\"dnsmiss\":%u,\"inet\":\"%s\","
@@ -851,7 +1012,7 @@ static esp_err_t h_status(httpd_req_t *r) {
         up ? "true" : "false", ssid_e, netcore_ap_client_count(),
         valid ? "true" : "false", p.simulated ? "true" : "false",
         p.lat, p.lon, p.track_deg, p.gs_kt, p.alt_ft, staip,
-        p.tail[0] ? p.tail : CFG->ac_tail, p.flight, dep, arr,
+        jt, jf, jd, ja,
         pok ? "true" : "false", pollage, pmsg_e, (unsigned)poller_last_heap(),
         (unsigned)ih_free, (unsigned)ih_blk, (unsigned)poller_heal_count(),
         live == SRC_GPS ? "gps" : live == SRC_FEED ? "feed" : "none",
@@ -916,10 +1077,10 @@ static esp_err_t h_scan(httpd_req_t *r) {
 }
 
 // ---------- traffic log ----------
-static void log_emit(const char *line, void *ctx) {
+static bool log_emit(const char *line, void *ctx) {
     httpd_req_t *r = ctx;
-    httpd_resp_sendstr_chunk(r, line);
-    httpd_resp_sendstr_chunk(r, "\n");
+    return httpd_resp_sendstr_chunk(r, line) == ESP_OK &&
+           httpd_resp_sendstr_chunk(r, "\n") == ESP_OK;
 }
 static esp_err_t h_log(httpd_req_t *r) {
     if (!gate(r)) return ESP_OK;
@@ -931,19 +1092,11 @@ static esp_err_t h_log(httpd_req_t *r) {
 }
 // Persistent flash log: stream the whole flog partition (oldest first), or
 // erase it with ?clear=1. Auth-gated like everything else.
-static void flog_emit(const char *chunk_, int len, void *ctx) {
-    httpd_resp_send_chunk((httpd_req_t *)ctx, chunk_, len);
+static bool flog_emit(const char *chunk_, int len, void *ctx) {
+    return httpd_resp_send_chunk((httpd_req_t *)ctx, chunk_, len) == ESP_OK;
 }
 static esp_err_t h_flog(httpd_req_t *r) {
     if (!gate(r)) return ESP_OK;
-    char q[32] = {0}, v[4] = {0};
-    if (httpd_req_get_url_query_str(r, q, sizeof q) == ESP_OK &&
-        httpd_query_key_value(q, "clear", v, sizeof v) == ESP_OK && atoi(v)) {
-        flog_clear();
-        httpd_resp_set_type(r, "text/plain; charset=utf-8");
-        httpd_resp_sendstr(r, "flight log cleared\n");
-        return ESP_OK;
-    }
     httpd_resp_set_type(r, "text/plain; charset=utf-8");
     if (!flog_available()) { httpd_resp_sendstr(r, "(no flog partition)\n"); return ESP_OK; }
     flog_dump(flog_emit, r);
@@ -951,11 +1104,55 @@ static esp_err_t h_flog(httpd_req_t *r) {
     return ESP_OK;
 }
 
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+// Last panic's core dump, raw, for `esp-coredump info_corefile --core-format
+// raw --core aidlink-core.bin build/aidlink.elf`. Read-only; a new panic
+// overwrites it.
+static esp_err_t h_coredump(httpd_req_t *r) {
+    if (!gate(r)) return ESP_OK;
+    size_t addr = 0, size = 0;
+    if (esp_core_dump_image_check() != ESP_OK || esp_core_dump_image_get(&addr, &size) != ESP_OK || !size) {
+        httpd_resp_set_type(r, "text/plain; charset=utf-8");
+        httpd_resp_sendstr(r, "no core dump stored\n");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(r, "application/octet-stream");
+    httpd_resp_set_hdr(r, "Content-Disposition", "attachment; filename=\"aidlink-core.bin\"");
+    static char buf[1024];   // httpd is one task: one dump at a time
+    for (size_t off = 0; off < size; off += sizeof buf) {
+        size_t n = size - off < sizeof buf ? size - off : sizeof buf;
+        if (esp_flash_read(NULL, buf, addr + off, n) != ESP_OK) break;
+        if (httpd_resp_send_chunk(r, buf, n) != ESP_OK) return ESP_OK;   // client gone
+    }
+    httpd_resp_send_chunk(r, NULL, 0);
+    return ESP_OK;
+}
+#endif
+
+// POST only: a GET with a side effect can be fired by a prefetch or a restored
+// tab. on=0|1 in the body.
+// Erasing the flight log is POST-only (body clear=1): as a GET link, an iPad
+// long-press preview could erase it — and the erase blocks every logln().
+static esp_err_t h_flog_clear(httpd_req_t *r) {
+    if (!gate(r)) return ESP_OK;
+    char body[16] = {0}, v[4] = {0};
+    int n = r->content_len < (int)sizeof body - 1 ? r->content_len : (int)sizeof body - 1;
+    httpd_resp_set_type(r, "text/plain; charset=utf-8");
+    if (n > 0 && httpd_req_recv(r, body, n) > 0 && web_form_field(body, "clear", v, sizeof v) && atoi(v)) {
+        flog_clear();
+        httpd_resp_sendstr(r, "flight log cleared\n");
+    } else {
+        httpd_resp_set_status(r, "400 Bad Request");
+        httpd_resp_sendstr(r, "nothing done\n");
+    }
+    return ESP_OK;
+}
+
 static esp_err_t h_logtoggle(httpd_req_t *r) {
     if (!gate(r)) return ESP_OK;
-    char q[32] = {0}, on[4] = {0};
-    if (httpd_req_get_url_query_str(r, q, sizeof q) == ESP_OK &&
-        httpd_query_key_value(q, "on", on, sizeof on) == ESP_OK) {
+    char body[32] = {0}, on[4] = {0};
+    int n = r->content_len < (int)sizeof body - 1 ? r->content_len : (int)sizeof body - 1;
+    if (n > 0 && httpd_req_recv(r, body, n) > 0 && web_form_field(body, "on", on, sizeof on)) {
         CFG->log_enable = atoi(on) != 0;
         log_set_enable(CFG->log_enable);
         cfg_save(CFG);
@@ -980,7 +1177,7 @@ static void api_resp(httpd_req_t *r, const char *cmd, const char *inner) {
     snprintf(buf, sizeof buf,
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<Response commandName=\"%s\" returnCode=\"0\" timestamp=\"%s\">%s</Response>",
         cmd, ts, inner);
-    logln("WEBAPI %s -> 200", cmd);
+    logln_ram("WEBAPI %s -> 200", cmd);
     httpd_resp_set_type(r, "text/xml");
     httpd_resp_sendstr(r, buf);
 }
@@ -1003,24 +1200,70 @@ static void dfu_task(void *arg) {
     REG_WRITE(RTC_CNTL_OPTION1_REG, RTC_CNTL_FORCE_DOWNLOAD_BOOT);
     esp_restart();
 }
-static esp_err_t h_dfu(httpd_req_t *r) {
+// Two steps, so nothing a browser does on its own can fire it: GET only shows
+// a confirmation page carrying a fresh single-use token; POST with that token
+// acts. Once in the downloader the unit is off the network until someone
+// flashes it or presses RST — a restored/prefetched tab must never do that
+// in flight. The token dies after use, after DFU_TOKEN_MS, and at reboot.
+#define DFU_TOKEN_MS 120000u
+static char     s_dfu_tok[33];
+static uint32_t s_dfu_tok_ms;
+
+#define DFU_PAGE_HEAD "<meta charset='utf-8'><meta name='viewport' content='width=device-width'>" \
+    "<body style='background:#070b14;color:#eaf2ff;font-family:system-ui;text-align:center;padding:12vh 16px 0'>" \
+    "<h2 style='color:#fbbf24'>Firmware update mode</h2>"
+
+static esp_err_t h_dfu_get(httpd_req_t *r) {
     if (!gate(r)) return ESP_OK;
     no_cache(r);
+    auth_rand_hex(s_dfu_tok, 16);
+    s_dfu_tok_ms = (uint32_t)(esp_timer_get_time() / 1000);
     httpd_resp_set_type(r, "text/html; charset=utf-8");
-    httpd_resp_sendstr(r,
-        "<meta charset='utf-8'><body style='background:#070b14;color:#eaf2ff;"
-        "font-family:system-ui;text-align:center;padding-top:18vh'>"
-        "<h2 style='color:#fbbf24'>Firmware update mode</h2>"
+    chunk(r, DFU_PAGE_HEAD
+             "<p>The device reboots into the USB bootloader and stays <b>off the network</b> "
+             "until new firmware is flashed over the cable (and RST is pressed once if it does not restart).</p>");
+    if (adbp_feeding())
+        chunk(r, "<p style='color:#f87171;font-weight:700'>&#9888; An EFB is receiving position from "
+                 "this unit right now. It will lose ownship until the unit is back.</p>");
+    chunkf(r, "<form method='post' action='/dfu'><input type='hidden' name='tok' value='%s'>"
+              "<button style='font-size:1rem;padding:.7rem 1.4rem;border-radius:10px;border:none;"
+              "background:#fbbf24;color:#111;font-weight:800'>Enter update mode</button> "
+              "<a href='/' style='color:#8aa0c0;margin-left:1rem'>Cancel</a></form></body>", s_dfu_tok);
+    httpd_resp_sendstr_chunk(r, NULL);
+    return ESP_OK;
+}
+
+static esp_err_t h_dfu_post(httpd_req_t *r) {
+    if (!gate(r)) return ESP_OK;
+    char body[96] = {0}, tok[40] = {0};
+    int n = r->content_len < (int)sizeof body - 1 ? r->content_len : (int)sizeof body - 1;
+    int got = n > 0 ? httpd_req_recv(r, body, n) : 0;
+    if (got > 0) body[got] = 0;
+    web_form_field(body, "tok", tok, sizeof tok);
+    uint32_t now = (uint32_t)(esp_timer_get_time() / 1000);
+    bool ok = s_dfu_tok[0] && strcmp(tok, s_dfu_tok) == 0 && now - s_dfu_tok_ms < DFU_TOKEN_MS;
+    s_dfu_tok[0] = 0;                               // single use, pass or fail
+    no_cache(r);
+    httpd_resp_set_type(r, "text/html; charset=utf-8");
+    if (!ok) {
+        logln("[web] /dfu refused: stale or missing confirmation token");
+        httpd_resp_set_status(r, "403 Forbidden");
+        httpd_resp_sendstr(r, DFU_PAGE_HEAD "<p>Confirmation expired or already used — nothing done.</p>"
+                              "<p><a href='/dfu' style='color:#22d3ee'>Start again</a></p></body>");
+        return ESP_OK;
+    }
+    logln("[web] /dfu confirmed: rebooting into the USB bootloader");
+    httpd_resp_sendstr(r, DFU_PAGE_HEAD
         "<p>Rebooting into the USB bootloader — the device is now off the network.</p>"
-        "<p style='color:#8aa0c0'>Flash over the USB cable (<code>idf.py flash</code>), "
-        "then press <b>RST</b> once to boot the new firmware.</p></body>");
+        "<p style='color:#8aa0c0'>Flash over the USB cable (<code>tools/flash-aid.sh</code>), "
+        "then press <b>RST</b> once if it does not restart by itself.</p></body>");
     xTaskCreate(dfu_task, "dfu", 2048, NULL, 5, NULL);
     return ESP_OK;
 }
 #endif  // SOC_USB_SERIAL_JTAG_SUPPORTED
 
 static esp_err_t h_404(httpd_req_t *r, httpd_err_code_t e) {
-    logln("HTTP %s", r->uri);
+    logln_ram("HTTP %s", r->uri);
     httpd_resp_set_status(r, "404 Not Found");
     httpd_resp_set_type(r, "text/plain");
     httpd_resp_sendstr(r, "not found");
@@ -1032,11 +1275,26 @@ static void reg(const char *uri, httpd_method_t m, esp_err_t (*fn)(httpd_req_t *
     httpd_register_uri_handler(s_http, &u);
 }
 
+// Portal (and with it /dfu, /save, the logs) only for the AID side: the SoftAP
+// and the USB cable. A connection that reached us over the cabin uplink is
+// closed before any request is read.
+static esp_err_t web_on_open(httpd_handle_t hd, int fd) {
+    (void)hd;
+    if (netcore_sock_is_downstream(fd)) return ESP_OK;
+    static uint32_t s_refused;
+    if (s_refused++ % 50 == 0)
+        logln("[web] refused a connection from the uplink side (%lu so far)", (unsigned long)s_refused);
+    return ESP_FAIL;
+}
+
 void web_start(aidlink_cfg_t *cfg) {
     CFG = cfg;
-    log_set_enable(cfg->log_enable);
+    // Capture is decided once in app_main (saved setting, forced on for display
+    // boards); setting it here again switched it OFF on display boards between
+    // web_start() and display_start(), dropping every line logged in between.
     httpd_config_t hc = HTTPD_DEFAULT_CONFIG();
     hc.max_uri_handlers = 32;
+    hc.open_fn = web_on_open;
     hc.stack_size = 8192;
     hc.lru_purge_enable = true;
     // Cap the portal's share of the lwIP socket pool. The default is 7 of the
@@ -1051,7 +1309,11 @@ void web_start(aidlink_cfg_t *cfg) {
     reg("/scan", HTTP_GET, h_scan);
     reg("/log", HTTP_GET, h_log);
     reg("/flog", HTTP_GET, h_flog);
-    reg("/logtoggle", HTTP_GET, h_logtoggle);
+    reg("/flog", HTTP_POST, h_flog_clear);
+#if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
+    reg("/coredump", HTTP_GET, h_coredump);
+#endif
+    reg("/logtoggle", HTTP_POST, h_logtoggle);
     reg("/save", HTTP_POST, h_save);
     reg("/login", HTTP_GET, h_login_get);
     reg("/login", HTTP_POST, h_login_post);
@@ -1065,7 +1327,8 @@ void web_start(aidlink_cfg_t *cfg) {
     reg("/getAcarsStatus", HTTP_GET, h_api_acars);  reg("/getAcarsStatus", HTTP_POST, h_api_acars);
     reg("/cmdReboot", HTTP_GET, h_api_reboot);      reg("/cmdReboot", HTTP_POST, h_api_reboot);
 #if SOC_USB_SERIAL_JTAG_SUPPORTED
-    reg("/dfu", HTTP_GET, h_dfu);
+    reg("/dfu", HTTP_GET, h_dfu_get);
+    reg("/dfu", HTTP_POST, h_dfu_post);
 #endif
     httpd_register_err_handler(s_http, HTTPD_404_NOT_FOUND, h_404);
     ESP_LOGI(TAG, "[WEB] http://%s/", cfg->ap_ip);

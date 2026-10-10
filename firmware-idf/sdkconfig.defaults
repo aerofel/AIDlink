@@ -14,11 +14,51 @@ CONFIG_LWIP_IPV4_NAPT=y
 # fails and the socket-based servers die together while ICMP/NAPT keep working —
 # observed in flight 2026-07-24 as the ADBP push to Jeppesen FliteDeck failing,
 # so the aircraft position vanished while the feed and forwarding stayed healthy.
-# 16 is the lwIP maximum; it gives real headroom over the ~13-socket working set.
-CONFIG_LWIP_MAX_SOCKETS=16
+# 2026-10-05: 16 is NOT the lwIP maximum (IDF allows up to 253); the worst case
+# summed to exactly 16 (httpd 6, ADBP listener+accept+4 pushes, dnsfwd 2,
+# poller, probe) with zero headroom. 32 sockets / 32 active TCP pcbs: a few
+# hundred bytes of RAM.
+CONFIG_LWIP_MAX_SOCKETS=32
+CONFIG_LWIP_MAX_ACTIVE_TCP=32
+# UDP receive queue per socket (default 6): a page load across several AP
+# clients bursts DNS queries faster than one 1-s select() pass drains them.
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=16
+# lwIP's tcpip thread also runs NAPT + forwarding for every passenger packet;
+# the 10-min [mem] report showed 1276 B left of the 3 KB default on the bench
+# (no uplink, no NAT load). 4 KB for flight margin.
+CONFIG_LWIP_TCPIP_TASK_STACK_SIZE=4096
+
+# DHCP server lease table. The default (8) is below the /26 pool (60) and the
+# leases last 2 h: crew device changes plus iOS private-MAC rotation could
+# evict the EFB's own lease mid-flight (ADBP subscriptions are keyed by IP).
+CONFIG_LWIP_DHCPS_MAX_STATION_NUM=32
+
+# Event-loop task stack. Wi-Fi event handlers call logln(), which runs the
+# flash-log sink (two line buffers, snprintf, gmtime_r, a partition write or
+# sector erase) on THIS stack; the 2304-byte default left almost no margin,
+# and an overflow is a panic on an AP client joining.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# mDNS only on the AID side (services.c registers the S3 bridge); never on the
+# cabin uplink.
+# CONFIG_MDNS_PREDEF_NETIF_STA is not set
+
+# Watchdogs. The task WDT watches the idle tasks: if anything spins long enough
+# to starve idle on a core (LVGL's out-of-memory assert is a while(1)), that is
+# a hang, and a hang on an aircraft must end in a reboot, not a UART message
+# nobody reads. 10 s leaves margin over the longest legitimate CPU burst (a TLS
+# handshake). Application tasks are watched by supervisor.c.
+CONFIG_ESP_TASK_WDT_PANIC=y
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=10
+
+# Core dump to flash ("coredump" partition), downloadable at /coredump —
+# a panic in flight otherwise leaves only a reset reason behind.
+CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH=y
+CONFIG_ESP_COREDUMP_DATA_FORMAT_ELF=y
+CONFIG_ESP_COREDUMP_CHECKSUM_CRC32=y
 # TIME_WAIT drain rate. lwIP holds a closed connection for TCP_MSL, and the
-# socket/PCB pools above are only 16 entries and cannot be raised (16 IS the
-# lwIP maximum). At the 60 s default, a burst of failing polls parks far more
+# socket/PCB pools were then only 16 entries (32 since 2026-10-05). At the 60 s
+# default, a burst of failing polls parks far more
 # dead connections than the pool holds, every later socket() fails, and the
 # retries keep it saturated -- observed in flight as httpd going unreachable
 # for minutes while ICMP and NAPT stayed perfectly healthy, and only a reboot

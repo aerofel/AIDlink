@@ -7,6 +7,9 @@
 // the SoftAP clients are handled. Whole file compiles to a no-op where native USB
 // isn't available.
 #include "usb_ncm.h"
+#include "esp_system.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 
 #if CONFIG_SOC_USB_OTG_SUPPORTED
@@ -151,8 +154,15 @@ void usb_ncm_stop(void) {
     tinyusb_driver_uninstall();
 }
 
+void usb_ncm_restart(void) {
+    usb_ncm_stop();
+    vTaskDelay(pdMS_TO_TICKS(400));   // let the host see the detach
+    esp_restart();
+}
+
 #else  // no native USB (e.g. classic ESP32)
 void usb_ncm_start(const aidlink_cfg_t *c) { (void)c; }
 void usb_ncm_stop(void) {}
+void usb_ncm_restart(void) { esp_restart(); }
 bool usb_ncm_client(char *mac_str, char *ip_str) { (void)mac_str; (void)ip_str; return false; }
 #endif

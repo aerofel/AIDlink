@@ -9,17 +9,31 @@
 #include "adbp_frame.h"
 #include "pos.h"
 #include "log.h"
+#include "supervisor.h"
+#include "netcore.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <errno.h>
+#include <fcntl.h>
 #include "lwip/sockets.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
-#define MAX_SUBS 4   // push socket per EFB; the socket pool (16) can't feed more
+#define MAX_SUBS 4   // push socket per EFB (two crew iPads, each on Wi-Fi and cable)
+// A departed EFB (asleep, out of range, unplugged) never unsubscribes. Each
+// push attempt to it is a TCP connect that lwIP would otherwise retry for tens
+// of seconds while this single task serves every EFB, so connects are capped,
+// and after a few failures the dead subscriber is only retried every few
+// seconds. It keeps its slot — Jeppesen resumes by itself when the iPad comes
+// back — unless a new EFB needs the slot (see take_slot()).
+#define PUSH_CONNECT_MS   1000     // an iPad in Wi-Fi power save can take ~300 ms to answer
+#define PUSH_FAILS_SLOW   3        // consecutive failed connects before backing off
+#define PUSH_RETRY_SLOW_MS 5000
 static const char *TAG = "adbp";
 
 typedef struct {
@@ -33,9 +47,18 @@ typedef struct {
     int      sock;          // push socket (-1 = not connected)
     bool     was_connected;
     uint32_t push_count;
+    uint32_t fails;         // consecutive failed connects (0 = reachable)
+    uint32_t last_ok_ms;    // subscribe time, then last successful push
 } sub_t;
 
-static sub_t s_subs[MAX_SUBS];
+// Subscriptions and the XML work buffers (~22 KB) live in PSRAM where there is
+// some, allocated in adbp_start(): internal SRAM is the scarce resource here.
+static sub_t *s_subs;
+typedef struct {
+    char req[2048], body[3072], resp[4096];   // handle_request()
+    char pbody[3072], msg[4096];              // push_subs()
+} adbp_bufs_t;
+static adbp_bufs_t *B;
 static const aidlink_cfg_t *CFG;
 static volatile uint32_t s_push_seq;   // ++ on every frame pushed to an EFB
 
@@ -106,9 +129,34 @@ static void drop_subs_from_ip(uint32_t ip) {
     }
 }
 
+static void ip_str(uint32_t ip, char *out, size_t n) {
+    snprintf(out, n, "%u.%u.%u.%u", (unsigned)(ip & 0xFF), (unsigned)((ip >> 8) & 0xFF),
+             (unsigned)((ip >> 16) & 0xFF), (unsigned)((ip >> 24) & 0xFF));
+}
+
+// A free slot, or else the slot of the subscriber that has been unreachable the
+// longest. Without eviction, four EFBs that left without unsubscribing (an iPad
+// on Wi-Fi and on the cable counts twice) locked every new EFB out until reboot.
+static int take_slot(void) {
+    int victim = -1;
+    for (int i = 0; i < MAX_SUBS; i++) {
+        if (!s_subs[i].active) return i;
+        if (s_subs[i].fails &&
+            (victim < 0 || (int32_t)(s_subs[i].last_ok_ms - s_subs[victim].last_ok_ms) < 0))
+            victim = i;
+    }
+    if (victim >= 0) {
+        char ip[16]; ip_str(s_subs[victim].ip, ip, sizeof ip);
+        logln("[adbp] evicting unreachable subscriber %s (silent %lus) for a new EFB", ip,
+              (unsigned long)((now_ms() - s_subs[victim].last_ok_ms) / 1000));
+        if (s_subs[victim].sock >= 0) close(s_subs[victim].sock);
+    }
+    return victim;
+}
+
 static void handle_request(int cs, uint32_t peer_ip) {
-    static char req[2048], body[3072], resp[4096];
-    int n = read_request(cs, req, sizeof req);
+    char *req = B->req, *body = B->body, *resp = B->resp;
+    int n = read_request(cs, req, sizeof B->req);
     if (n <= 0) { close(cs); return; }
 
     char names[ADBP_MAXPARAMS][ADBP_MAXNAME];
@@ -124,14 +172,13 @@ static void handle_request(int cs, uint32_t peer_ip) {
     bool is_get   = strstr(req, "getParameters") || strstr(req, "getAvionicParameters");
     bool is_sub   = strstr(req, "subscribeAvionicParameters") != NULL;
     bool is_unsub = strstr(req, "unSubscribe") || strstr(req, "unsubscribe");
-    logln("ADBP %s (%d params) from %u.%u.%u.%u", method, np,
-          (unsigned)(peer_ip & 0xFF), (unsigned)((peer_ip >> 8) & 0xFF),
-          (unsigned)((peer_ip >> 16) & 0xFF), (unsigned)((peer_ip >> 24) & 0xFF));
+    char pip[16]; ip_str(peer_ip, pip, sizeof pip);
+    logln_ram("ADBP %s (%d params) from %s", method, np, pip);
 
     bool data_sent = false;   // drives the "data sent" LED blue-flash
     if (is_get && !is_sub) {
-        build_params(body, sizeof body, names, np, &miss);
-        adbp_wrap_resp(resp, sizeof resp, rmethod, miss ? 8 : 0, body);
+        build_params(body, sizeof B->body, names, np, &miss);
+        adbp_wrap_resp(resp, sizeof B->resp, rmethod, miss ? 8 : 0, body);
         data_sent = true;
     } else if (is_sub) {
         bool on_event = strstr(req, "OnEvent") != NULL;
@@ -139,29 +186,26 @@ static void handle_request(int cs, uint32_t peer_ip) {
         long per = adbp_tag_num(req, "refreshperiod", 5000); if (per < 100) per = 5000;
         drop_subs_from_ip(peer_ip);
         if (pport > 0) {
-            int idx = -1; for (int i = 0; i < MAX_SUBS; i++) if (!s_subs[i].active) { idx = i; break; }
+            int idx = take_slot();
             if (idx >= 0) {
                 sub_t *su = &s_subs[idx]; memset(su, 0, sizeof *su);
                 su->active = true; su->ip = peer_ip; su->port = (uint16_t)pport;
                 su->on_event = on_event; su->period_ms = per; su->sock = -1;
+                su->last_ok_ms = now_ms();
                 // store the space-separated param name list
                 int o = 0;
                 for (int i = 0; i < np && o < (int)sizeof(su->params) - ADBP_MAXNAME - 2; i++)
                     o += snprintf(su->params + o, sizeof(su->params) - o, "%s%s", i ? " " : "", names[i]);
-                ESP_LOGI(TAG, "subscribe from %u.%u.%u.%u:%ld per=%ldms onEvent=%d np=%d",
-                         (unsigned)(peer_ip & 0xFF), (unsigned)((peer_ip >> 8) & 0xFF),
-                         (unsigned)((peer_ip >> 16) & 0xFF), (unsigned)((peer_ip >> 24) & 0xFF),
-                         pport, per, on_event, np);
+                ESP_LOGI(TAG, "subscribe from %s:%ld per=%ldms onEvent=%d np=%d",
+                         pip, pport, per, on_event, np);
                 // The subscription mode decides which dropout path the EFB is
                 // exposed to (spec 2026-08-13) — record it where /log can see it.
-                logln("[adbp] subscribe %s per=%lums pubport=%ld np=%d from %u.%u.%u.%u",
-                      on_event ? "OnEvent" : "periodic", (unsigned long)per, pport, np,
-                      (unsigned)(peer_ip & 0xFF), (unsigned)((peer_ip >> 8) & 0xFF),
-                      (unsigned)((peer_ip >> 16) & 0xFF), (unsigned)((peer_ip >> 24) & 0xFF));
-            } else ESP_LOGW(TAG, "no free subscription slot");
+                logln("[adbp] subscribe %s per=%lums pubport=%ld np=%d from %s",
+                      on_event ? "OnEvent" : "periodic", (unsigned long)per, pport, np, pip);
+            } else logln("[adbp] no free subscription slot: %d EFBs already subscribed", MAX_SUBS);
         }
-        build_params(body, sizeof body, names, np, &miss);
-        adbp_wrap_resp(resp, sizeof resp, rmethod, 0, body);
+        build_params(body, sizeof B->body, names, np, &miss);
+        adbp_wrap_resp(resp, sizeof B->resp, rmethod, 0, body);
         data_sent = true;
     } else if (is_unsub) {
         long pport = adbp_tag_num(req, "publishport", 0);
@@ -170,9 +214,9 @@ static void handle_request(int cs, uint32_t peer_ip) {
                 if (s_subs[i].sock >= 0) close(s_subs[i].sock);
                 memset(&s_subs[i], 0, sizeof s_subs[i]); s_subs[i].sock = -1;
             }
-        adbp_wrap_resp(resp, sizeof resp, rmethod, 0, "<parameters></parameters>");
+        adbp_wrap_resp(resp, sizeof B->resp, rmethod, 0, "<parameters></parameters>");
     } else {
-        adbp_wrap_resp(resp, sizeof resp, "UnknownMethod", 2, "<parameters></parameters>");
+        adbp_wrap_resp(resp, sizeof B->resp, "UnknownMethod", 2, "<parameters></parameters>");
     }
 
     send(cs, resp, strlen(resp), 0);
@@ -196,7 +240,20 @@ static int connect_push(sub_t *su) {
     struct sockaddr_in a = {0};
     a.sin_family = AF_INET; a.sin_addr.s_addr = su->ip;
     a.sin_port = htons(su->port ? su->port : CFG->ds_port);
-    if (connect(s, (struct sockaddr *)&a, sizeof a) != 0) { close(s); return -1; }
+    // Non-blocking connect bounded by select(): lwIP ignores SO_SNDTIMEO for
+    // connect() and would sit through every SYN retry to an EFB that is gone.
+    int fl = fcntl(s, F_GETFL, 0);
+    fcntl(s, F_SETFL, fl | O_NONBLOCK);
+    int rc = connect(s, (struct sockaddr *)&a, sizeof a);
+    if (rc != 0 && errno == EINPROGRESS) {
+        fd_set w; FD_ZERO(&w); FD_SET(s, &w);
+        struct timeval ct = { .tv_sec = 0, .tv_usec = PUSH_CONNECT_MS * 1000 };
+        int err = 0; socklen_t el = sizeof err;
+        if (select(s + 1, NULL, &w, NULL, &ct) == 1 &&
+            getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0) rc = 0;
+    }
+    if (rc != 0) { close(s); return -1; }
+    fcntl(s, F_SETFL, fl);   // back to blocking; sends stay bounded by SO_SNDTIMEO
     int one = 1; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
     return s;
 }
@@ -204,7 +261,7 @@ static int connect_push(sub_t *su) {
 static void push_subs(void) {
     pos_state_t p; pos_get(&p);
     uint32_t cur_fix = p.last_fix_ms, now = now_ms();
-    static char body[3072], msg[4096];
+    char *body = B->pbody, *msg = B->msg;
 
     adbp_pstate_t st = adbp_classify(p.valid, p.last_fix_ms, now,
                                      CFG->stale_ms, CFG->dr_hold_ms);
@@ -227,8 +284,23 @@ static void push_subs(void) {
         if (!due) continue;
 
         if (su->sock < 0) {
+            if (su->fails >= PUSH_FAILS_SLOW && now - su->last_push_ms < PUSH_RETRY_SLOW_MS)
+                continue;
             su->sock = connect_push(su);
-            if (su->sock < 0) { su->last_push_ms = now; continue; }
+            if (su->sock < 0) {
+                if (su->fails++ == 0) {
+                    char ip[16]; ip_str(su->ip, ip, sizeof ip);
+                    logln("[adbp] EFB %s:%u unreachable, keeping its subscription", ip, su->port);
+                }
+                su->last_push_ms = now;
+                continue;
+            }
+            if (su->fails) {
+                char ip[16]; ip_str(su->ip, ip, sizeof ip);
+                logln("[adbp] EFB %s:%u reachable again after %lu failed connects", ip, su->port,
+                      (unsigned long)su->fails);
+                su->fails = 0;
+            }
             su->was_connected = true; su->push_count = 0;
         }
 
@@ -238,11 +310,11 @@ static void push_subs(void) {
         for (char *tok = strtok(tmp, " "); tok && np < ADBP_MAXPARAMS; tok = strtok(NULL, " "))
             strlcpy(names[np++], tok, ADBP_MAXNAME);
         bool miss;
-        build_params(body, sizeof body, names, np, &miss);
+        build_params(body, sizeof B->pbody, names, np, &miss);
 
         const char *method = su->on_event ? "onEventAvionicParameters" : "publishAvionicParameters";
         bool with_prolog = CFG->frame_prolog_each || su->push_count == 0;
-        int mlen = adbp_wrap_push(msg, sizeof msg, method, body, with_prolog, CFG);
+        int mlen = adbp_wrap_push(msg, sizeof B->msg, method, body, with_prolog, CFG);
         // delimiter
         char delim[3] = {0}; int dl = 0;
         switch (CFG->frame_delim) { case 1: delim[0]='\r'; delim[1]='\n'; dl=2; break;
@@ -250,7 +322,7 @@ static void push_subs(void) {
 
         int w = send(su->sock, msg, mlen, 0);
         if (w <= 0) { close(su->sock); su->sock = -1; su->was_connected = false; }
-        else { if (dl) send(su->sock, delim, dl, 0); su->push_count++; s_push_seq++; }
+        else { if (dl) send(su->sock, delim, dl, 0); su->push_count++; s_push_seq++; su->last_ok_ms = now; }
 
         su->last_push_ms = now; su->last_fix_seen = cur_fix; su->last_state = st;
     }
@@ -260,24 +332,32 @@ static void adbp_task(void *arg) {
     int ls = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1; setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
     struct sockaddr_in a = {0};
-    a.sin_family = AF_INET; a.sin_addr.s_addr = htonl(INADDR_ANY); a.sin_port = htons(CFG->adbp_port);
+    // The AID's own address, not INADDR_ANY: ADBP is for the EFB on the SoftAP
+    // or the cable. On the cabin uplink anyone could read ownship or take all
+    // MAX_SUBS slots (they never expire on their own).
+    uint32_t mine = netcore_downstream_ip();
+    a.sin_family = AF_INET; a.sin_addr.s_addr = mine ? mine : htonl(INADDR_ANY);
+    a.sin_port = htons(CFG->adbp_port);
     if (bind(ls, (struct sockaddr *)&a, sizeof a) != 0) { ESP_LOGE(TAG, "bind :%u failed", CFG->adbp_port); vTaskDelete(NULL); return; }
     listen(ls, 4);
     ESP_LOGI(TAG, "[ADBP] server on :%u", CFG->adbp_port);
 
+    sup_watch(SUP_ADBP, 30000);
     for (;;) {
+        sup_beat(SUP_ADBP);
         fd_set r; FD_ZERO(&r); FD_SET(ls, &r);
         struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };   // 200 ms -> ~5 Hz push cadence
         if (select(ls + 1, &r, NULL, NULL, &tv) > 0 && FD_ISSET(ls, &r)) {
             struct sockaddr_in ca; socklen_t cl = sizeof ca;
             int cs = accept(ls, (struct sockaddr *)&ca, &cl);
-            if (cs >= 0) handle_request(cs, ca.sin_addr.s_addr);
+            if (cs >= 0) handle_request(cs, ca.sin_addr.s_addr);   // bound to the AID IP: AP/cable only
         }
         push_subs();
     }
 }
 
 bool adbp_feeding(void) {
+    if (!s_subs) return false;
     uint32_t now = now_ms();
     for (int i = 0; i < MAX_SUBS; i++)
         if (s_subs[i].active && s_subs[i].push_count > 0 && now - s_subs[i].last_push_ms < 5000)
@@ -289,6 +369,11 @@ uint32_t adbp_push_seq(void) { return s_push_seq; }
 
 void adbp_start(const aidlink_cfg_t *cfg) {
     CFG = cfg;
+    s_subs = heap_caps_calloc(MAX_SUBS, sizeof *s_subs, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!s_subs) s_subs = calloc(MAX_SUBS, sizeof *s_subs);
+    B = heap_caps_malloc(sizeof *B, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!B) B = malloc(sizeof *B);
+    if (!s_subs || !B) { ESP_LOGE(TAG, "no RAM for ADBP buffers"); return; }
     for (int i = 0; i < MAX_SUBS; i++) s_subs[i].sock = -1;
     xTaskCreate(adbp_task, "adbp", 8192, NULL, 5, NULL);
 }
