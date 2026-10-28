@@ -141,6 +141,15 @@ USB mode:    USB-Serial/JTAG
   `MON-RF` AGC at 11 %. PPS measured at 1.000012 s, ~10 % duty.
 - **User key GPIO14** is now used: hold swaps the position source, tap shows GNSS
   detail. **Not** the flashing button — that is BOOT/GPIO0.
+- **BOOT GPIO0 is the power key** while the app runs (Boards 3 and 6): hold 1 s and
+  release = restart, hold 3 s = power off. "Off" is deep sleep with the LCD rail
+  (GPIO15) and backlight (GPIO38) latched low; either side button wakes it. There is
+  no hardware load switch on the battery, so only unplugging the JST is truly off.
+  Holding BOOT while tapping RST still enters the ROM downloader, as before.
+- **Battery sense GPIO4** (ADC1_CH3, 100k/100k): it reads the switched system rail,
+  so ~4.7 V on USB whether or not a cell is fitted, and the real cell voltage only
+  when running on battery. Charger TP4065 at 580 mA (R13); its CHRG pin is LED-only.
+  Same circuit on Board 6. Firmware gauge: `battery.c` / `batgauge.c`.
 - **Runs:** AIDlink ESP-IDF with the onboard **flight display** (tail, flight
   number, DEP→ARR, NM to arrival, UTC offset + local time at position).
 

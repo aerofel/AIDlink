@@ -26,6 +26,7 @@
 #include "flightview.h"
 #include "log.h"
 #include "supervisor.h"
+#include "battery.h"
 
 static const char *TAG = "disp";
 
@@ -54,6 +55,7 @@ static void display_task(void *arg)
     // this loop alone keeps running — the 2026-07-09 frozen-screen signature.
     sup_watch(SUP_DISPLAY, 30000);
     for (int tick = 0;; tick++) {
+        battery_poll();      // outside the LVGL lock: it may log
         if (lvgl_port_lock(100)) {
             lockfail = 0;
             sup_beat(SUP_DISPLAY);
@@ -79,6 +81,12 @@ static void display_task(void *arg)
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+}
+
+void display_off(void)
+{
+    const board_t *b = board_get();
+    if (b->panel && b->panel->off) b->panel->off();
 }
 
 void display_start(const aidlink_cfg_t *cfg)
@@ -128,4 +136,5 @@ void display_start(const aidlink_cfg_t *cfg)
 
 #else   // targets without the LCD peripheral (classic ESP32)
 void display_start(const aidlink_cfg_t *cfg) { (void)cfg; }
+void display_off(void) {}
 #endif

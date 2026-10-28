@@ -43,6 +43,13 @@ typedef struct {
     // Pins are only read when touch != TOUCH_NONE (rst -1 = not wired).
     touch_kind_t touch;
     int         touch_sda, touch_scl, touch_rst;
+    // Li-ion sense input: an ADC1 GPIO behind a 2:1 divider on the JST battery
+    // node, -1 when this model has none. A pin here only says the board CAN
+    // carry a battery — battery.c decides at runtime whether one is fitted.
+    int         bat_adc_gpio;
+    // Power key, -1 = none: hold 1 s and release = restart, hold 3 s = power
+    // off (deep sleep). Must be an RTC GPIO, since it also wakes the board.
+    int         pwr_btn_gpio;
 } board_t;
 
 // Identify the board from the eFuse base MAC. Never NULL; cached after the

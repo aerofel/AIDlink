@@ -24,6 +24,7 @@
 #include "usb_ncm.h"
 #include "board.h"
 #include "touch.h"
+#include "battery.h"
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -133,13 +134,34 @@ static void ff_tog(httpd_req_t *r, const char *lbl, const char *nm, bool v) {
 // ---- hardware/specs card (top of the config page) ----
 // Read-only info, so plain table rows (like the clients table) — the boxed
 // input look of the form fields would suggest the values are editable.
+// Battery & power panel. Emitted only on boards with a sense pin; hidden by the
+// status poll until a battery is known (battery.h), so a board without one
+// shows exactly the page it always did.
+static void send_battery_card(httpd_req_t *r) {
+    if (!battery_supported()) return;
+    battery_info_t bi;
+    battery_info(&bi);
+    chunk(r,
+             "<div class='card' id='bcard' style='display:none'><h2>🔋 Battery &amp; power</h2>"
+             "<div class='status' id='bgrid' style='margin-bottom:.6rem'></div>"
+             "<div class='note'>Measured only while running on battery: on USB this board's sense line reads the USB supply, not the cell. On USB the charge level and time to full are estimates from the charger's 580 mA rating, the configured capacity and the last level measured before plug-in. Current and power come from the measured drain rate × capacity.</div>"
+             "<div style='display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;margin-top:.7rem'>"
+             "<span class='k'>Capacity</span>");
+    chunkf(r, "<input type='number' id='bcap' min='0' max='20000' step='50' value='%d' style='width:7.5rem'>"
+              "<span class='note' style='margin:0'>mAh</span>"
+              "<button class='ghost' type='button' onclick='bSave()' style='padding:.5rem 1rem'>Save</button>"
+              "<span id='blearn' class='note' style='margin:0'></span>"
+              "<button class='ghost' type='button' onclick='bForget()' style='padding:.5rem 1rem;margin-left:auto'>No battery fitted</button>"
+              "</div></div>", bi.cap_mah);
+}
+
 static void hw_row(httpd_req_t *r, const char *lbl, const char *val) {
     chunkf(r, "<tr><td>%s</td><td>", lbl);
     esc_chunk(r, val);
     chunk(r, "</td></tr>");
 }
 static void send_hw_card(httpd_req_t *r) {
-    char v[128];
+    char v[200];
     esp_chip_info_t ci;
     esp_chip_info(&ci);
     const char *model = "ESP32?", *cpu = "Xtensa";
@@ -168,6 +190,25 @@ static void send_hw_card(httpd_req_t *r) {
         if (id >= 0) snprintf(v, sizeof v, "CST816 detected (chip id 0x%02X) · whole screen = user key", id);
         else         snprintf(v, sizeof v, "not detected — touch disabled");
         hw_row(r, "Touch", v);
+    }
+
+    // Gauge state plus the raw rail reading behind it (what batgauge.c is
+    // tuned against). Only on boards with a sense pin.
+    if (battery_supported()) {
+        battery_t bt;
+        battery_get(&bt);
+        int mv = bt.mv;
+        if (bt.ext_power)
+            snprintf(v, sizeof v, "USB power · rail %d.%02d V · %s", mv / 1000, (mv % 1000) / 10,
+                     bt.present ? "battery fitted, charging"
+                                : "battery not detected yet: the sense line only sees the cell "
+                                  "off USB, so unplug USB for ~10 s once (no battery: ignore)");
+        else if (bt.pct >= 0)
+            snprintf(v, sizeof v, "on battery · %d%% · %d.%02d V · ripple %d mV", bt.pct,
+                     mv / 1000, (mv % 1000) / 10, bt.ripple_mv);
+        else
+            snprintf(v, sizeof v, "settling · rail %d.%02d V", mv / 1000, (mv % 1000) / 10);
+        hw_row(r, "Battery", v);
     }
 
     snprintf(v, sizeof v, "%s rev v%d.%d", model, ci.revision / 100, ci.revision % 100);
@@ -354,6 +395,8 @@ static esp_err_t h_root(httpd_req_t *r) {
                  "<div class='s' id='gs2'><div class='k'>Satellites</div><div class='v' id='gsat'>…</div></div>"
                  "<div class='s' id='gc'><div class='k'>Constellations</div><div class='v' id='gcon' style='font-size:.8rem'>…</div></div>");
     chunk(r, "</div>");
+
+    send_battery_card(r);
 
     // hardware / ESP32 specs
     send_hw_card(r);
@@ -584,7 +627,39 @@ static esp_err_t h_root(httpd_req_t *r) {
              ".filter(x=>x[1]>0).map(x=>x[0]+' '+x[1]).join(' · ');"
              "gcon.textContent=cs||'—';"
              "}}"
+             "if(d.bat)ub(d.bat);"
              "}catch(e){}}");
+    if (battery_supported()) chunk(r,
+             "function fm(m){if(m==null||m<0)return'—';var h=Math.floor(m/60),n=m%60;return h?h+' h '+(n<10?'0':'')+n:n+' min';}"
+             "function bclk(m){return new Date(Date.now()+m*60000).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});}"
+             "function bcol(p){return p<5?'var(--rd)':p<10?'#ff8a00':p<20?'var(--am)':'var(--gr)';}"
+             "function ub(b){var c=document.getElementById('bcard');if(!c)return;c.style.display=b.present?'':'none';if(!b.present)return;"
+             "var t=[];"
+             "if(b.state=='battery'){"
+             "t.push(['Source',\"<span style='color:var(--am)'>Battery</span>\",'discharging']);"
+             "t.push(['Charge',\"<span style='color:\"+bcol(b.pct)+\"'>\"+b.pct+' %</span>','measured']);"
+             "t.push(['Cell voltage',(b.mv/1000).toFixed(2)+' V',b.min>0?'lowest '+(b.min/1000).toFixed(2)+' V · cut-off ≈ 3.40 V':'']);"
+             "t.push(['Drain rate',b.rate>0?(b.rate/10).toFixed(1)+' %/h':'measuring…',b.rate>0?(b.live?'measured':'typical, earlier run'):'needs ~5 min on battery']);"
+             "t.push(['Current draw',b.draw>=0?b.draw+' mA':'—',b.draw>=0?'estimated':(b.rate>0?'set the capacity below':'')]);"
+             "t.push(['Power',b.mw>=0?(b.mw/1000).toFixed(2)+' W':'—',b.mw>=0?'estimated':'']);"
+             "t.push(['Time left',fm(b.left),b.left>=0?'empty ≈ '+bclk(b.left):'']);"
+             "t.push(['Full-charge autonomy',fm(b.full),b.full>=0?'at this drain':'']);"
+             "t.push(['On battery',fm(Math.floor(b.ep/60)),'used '+(b.used/10).toFixed(1)+' % since unplug']);"
+             "}else if(b.state=='usb'){"
+             "t.push(['Source',\"<span style='color:var(--gr)'>USB power</span>\",b.chg>0?'charging':'charge complete (est.)']);"
+             "t.push(['Charge',b.est>=0?'≈ '+b.est+' %':'—',b.est>=0?'estimated':(b.cap>0?'level before plug-in unknown':'set the capacity below')]);"
+             "t.push(['Time to full',b.tofull>0?fm(b.tofull):(b.tofull==0?'full':'—'),b.tofull>=0?'estimated':'']);"
+             "t.push(['Charge current',b.chg+' mA',b.chg>0?'≈ '+(b.chgmw/1000).toFixed(1)+' W into the cell (rated)':'charger idle (est.)']);"
+             "t.push(['USB supply','≈ '+(b.vbus/1000).toFixed(2)+' V',b.vbus<4600?\"<span style='color:var(--am)'>weak port or cable</span>\":'healthy']);"
+             "t.push(['Plugged in',fm(Math.floor(b.ep/60)),'']);"
+             "t.push(['Full-charge autonomy',fm(b.full),b.full>=0?'at the typical drain':'unplug once to measure']);"
+             "if(b.draw>=0)t.push(['Typical draw',b.draw+' mA','on battery, earlier run']);"
+             "}else t.push(['Source','…','settling']);"
+             "document.getElementById('bgrid').innerHTML=t.map(function(x){return \"<div class='s'><div class='k'>\"+x[0]+\"</div><div class='v'>\"+x[1]+\"</div><div class='note'>\"+x[2]+\"</div></div>\";}).join('');"
+             "var l=document.getElementById('blearn');l.innerHTML=b.learned>0?'learned from the last charge: ≈ '+b.learned+\" mAh <a href='#' onclick='bUse(\"+b.learned+\");return false' style='color:var(--cy)'>use</a>\":'';}"
+             "function bSave(){fetch('/battery',{method:'POST',body:'mah='+(+document.getElementById('bcap').value||0)}).then(function(){poll();});}"
+             "function bUse(v){document.getElementById('bcap').value=v;bSave();}"
+             "function bForget(){if(confirm('Forget the battery? The gauge hides until the board next runs on battery.'))fetch('/battery',{method:'POST',body:'forget=1'}).then(function(){poll();});}");
     chunkf(r, "async function uc(){try{let r=await fetch('/clients');let a=await r.json();let tb=document.querySelector('#clit tbody');"
               "document.getElementById('clic').textContent='('+a.length+' / %d)';"
               "if(!a.length){tb.innerHTML=\"<tr><td colspan='4' class='empty'>no clients connected</td></tr>\";return;}"
@@ -1000,14 +1075,32 @@ static esp_err_t h_status(httpd_req_t *r) {
     char jt[40], jf[40], jd[24], ja[24];
     json_esc(jt, sizeof jt, p.tail[0] ? p.tail : CFG->ac_tail); json_esc(jf, sizeof jf, p.flight);
     json_esc(jd, sizeof jd, dep); json_esc(ja, sizeof ja, arr);
-    char json[1408];
+    // Battery block: only on boards with a sense pin (same idea as "gps").
+    char batj[460] = "";
+    if (battery_supported()) {
+        battery_info_t bi;
+        battery_info(&bi);
+        const batstats_out_t *o = &bi.s;
+        snprintf(batj, sizeof batj,
+            ",\"bat\":{\"present\":%s,\"state\":\"%s\",\"mv\":%d,\"ripple\":%d,\"pct\":%d,"
+            "\"min\":%d,\"rate\":%d,\"live\":%s,\"draw\":%d,\"mw\":%d,\"left\":%d,\"full\":%d,"
+            "\"ep\":%d,\"used\":%d,\"vbus\":%d,\"chg\":%d,\"chgmw\":%d,\"est\":%d,"
+            "\"tofull\":%d,\"cap\":%d,\"learned\":%d}",
+            bi.g.present ? "true" : "false",
+            o->state == BATG_ON_BATTERY ? "battery" : o->state == BATG_ON_USB ? "usb" : "unknown",
+            bi.g.mv, bi.g.ripple_mv, bi.g.pct, o->min_mv, o->rate_pph10,
+            o->rate_live ? "true" : "false", o->draw_ma, o->power_mw, o->left_min, o->full_min,
+            o->episode_s, o->used_pct10, o->vbus_mv, o->chg_ma, o->chg_mw, o->est_pct,
+            o->to_full_min, bi.cap_mah, o->learned_cap_mah);
+    }
+    char json[1900];
     snprintf(json, sizeof json,
         "{\"dnshit\":%u,\"dnsmiss\":%u,\"inet\":\"%s\","
         "\"sta\":%s,\"ssid\":\"%s\",\"clients\":%d,\"valid\":%s,\"sim\":%s,"
         "\"lat\":%.5f,\"lon\":%.5f,\"trk\":%.1f,\"gs\":%.1f,\"alt\":%.0f,\"staip\":\"%s\","
         "\"tail\":\"%s\",\"flight\":\"%s\",\"dep\":\"%s\",\"arr\":\"%s\","
         "\"pollok\":%s,\"pollage\":%ld,\"pollmsg\":\"%s\",\"heap\":%u,\"iheap\":%u,\"iblk\":%u,\"heal\":%u"
-        ",\"live_source\":\"%s\",\"pos_state\":\"%s\"%s}",
+        ",\"live_source\":\"%s\",\"pos_state\":\"%s\"%s%s}",
         (unsigned)dns_hit, (unsigned)dns_miss, netcore_inet_state_str(),
         up ? "true" : "false", ssid_e, netcore_ap_client_count(),
         valid ? "true" : "false", p.simulated ? "true" : "false",
@@ -1016,7 +1109,7 @@ static esp_err_t h_status(httpd_req_t *r) {
         pok ? "true" : "false", pollage, pmsg_e, (unsigned)poller_last_heap(),
         (unsigned)ih_free, (unsigned)ih_blk, (unsigned)poller_heal_count(),
         live == SRC_GPS ? "gps" : live == SRC_FEED ? "feed" : "none",
-        adbp_pos_state_str(), gpsj);
+        adbp_pos_state_str(), gpsj, batj);
     httpd_resp_set_type(r, "application/json");
     httpd_resp_sendstr(r, json);
     return ESP_OK;
@@ -1145,6 +1238,29 @@ static esp_err_t h_flog_clear(httpd_req_t *r) {
         httpd_resp_set_status(r, "400 Bad Request");
         httpd_resp_sendstr(r, "nothing done\n");
     }
+    return ESP_OK;
+}
+
+// Battery panel actions: capacity (mah=N, 0 = unknown) or forget=1.
+static esp_err_t h_battery(httpd_req_t *r) {
+    if (!gate(r)) return ESP_OK;
+    char body[48] = {0}, v[12] = {0};
+    int n = r->content_len < (int)sizeof body - 1 ? r->content_len : (int)sizeof body - 1;
+    httpd_resp_set_type(r, "text/plain; charset=utf-8");
+    if (battery_supported() && n > 0 && httpd_req_recv(r, body, n) > 0) {
+        if (web_form_field(body, "mah", v, sizeof v)) {
+            battery_set_capacity(atoi(v));
+            httpd_resp_sendstr(r, "ok\n");
+            return ESP_OK;
+        }
+        if (web_form_field(body, "forget", v, sizeof v) && atoi(v)) {
+            battery_forget();
+            httpd_resp_sendstr(r, "ok\n");
+            return ESP_OK;
+        }
+    }
+    httpd_resp_set_status(r, "400 Bad Request");
+    httpd_resp_sendstr(r, "nothing done\n");
     return ESP_OK;
 }
 
@@ -1314,6 +1430,7 @@ void web_start(aidlink_cfg_t *cfg) {
     reg("/coredump", HTTP_GET, h_coredump);
 #endif
     reg("/logtoggle", HTTP_POST, h_logtoggle);
+    reg("/battery", HTTP_POST, h_battery);
     reg("/save", HTTP_POST, h_save);
     reg("/login", HTTP_GET, h_login_get);
     reg("/login", HTTP_POST, h_login_post);

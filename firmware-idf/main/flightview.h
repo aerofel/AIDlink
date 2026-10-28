@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include "config.h"
 #include "gpsqual.h"
+#include "batgauge.h"
 
 // Slow-changing content, rebuilt at ~2 Hz.
 typedef struct {
@@ -75,8 +76,11 @@ typedef struct {
     fv_src_t source;
     fv_gq_t  gps_quality;   // meaningful only when source == FV_SRC_GPS
     // Transient banner raised by the user key or touch; empty when inactive.
-    int  overlay;            // 0 = none, 1 = source banner, 2 = GPS detail, 3 = uplink
+    int  overlay;            // 0 = none, 1 = source banner, 2 = GPS detail, 3 = uplink,
+                             // 4..7 = power key (restart / power off prompts)
     char overlay_l1[40], overlay_l2[40];
+    // Li-ion gauge; .present stays false on boards without a battery
+    battery_t battery;
 } fv_status_t;
 
 // Call once before the first build (stores cfg, zeroes the estimators).

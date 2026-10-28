@@ -33,6 +33,12 @@ static const char *TAG = "panel.st7789";
 
 static bool st7789_init(lvgl_port_display_cfg_t *cfg)
 {
+    // Coming back from power-off (deep sleep), the rail and backlight pins are
+    // still latched low by st7789_off(); a held pin ignores every write.
+    gpio_hold_dis(PIN_PWR_ON);
+    gpio_hold_dis(PIN_BL);
+    gpio_deep_sleep_hold_dis();
+
     // Power + control strap pins first: rail on, RD parked high.
     gpio_config_t gc = {
         .pin_bit_mask = (1ULL << PIN_PWR_ON) | (1ULL << PIN_RD) | (1ULL << PIN_BL),
@@ -120,10 +126,23 @@ static void st7789_ready(void)
     DLOG("backlight on (%dx%d, i80 @ %d MHz)", LCD_H, LCD_V, LCD_PCLK_HZ / 1000000);
 }
 
+// Power-off: backlight dark, LCD rail (and with it the battery-sense divider
+// and the green power LED) cut, both latched through deep sleep so floating
+// pads cannot half-light the panel while the board is "off".
+static void st7789_off(void)
+{
+    gpio_set_level(PIN_BL, 0);
+    gpio_set_level(PIN_PWR_ON, 0);
+    gpio_hold_en(PIN_BL);
+    gpio_hold_en(PIN_PWR_ON);
+    gpio_deep_sleep_hold_en();
+}
+
 const panel_drv_t panel_st7789 = {
     .name = "st7789-320x170-i80",
     .init = st7789_init,
     .ready = st7789_ready,
+    .off = st7789_off,
 };
 
 #endif // CONFIG_IDF_TARGET_ESP32S3

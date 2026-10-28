@@ -8,6 +8,11 @@ set(srcs "aidlink_main.c" "config.c" "config_util.c"
          "flog.c" "flog_core.c"
          "statusled.c" "board.c" "display.c" "airports.c"
          "tzdb.c" "tzdb_data.c" "derive.c" "eta.c" "font_arrow.c" "font_cloud.c" "font_tod.c" "font_eta.c"
+         "font_batt.c" "font_bolt.c"
+         # Li-ion gauge: pure estimator + ADC driver (no-op without a sense pin)
+         "batgauge.c" "batstats.c" "battery.c"
+         # power key: restart / power-off (deep sleep)
+         "power.c"
          "perfdb.c" "perfdb_data.c" "eta_profile.c"
          # board-independent view model + the per-board panel/layout drivers
          "flightview.c"
@@ -22,7 +27,9 @@ set(reqs nvs_flash esp_wifi esp_netif esp_event lwip
          # classic ESP32 build stopped compiling when gps.c landed because
          # these only came in through the S3-only "driver" line below.
          esp_driver_gpio esp_driver_uart
-         espcoredump spi_flash)
+         espcoredump spi_flash
+         # oneshot ADC for the battery gauge (exists on every target)
+         esp_adc)
 
 # TinyUSB (USB-NCM) only exists on targets with native USB-OTG.
 if(CONFIG_SOC_USB_OTG_SUPPORTED)

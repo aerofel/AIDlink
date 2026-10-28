@@ -8,3 +8,5 @@
 #include "config.h"
 
 void display_start(const aidlink_cfg_t *cfg);
+// Dark and unpowered for power-off (deep sleep). No-op without a display.
+void display_off(void);

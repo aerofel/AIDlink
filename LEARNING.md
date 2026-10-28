@@ -1,5 +1,54 @@
 # AIDlink — Learning Journal
 
+## 2026-10-28 — Battery gauge on the T-Display-S3: the sense pin is NOT the battery
+
+- **GPIO4 (100k/100k) measures the switched system rail, not the cell.** LilyGO's
+  schematic labels it `BAT`, but that net is the drain of Q2 (SI2301) on the `+5V`
+  rail, fed from VBUS through a 1N5819 or from the cell through Q4 (SI2307). Board 6
+  with a cell fitted read a flat **4.74 V, ripple 5 mV** on USB. So on USB the reading
+  says "external power" and nothing about the cell or whether one is fitted; only off
+  USB is it the real cell voltage. The TP4065 CHRG pin only drives the red LED.
+- Consequence for the design: percentage is shown only on battery; on USB the icon
+  is a bolt with a looping green pour. "Battery fitted" is learned (NVS `battery/seen`)
+  the first time the unit runs on it, cleared on a power-on reset while on USB and by
+  the portal's "No battery fitted". **On this chip an EN/RST reset also reports
+  `ESP_RST_POWERON`**, so RST while on USB forgets the cell until the next unplug.
+- Measure before designing: the first version assumed the divider sat on the cell
+  and detected "no battery" from charger saw-tooth ripple. Reading the portal's raw
+  rail value on the real board disproved it in one look.
+- **LVGL 4bpp `fmt_txt` glyphs are packed continuously, not per row.** A generator
+  that pads each row to a byte shears odd-width glyphs (the bolt split in two at
+  W=9). Keep generated glyph widths even. `font_cloud.c` (W=17) has the same packing
+  and renders sheared in the host simulator, worth checking on the panel.
+- **Host-rendering the real layout works:** compile LVGL with
+  `-DLV_CONF_KCONFIG_EXTERNAL_INCLUDE=<sdkconfig.h>` against `build/config`, a stub
+  `esp_lvgl_port.h`, and a bigger `CONFIG_LV_MEM_SIZE` (64-bit pointers overflow the
+  32 KB pool → NULL memset in `lv_draw_sw_mask_rect`). Diffing old vs new layout frames
+  proved the no-battery screen is pixel-identical.
+- `if(CONFIG_IDF_TARGET_ESP32S3)` in `main/CMakeLists.txt` is not evaluated during
+  requirement expansion, so a component added only there (esp_adc) is missing from
+  the include path. Put it in the common `reqs`.
+- Device cost: LVGL pool 51 % with the gauge (47 % before), app +8 KB.
+- **Power key on BOOT (GPIO0).** Safe to use at runtime and as a deep-sleep wake
+  source: straps latch at chip reset, and a deep-sleep wake is only a core reset
+  (`RESET_REASON_CORE_DEEP_SLEEP`). The key is ignored until it has been seen released
+  after boot, so the wake press cannot start a new hold. ext1 wake is level-triggered,
+  so power-off waits for the release. Pins latched with `gpio_hold_en` through sleep
+  must be released (`gpio_hold_dis`) at the next init, or every write is ignored.
+- **`tud_mounted()` stays true after the USB cable is pulled** on a battery-powered
+  S3: esp_tinyusb runs without VBUS monitoring (`vbus_monitor_io = -1`), so the DCD
+  never gets a detach event. Using it as "USB present" pinned the gauge to "on USB"
+  forever. Use `tud_mounted() && !tud_suspended()`, and let the measured rail win.
+
+## 2026-10-17 — Reading the running build off a unit
+
+- `/status` JSON carries no build field. The build string (`<sha> bNN <date> <time>`)
+  appears only on the authenticated `/` page (header plus the `>bNN<` badge), so log in
+  over en12 and grep that page. The login page shows nothing.
+- The sha is `git describe` at *build* time, so a unit built just before a commit shows
+  the parent sha + `-dirty` (b131 reads `bdabb96-dirty` though it is 99eedc3). Match on
+  `bNN` + timestamp against `strings build/aidlink.bin`, not on the sha.
+
 ## 2026-10-10 — Network side in flight (build 131): DNS cache was nearly useless
 
 - **DNS cache hit rate was ~1 %** (15 hits / 1455 misses). The cabin resolver

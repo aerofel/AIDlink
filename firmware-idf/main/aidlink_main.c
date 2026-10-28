@@ -27,6 +27,7 @@
 #include "statusled.h"
 #include "board.h"
 #include "display.h"
+#include "battery.h"
 
 static const char *TAG = "aidlink";
 static aidlink_cfg_t cfg;   // static: consulted by the web server for the device's lifetime
@@ -80,5 +81,6 @@ void app_main(void) {
     poller_start(&cfg);    // position source poller + emulator
     services_start(&cfg);  // mDNS: <dev_name>.local + service advertisement
     statusled_start();     // onboard RGB status LED (boards that have one)
+    battery_start();       // Li-ion gauge ADC (boards with a sense pin)
     display_start(&cfg);   // onboard flight display (boards that have one)
 }

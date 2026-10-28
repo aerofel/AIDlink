@@ -31,6 +31,8 @@ typedef struct panel_drv_s {
     bool (*init)(lvgl_port_display_cfg_t *cfg);
     // Called once after the first frame has been rendered. Backlight on, etc.
     void (*ready)(void);
+    // Optional: dark and unpowered before deep sleep, kept so through it.
+    void (*off)(void);
 } panel_drv_t;
 
 typedef struct layout_drv_s {

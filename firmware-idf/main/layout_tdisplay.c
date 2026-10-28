@@ -23,6 +23,8 @@ LV_FONT_DECLARE(font_arrow);   // U+27A4 arrowhead
 LV_FONT_DECLARE(font_cloud);   // U+2601 internet icon
 LV_FONT_DECLARE(font_tod);     // U+2198 top-of-descent
 LV_FONT_DECLARE(font_eta);     // U+25CE arrival bullseye
+LV_FONT_DECLARE(font_batt);    // Montserrat Bold 12 digits, inside the battery
+LV_FONT_DECLARE(font_bolt);    // U+26A1 lightning bolt, inside the battery on USB
 
 // palette (avionics-flavored, matches the web portal where possible)
 #define COL_GREY    0x9E9E9E
@@ -43,6 +45,10 @@ LV_FONT_DECLARE(font_eta);     // U+25CE arrival bullseye
 #define COL_LOGO_CY 0x22D3EE   // portal --cy: "AID"
 #define COL_LOGO_GR 0x34D399   // portal --gr: "link"
 #define COL_MUTED   0x8AA0C0   // portal --mut: build number
+#define COL_ORANGE  0xFF8A00   // battery < 10 %: clearly apart from yellow and red
+#define COL_BAT_BODY 0x262626  // battery interior (empty part)
+#define COL_BAT_EDGE 0x9E9E9E  // battery outline + terminal nub
+#define COL_BAT_INK  0x101010  // digits over the coloured fill
 
 #define TRIP_X 8
 #define TRIP_W 254
@@ -50,6 +56,8 @@ LV_FONT_DECLARE(font_eta);     // U+25CE arrival bullseye
 static lv_obj_t *s_tail, *s_actype, *s_tz, *s_clock;
 static lv_obj_t *s_wifi_arc[3], *s_wifi_dot;
 static lv_obj_t *s_globe, *s_feed, *s_sat;
+// battery: body > {light text, clip > {fill, dark text}} + nub
+static lv_obj_t *s_bat, *s_bat_nub, *s_bat_txt, *s_bat_clip, *s_bat_fill, *s_bat_txt_ink;
 static lv_obj_t *s_ovl_bg, *s_ovl_l1, *s_ovl_l2;
 static lv_obj_t *sg_brand, *s_build, *s_ip;
 static lv_span_t *sp_br_aid, *sp_br_link;
@@ -98,6 +106,161 @@ static void vis(lv_obj_t *o, bool on) {
     else    lv_obj_add_flag(o, LV_OBJ_FLAG_HIDDEN);
 }
 
+// --- bottom status row -------------------------------------------------------
+// Without a battery the row is exactly what it always was. With one, the
+// battery takes the Wi-Fi fan's old slot, the icons shift right, and both
+// clocks step from 24 to 20 px to make the room (worst case "00:00:00" on both
+// clocks still leaves ~6 px either side of the icon cluster).
+typedef struct { int bat_x, wifi_cx, globe_x, feed_x; } status_row_t;
+static const status_row_t ROW_PLAIN   = { -1,  137, 156, 186 };
+static const status_row_t ROW_BATTERY = { 112, 158, 173, 200 };
+#define WIFI_CY 156
+
+// battery icon: 27x15 body, 1 px outline, 1 px gap, 23x11 interior
+#define BAT_Y   145
+#define BAT_W   27
+#define BAT_H   15
+#define BAT_IN  2              // interior inset (outline + gap)
+#define BAT_IW  (BAT_W - 2 * BAT_IN)
+#define BAT_IH  (BAT_H - 2 * BAT_IN)
+#define BAT_TXT_Y 3            // 9 px digits, one fill row above and below
+
+static bool s_row_bat = true;   // forces the first place_status_row()
+
+static void place_status_row(bool battery)
+{
+    if (battery == s_row_bat) return;
+    s_row_bat = battery;
+    const status_row_t *r = battery ? &ROW_BATTERY : &ROW_PLAIN;
+    for (int i = 0; i < 3; i++) {
+        int d = 8 + i * 6;
+        lv_obj_set_pos(s_wifi_arc[i], r->wifi_cx - d / 2, WIFI_CY - d / 2);
+    }
+    lv_obj_set_pos(s_wifi_dot, r->wifi_cx - 2, WIFI_CY - 2);
+    lv_obj_set_pos(s_globe, r->globe_x, 144);
+    lv_obj_set_pos(s_feed, r->feed_x, 142);
+    lv_obj_set_pos(s_sat, r->feed_x, 142);
+    vis(s_bat, battery);
+    vis(s_bat_nub, battery);
+
+    lv_style_set_text_font(lv_span_get_style(sp_utc_t), battery ? &lv_font_montserrat_20 : &lv_font_montserrat_24);
+    lv_style_set_text_font(lv_span_get_style(sp_utc_z), battery ? &lv_font_montserrat_16 : &lv_font_montserrat_20);
+    lv_obj_align(sg_utc, LV_ALIGN_BOTTOM_LEFT, 8, battery ? -6 : -4);
+    lv_spangroup_refresh(sg_utc);
+    lv_obj_set_style_text_font(s_clock, battery ? &lv_font_montserrat_20 : &lv_font_montserrat_24, 0);
+    lv_obj_align(s_clock, LV_ALIGN_BOTTOM_RIGHT, -8, battery ? -5 : -2);
+}
+
+static lv_obj_t *mkrect(lv_obj_t *parent, int x, int y, int w, int h, uint32_t hex)
+{
+    lv_obj_t *o = lv_obj_create(parent);
+    lv_obj_remove_style_all(o);              // no theme padding, border or scrollbar
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_set_pos(o, x, y);
+    lv_obj_set_size(o, w, h);
+    lv_obj_set_style_bg_color(o, lv_color_hex(hex), 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+    return o;
+}
+
+static lv_obj_t *mkbattxt(lv_obj_t *parent, int x, int y, uint32_t hex)
+{
+    lv_obj_t *l = lv_label_create(parent);
+    lv_obj_set_style_text_font(l, &font_batt, 0);
+    lv_obj_set_style_text_color(l, lv_color_hex(hex), 0);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_long_mode(l, LV_LABEL_LONG_MODE_CLIP);
+    lv_obj_set_width(l, BAT_IW);
+    lv_obj_set_pos(l, x, y);
+    lv_label_set_text(l, "");
+    return l;
+}
+
+// iPhone-style battery. The number is drawn twice at the same spot: light on
+// the dark body, and dark inside a clip box that is exactly as wide as the
+// fill. Each digit therefore reads against whatever is behind it, even where
+// the fill edge cuts through it. No masks or gradients: nothing here touches
+// the LVGL pool after build (see LEARNING.md 2026-07-09).
+static void build_battery(lv_obj_t *scr)
+{
+    s_bat = mkrect(scr, ROW_BATTERY.bat_x, BAT_Y, BAT_W, BAT_H, COL_BAT_BODY);
+    lv_obj_set_style_radius(s_bat, 3, 0);
+    lv_obj_set_style_border_width(s_bat, 1, 0);
+    lv_obj_set_style_border_color(s_bat, lv_color_hex(COL_BAT_EDGE), 0);
+    lv_obj_set_style_border_opa(s_bat, LV_OPA_COVER, 0);
+    s_bat_nub = mkrect(scr, ROW_BATTERY.bat_x + BAT_W + 1, BAT_Y + 5, 2, BAT_H - 10, COL_BAT_EDGE);
+    lv_obj_set_style_radius(s_bat_nub, 1, 0);
+
+    s_bat_txt  = mkbattxt(s_bat, BAT_IN, BAT_TXT_Y, COL_WHITE);
+    s_bat_clip = mkrect(s_bat, BAT_IN, BAT_IN, 0, BAT_IH, 0);
+    lv_obj_set_style_bg_opa(s_bat_clip, LV_OPA_TRANSP, 0);
+    s_bat_fill = mkrect(s_bat_clip, 0, 0, BAT_IW, BAT_IH, COL_GREEN);
+    s_bat_txt_ink = mkbattxt(s_bat_clip, 0, BAT_TXT_Y - BAT_IN, COL_BAT_INK);
+    vis(s_bat, false);
+    vis(s_bat_nub, false);
+}
+
+
+static void bat_sweep_cb(void *obj, int32_t w) { lv_obj_set_width(obj, w); }
+
+// Two pictures, because the sense rail only sees the cell on battery:
+//   on battery - the measured percentage over a static fill, coloured by level;
+//   on USB     - a bolt, and a green fill that pours from empty to full,
+//                holds, and repeats (iPhone-style "charging"). There is no
+//                number: the cell cannot be measured while USB feeds the rail.
+static void set_bat_text(const char *t, bool bolt)
+{
+    const lv_font_t *f = bolt ? &font_bolt : &font_batt;
+    int y = bolt ? BAT_IN : BAT_TXT_Y;
+    lv_obj_set_style_text_font(s_bat_txt, f, 0);
+    lv_obj_set_style_text_font(s_bat_txt_ink, f, 0);
+    lv_obj_set_y(s_bat_txt, y);
+    lv_obj_set_y(s_bat_txt_ink, y - BAT_IN);
+    lv_label_set_text(s_bat_txt, t);
+    lv_label_set_text(s_bat_txt_ink, t);
+}
+
+static void battery_status(const battery_t *b)
+{
+    // -2 = nothing drawn yet, -1 = charging picture, 0..100 = level picture
+    static int shown = -2;
+
+    place_status_row(b->present);
+    if (!b->present) {
+        if (shown == -1) lv_anim_delete(s_bat_clip, bat_sweep_cb);
+        shown = -2;
+        return;
+    }
+    int want = b->pct >= 0 ? (b->pct > 100 ? 100 : b->pct) : (b->charging ? -1 : shown);
+    if (want == shown || want == -2) return;
+    if (shown == -1) lv_anim_delete(s_bat_clip, bat_sweep_cb);
+    shown = want;
+
+    if (want == -1) {
+        set_bat_text("\xE2\x9A\xA1", true);
+        lv_obj_set_style_bg_color(s_bat_fill, lv_color_hex(COL_GREEN), 0);
+        lv_anim_t a;
+        lv_anim_init(&a);
+        lv_anim_set_var(&a, s_bat_clip);
+        lv_anim_set_exec_cb(&a, bat_sweep_cb);
+        lv_anim_set_values(&a, 0, BAT_IW);
+        lv_anim_set_duration(&a, 1600);
+        lv_anim_set_repeat_delay(&a, 700);
+        lv_anim_set_repeat_count(&a, LV_ANIM_REPEAT_INFINITE);
+        lv_anim_set_path_cb(&a, lv_anim_path_ease_in_out);
+        lv_anim_start(&a);
+        return;
+    }
+    char t[4];
+    snprintf(t, sizeof t, "%d", want);
+    set_bat_text(t, false);
+    uint32_t col = want < 5 ? COL_RED : want < 10 ? COL_ORANGE : want < 20 ? COL_YELLOW : COL_GREEN;
+    lv_obj_set_style_bg_color(s_bat_fill, lv_color_hex(col), 0);
+    int w = (want * BAT_IW + 50) / 100;
+    if (want > 0 && w == 0) w = 1;               // a sliver, never "empty" at 1-2 %
+    lv_obj_set_width(s_bat_clip, w);
+}
+
 static void tdisp_build(lv_display_t *disp)
 {
     lv_obj_t *scr = lv_display_get_screen_active(disp);
@@ -108,12 +271,11 @@ static void tdisp_build(lv_display_t *disp)
 
     // status icon row: bottom line center, between the UTC readout (left) and
     // the local clock (right) — Wi-Fi fan · cloud (internet) · upload (feed)
-    const int wcx = 137, wcy = 156;
+    // (positions: place_status_row(), at the end of the build)
     for (int i = 0; i < 3; i++) {
         int d = 8 + i * 6;                     // arc diameters 8 / 14 / 20
         lv_obj_t *a = lv_arc_create(scr);
         lv_obj_set_size(a, d, d);
-        lv_obj_set_pos(a, wcx - d / 2, wcy - d / 2);
         lv_arc_set_bg_angles(a, 225, 315);     // top-quarter fan
         lv_obj_remove_style(a, NULL, LV_PART_KNOB);
         lv_obj_set_style_arc_opa(a, LV_OPA_TRANSP, LV_PART_INDICATOR);
@@ -124,7 +286,6 @@ static void tdisp_build(lv_display_t *disp)
     }
     s_wifi_dot = lv_obj_create(scr);
     lv_obj_set_size(s_wifi_dot, 4, 4);
-    lv_obj_set_pos(s_wifi_dot, wcx - 2, wcy - 2);
     lv_obj_set_style_radius(s_wifi_dot, LV_RADIUS_CIRCLE, 0);
     lv_obj_set_style_border_width(s_wifi_dot, 0, 0);
     lv_obj_set_style_bg_color(s_wifi_dot, lv_color_hex(COL_DIMMED), 0);
@@ -139,6 +300,7 @@ static void tdisp_build(lv_display_t *disp)
     s_sat = mklabel(scr, &lv_font_montserrat_16, COL_DIMMED, LV_ALIGN_TOP_LEFT, 186, 142);
     lv_label_set_text(s_sat, LV_SYMBOL_GPS);
     lv_obj_add_flag(s_sat, LV_OBJ_FLAG_HIDDEN);
+    build_battery(scr);
 
     // User-key overlay: a centred plate that covers the flight view for a
     // couple of seconds. Built once, shown on demand.
@@ -247,6 +409,8 @@ static void tdisp_build(lv_display_t *disp)
     sg_utc   = mkspangroup(scr, LV_ALIGN_BOTTOM_LEFT, 8, -4);
     sp_utc_t = addspan(sg_utc, &lv_font_montserrat_24, COL_MAGENTA);
     sp_utc_z = addspan(sg_utc, &lv_font_montserrat_20, COL_GREY);
+
+    place_status_row(false);   // no battery until battery.c says otherwise
 }
 
 static void tdisp_render(const flightview_t *v)
@@ -362,6 +526,8 @@ static void tdisp_render(const flightview_t *v)
 // Upload: magenta flash whenever a location is RECEIVED from the feed.
 static void tdisp_status(const fv_status_t *s)
 {
+    battery_status(&s->battery);
+
     uint32_t lit;
     int nlit = 3;
     switch (s->link) {

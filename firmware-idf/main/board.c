@@ -28,6 +28,7 @@ static const board_t PROF_S3_DEVKIT = {
     // free on this unit (octal PSRAM uses 33-37, native USB uses 19/20), unlike
     // the T3-S3 where 21 is QWIIC SCL + LoRa DIO3.
     .gps_rx = 16, .gps_tx = 12, .gps_pps = 21, .btn_gpio = -1,
+    .bat_adc_gpio = -1, .pwr_btn_gpio = -1,
 };
 
 static const board_t PROF_TDISPLAY_S3 = {
@@ -41,6 +42,11 @@ static const board_t PROF_TDISPLAY_S3 = {
     // but NOT on the T3-S3 (QWIIC SCL + LoRa DIO3).
     .gps_rx = 16, .gps_tx = 12, .gps_pps = 21,
     .btn_gpio = 14,                   // user key, unused by the rest of the firmware
+    // BAT -> 100k/100k -> GPIO4 (ADC1_CH3), always connected (LilyGO schematic)
+    .bat_adc_gpio = 4,
+    // BOOT (GPIO0) is free once the app runs: it is a strapping pin only at
+    // chip reset, and a deep-sleep wake is a core reset, so waking on it is safe
+    .pwr_btn_gpio = 0,
 };
 
 // Same panel, pins and layout as the plain T-Display-S3 — the Touch variant
@@ -54,6 +60,8 @@ static const board_t PROF_TDISPLAY_S3_TOUCH = {
     .gps_rx = -1, .gps_tx = -1, .gps_pps = -1,
     .btn_gpio = 14,
     .touch = TOUCH_CST816, .touch_sda = 18, .touch_scl = 17, .touch_rst = 21,
+    .bat_adc_gpio = 4,                           // same divider as Board 3
+    .pwr_btn_gpio = 0,                           // BOOT, as on Board 3
 };
 
 static const board_t PROF_T3S3 = {
@@ -64,6 +72,8 @@ static const board_t PROF_T3S3 = {
     .led = LED_GPIO, .led_gpio = 37,
     // 17/18 are the OLED I2C and 21 is QWIIC SCL + LoRa DIO3 — no GNSS here.
     .gps_rx = -1, .gps_tx = -1, .gps_pps = -1, .btn_gpio = -1,
+    // GPIO1 senses the battery here, but the mono OLED layout has no gauge yet
+    .bat_adc_gpio = -1, .pwr_btn_gpio = -1,
 };
 
 // --- fleet registry (see ESP32-BOARDS.md) ------------------------------------
@@ -88,6 +98,7 @@ static const board_t GENERIC = {
     .name = "generic", .panel = NULL, .layout = NULL,
     .led = LED_WS2812, .led_gpio = 48,
     .gps_rx = -1, .gps_tx = -1, .gps_pps = -1, .btn_gpio = -1,
+    .bat_adc_gpio = -1, .pwr_btn_gpio = -1,
 };
 
 const board_t *board_get(void) {

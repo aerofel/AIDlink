@@ -8,6 +8,7 @@
 #include "gps.h"
 #include "button.h"
 #include "poller.h"
+#include "battery.h"
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -268,6 +269,8 @@ void flightview_status(fv_status_t *s)
         }
     }
 
+    battery_get(&s->battery);
+
     // User-key overlay. Text is composed here, like everything else the layouts
     // draw — they place glyphs and never format.
     s->overlay = 0;
@@ -314,5 +317,20 @@ void flightview_status(fv_status_t *s)
         int n = netcore_ap_client_count();
         snprintf(s->overlay_l2, sizeof s->overlay_l2, "INTERNET %s  %d client%s",
                  s->internet ? "ok" : "--", n, n == 1 ? "" : "s");
+    } else if (ovl == BTN_OVL_PWR_RESTART) {
+        s->overlay = 4;
+        strlcpy(s->overlay_l1, "RELEASE TO RESTART", sizeof s->overlay_l1);
+        strlcpy(s->overlay_l2, "keep holding to power off", sizeof s->overlay_l2);
+    } else if (ovl == BTN_OVL_PWR_OFF_HOLD) {
+        s->overlay = 5;
+        strlcpy(s->overlay_l1, "RELEASE TO POWER OFF", sizeof s->overlay_l1);
+        strlcpy(s->overlay_l2, "press a side button to turn on", sizeof s->overlay_l2);
+    } else if (ovl == BTN_OVL_PWR_OFF) {
+        s->overlay = 6;
+        strlcpy(s->overlay_l1, "POWERING OFF", sizeof s->overlay_l1);
+        strlcpy(s->overlay_l2, "press a side button to turn on", sizeof s->overlay_l2);
+    } else if (ovl == BTN_OVL_RESTARTING) {
+        s->overlay = 7;
+        strlcpy(s->overlay_l1, "RESTARTING", sizeof s->overlay_l1);
     }
 }
