@@ -85,5 +85,13 @@ CONFIG_LV_MEM_SIZE_KILOBYTES=0
 # internal before the first client). 2026-09-19: the Viasat poller (the ONLY
 # TLS user on the device) died for 2 h+ with fast ESP_ERR_HTTP_CONNECT while
 # every plain-HTTP path -- probe, httpd, laptop through our NAT -- was fine.
-# Verify it landed: grep 'MBEDTLS_DEFAULT_MEM_ALLOC 1' build/config/sdkconfig.h
-CONFIG_MBEDTLS_DEFAULT_MEM_ALLOC=y
+#
+# 2026-11-02: CUSTOM, PSRAM FIRST (tls_calloc in main/memwatch.c, registered at boot).
+# DEFAULT still sent every mbedTLS allocation <= 4 KB (SPIRAM_MALLOC_ALWAYSINTERNAL)
+# to internal SRAM first, so each TLS reconnect and every Wi-Fi WPA2 join
+# (mbedTLS crypto) took ~20 KB of internal heap: the flash log shows the
+# internal low-water at a few KB -- once 112 B -- in most long sessions, while
+# phones failed to get a DHCP lease. PSRAM first, internal as fallback keeps
+# the 09-19 guarantee and still works on a board that booted without PSRAM.
+# Verify it landed: grep 'MBEDTLS_CUSTOM_MEM_ALLOC 1' build/config/sdkconfig.h
+CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC=y

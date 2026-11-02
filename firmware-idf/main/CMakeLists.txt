@@ -6,6 +6,8 @@ set(srcs "aidlink_main.c" "config.c" "config_util.c"
          "adbp.c" "adbp_frame.c"
          "poller.c" "poller_sources.c" "poller_heal.c" "fixgate.c" "nmea.c" "gps.c" "possrc.c" "gpsqual.c" "button.c" "touch.c" "geo.c" "services.c" "log.c" "supervisor.c"
          "flog.c" "flog_core.c"
+         # internal-SRAM watch + PSRAM-first mbedTLS allocator
+         "memwatch.c"
          "statusled.c" "board.c" "display.c" "airports.c"
          "tzdb.c" "tzdb_data.c" "derive.c" "eta.c" "font_arrow.c" "font_cloud.c" "font_tod.c" "font_eta.c"
          "font_batt.c" "font_bolt.c"
@@ -43,6 +45,13 @@ endif()
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "."
                        REQUIRES ${reqs})
+
+# Custom lwIP hooks (aid_lwip_hooks.h): DHCP-server reply counters. PRIVATE to
+# the lwip component, so only lwIP's own sources (dhcpserver.c) see the hook;
+# the implementation lives in netcore.c.
+idf_component_get_property(lwip lwip COMPONENT_LIB)
+target_compile_options(${lwip} PRIVATE "-I${COMPONENT_DIR}")
+target_compile_definitions(${lwip} PRIVATE "ESP_IDF_LWIP_HOOK_FILENAME=\"aid_lwip_hooks.h\"")
 
 # Auto-incrementing firmware build number: bump ../buildnum.txt (committed,
 # shared by both targets) and regenerate buildnum.h on EVERY build. Shown on

@@ -39,6 +39,9 @@ bool netcore_sta_up(uint8_t ip4_out[4]);
 bool netcore_sta_ipinfo(char *ip, char *gw, char *mask, char *dns);
 // Count of stations currently associated to the SoftAP.
 int netcore_ap_client_count(void);
+// Log the DHCP-server replies (OFFER/ACK/NAK) built since the last call, if
+// any, then reset. Called once a minute from the poller's summary.
+void netcore_dhcp_report(void);
 
 // True if an uplink SSID is configured (STA is actively trying to connect).
 bool netcore_has_ssid(void);

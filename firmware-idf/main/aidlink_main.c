@@ -24,6 +24,7 @@
 #include "services.h"
 #include "log.h"
 #include "flog.h"
+#include "memwatch.h"
 #include "statusled.h"
 #include "board.h"
 #include "display.h"
@@ -52,6 +53,7 @@ void app_main(void) {
     // touch detection — was logged while capture was off and silently lost.
     // Display boards always capture (display.c forces it too).
     log_set_enable(cfg.log_enable || board_get()->panel != NULL);
+    memwatch_init();           // failed-alloc hook + PSRAM-first mbedTLS allocator (before Wi-Fi)
     supervisor_start();        // task liveness: restart on a hung adbp/poller/dnsfwd/display/gps
 #if CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH
     {   // make a stored post-mortem visible in the flash log

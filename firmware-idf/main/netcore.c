@@ -90,6 +90,25 @@ int netcore_ap_client_count(void) {
     return esp_wifi_ap_get_sta_list(&list) == ESP_OK ? (int)list.num : 0;
 }
 
+// DHCP-server replies built since the last report (aid_lwip_hooks.h). Bumped
+// from the tcpip thread, read + reset from the poller: plain counters, a
+// rare lost count is harmless for a diagnostic.
+static volatile uint32_t s_dhcp_offer, s_dhcp_ack, s_dhcp_nak;
+
+void aid_dhcps_reply_hook(int msg_type) {
+    if (msg_type == 2)      s_dhcp_offer++;
+    else if (msg_type == 5) s_dhcp_ack++;
+    else if (msg_type == 6) s_dhcp_nak++;
+}
+
+void netcore_dhcp_report(void) {
+    uint32_t o = s_dhcp_offer, a = s_dhcp_ack, n = s_dhcp_nak;
+    if (!(o | a | n)) return;
+    s_dhcp_offer = s_dhcp_ack = s_dhcp_nak = 0;
+    logln("[dhcp] 60s replies: offer=%lu ack=%lu nak=%lu",
+          (unsigned long)o, (unsigned long)a, (unsigned long)n);
+}
+
 bool netcore_has_ssid(void) { return s_have_ssid; }
 
 int netcore_sta_rssi(void) {
@@ -316,8 +335,23 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
               e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5]);
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STADISCONNECTED) {
         wifi_event_ap_stadisconnected_t *e = data;
-        logln("AP client left  %02X:%02X:%02X:%02X:%02X:%02X (reason %d)",
-              e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5], e->reason);
+        // Whether the client left holding a lease is the post-flight answer
+        // to "did DHCP ever complete for it" (an iPhone that never gets one
+        // leaves with reason 8 after ~60 s, then rejoins).
+        esp_netif_pair_mac_ip_t pr = {0};
+        memcpy(pr.mac, e->mac, sizeof pr.mac);
+        esp_netif_t *down = netcore_downstream_netif();
+        bool leased = down && esp_netif_dhcps_get_clients_by_mac(down, 1, &pr) == ESP_OK && pr.ip.addr;
+        char lease[24] = "no lease";
+        if (leased) snprintf(lease, sizeof lease, "lease " IPSTR, IP2STR(&pr.ip));
+        logln("AP client left  %02X:%02X:%02X:%02X:%02X:%02X (reason %d, %s)",
+              e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5], e->reason, lease);
+    } else if (base == IP_EVENT && id == IP_EVENT_AP_STAIPASSIGNED) {
+        // Posted by esp_netif's DHCP-server callback after an ACK went out
+        // (any downstream netif, so the bridge too): the lease actually granted.
+        ip_event_ap_staipassigned_t *e = data;
+        logln("[dhcp] lease " IPSTR " -> %02X:%02X:%02X:%02X:%02X:%02X", IP2STR(&e->ip),
+              e->mac[0], e->mac[1], e->mac[2], e->mac[3], e->mac[4], e->mac[5]);
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *e = (ip_event_got_ip_t *)data;
         s_sta_ip[0] = esp_ip4_addr1_16(&e->ip_info.ip);
@@ -436,6 +470,7 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
     ESP_ERROR_CHECK(esp_wifi_init(&wcfg));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_evt, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_evt, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, wifi_evt, NULL, NULL));
     const esp_timer_create_args_t ta = { .callback = retry_cb, .name = "sta_retry" };
     esp_timer_create(&ta, &s_retry_tmr);
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));

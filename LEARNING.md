@@ -1848,3 +1848,17 @@ additions (all committed):
 Repo hygiene: the `Desktop/AIDlink` path is **iCloud-synced**, which spawns
 `name 2.ext` conflict copies; a batch of them had been committed. Removed all
 `* 2.*` files (they were never in the CMake SRCS list, so harmless but confusing).
+
+## 2026-11-01 — Field log review: phone DHCP loop + Jepp FD no position
+- Pull the post-flight trail with `POST /login` (u/p) then `GET /flog` over the USB-NCM cable (`--interface en12`, AID at 172.20.1.1); `/log` is only the RAM ring of the *current* boot.
+- Signature of a phone that never gets a lease: `AP client joined` → `left (reason 8)` ~50–60 s later → rejoin, repeating. No `[adbp] subscribe` in the session = the EFB never reached the box, so "no position in Jepp FD" is downstream of the DHCP failure (the box itself had `pos fresh` from the feed).
+- Blind spot: DHCP-server lease grants are **not logged** (no `IP_EVENT_ASSIGNED_IP_TO_CLIENT` handler), so a DHCP failure can only be inferred. The IDF dhcps also fails silently when it can't allocate/send a reply.
+- Internal-RAM low-water (`[mem] imin`) falls to a few KB (even 112–160 B) in most long sessions, while the 60 s `iheap` samples look healthy (~34 KB) — a transient internal-heap hog exists and is worth chasing.
+
+## 2026-11-02 — DHCP + internal-SRAM instrumentation, PSRAM-first mbedTLS
+- **`CONFIG_MBEDTLS_CUSTOM_MEM_ALLOC` installs nothing.** In that mode IDF's `esp_config.h` skips `MBEDTLS_PLATFORM_STD_CALLOC`, so the app must call `mbedtls_platform_set_calloc_free()` at runtime; defining `esp_mbedtls_mem_calloc` does nothing (it links, but `mbedtls_calloc_func` still points at plain `calloc`). Checked by reading the pointer out of `.dram0.data` in the ELF.
+- **`MBEDTLS_DEFAULT_MEM_ALLOC` + `SPIRAM_MALLOC_ALWAYSINTERNAL=4096` = TLS in internal SRAM.** Every mbedTLS allocation of 4 KB or less tries internal first; the Viasat poller (TLS) and the Wi-Fi WPA2 crypto (`ESP_WIFI_MBEDTLS_CRYPTO`) both go through it. Now PSRAM first, internal as fallback (`tls_calloc` in `memwatch.c`); plain EXTERNAL would break TLS on a board that boots without PSRAM (`SPIRAM_IGNORE_NOTFOUND`).
+- **`[mem] imin` is only the malloc pool** (`MALLOC_CAP_INTERNAL|DEFAULT`); it excludes the 32 KB `SPIRAM_MALLOC_RESERVE_INTERNAL` region that explicit internal/DMA allocations (Wi-Fi driver, task stacks) still draw on. `iall=` / "all min" (`MALLOC_CAP_INTERNAL`) is the figure that says whether Wi-Fi can actually starve.
+- **S3 builds with `-mdisable-hardware-atomics`**: `__atomic_*` becomes a library call, so don't use it in IRAM hooks (the failed-alloc callback uses plain counters).
+- **lwIP custom hook for the DHCP server**: `LWIP_HOOK_DHCPS_POST_APPEND_OPTS(netif, dhcps, state, pp_opts)` fires for every OFFER/ACK/NAK built. Enabled by `ESP_IDF_LWIP_HOOK_FILENAME` + `-I` set PRIVATE on the lwip component lib (main/CMakeLists.txt). `IP_EVENT_AP_STAIPASSIGNED` also fires for the bridge netif (posted from esp_netif's dhcps callback after a successful ACK send).
+- New flog lines: `[dhcp] lease IP -> MAC`, `[dhcp] 60s replies: offer= ack= nak=`, `AP client left … (reason N, lease IP | no lease)`, `[mem] LOW internal: …` (1 Hz, new lows below 16 KB in 2 KB steps), `[mem] ALLOC FAILED …`, `conn=` in the 60 s poll summary, `iall=` in the 10-min `[mem]` line.

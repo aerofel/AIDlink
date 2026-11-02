@@ -31,6 +31,7 @@
 #include "fixgate.h"
 #include "supervisor.h"
 #include "usb_ncm.h"
+#include "memwatch.h"
 
 static const char *TAG = "poll";
 static aidlink_cfg_t *CFG;
@@ -69,6 +70,7 @@ static uint32_t s_last_heap;   // free heap sampled at the last poll (diagnostic
 // s_win_iblk_min is the smallest "largest free block" seen in the window --
 // that, not the free total, is what a failed TLS record read looks like.
 static uint32_t s_last_iheap, s_last_iblk, s_win_iblk_min;
+static uint32_t s_win_conn0;   // memwatch_connects() at the start of the 60 s window
 
 // Self-heal restarts since the last recovery, kept across a software reset so
 // the wait escalates (poller_heal.h). RTC memory is garbage after power-on:
@@ -203,6 +205,8 @@ static esp_err_t http_evt(esp_http_client_event_t *e) {
     fetch_t *f = e->user_data;
     if (e->event_id == HTTP_EVENT_ON_DATA) {
         if (f->len + e->data_len < f->cap) { memcpy(f->buf + f->len, e->data, e->data_len); f->len += e->data_len; f->buf[f->len] = 0; }
+    } else if (e->event_id == HTTP_EVENT_ON_CONNECTED) {
+        memwatch_note_connect();   // a new TCP(+TLS) session: line it up with heap dips
     } else if (e->event_id == HTTP_EVENT_ON_HEADER) {
         if (e->header_key && e->header_value && strcasecmp(e->header_key, "Date") == 0)
             f->date = parse_http_date(e->header_value);
@@ -558,6 +562,7 @@ static void poller_task(void *arg) {
     sup_watch(SUP_POLLER, 120000);
     for (;;) {
         sup_beat(SUP_POLLER);
+        memwatch_tick();   // 1 Hz internal-SRAM low-water / failed-alloc watch
         uint32_t t = now_ms();
         if (CFG->sim_enable) {
             uint32_t dt = t - last_sim; last_sim = t;
@@ -571,8 +576,9 @@ static void poller_task(void *arg) {
         if (t - last_sum >= 60000) {
             uint32_t tn = now_ms();   // not t: poll_once() above may have stamped a newer fix
             if (s_win_ok + s_win_fail) {
-                logln("[poll] 60s ok=%lu fail=%lu maxms=%lu rssi=%d heap=%lu iheap=%lu iblk=%lu age=%lds src=%s%s%s",
+                logln("[poll] 60s ok=%lu fail=%lu conn=%lu maxms=%lu rssi=%d heap=%lu iheap=%lu iblk=%lu age=%lds src=%s%s%s",
                       (unsigned long)s_win_ok, (unsigned long)s_win_fail,
+                      (unsigned long)(memwatch_connects() - s_win_conn0),
                       (unsigned long)s_win_maxms, netcore_sta_rssi(),
                       (unsigned long)s_last_heap, (unsigned long)s_last_iheap,
                       (unsigned long)s_win_iblk_min,
@@ -581,6 +587,8 @@ static void poller_task(void *arg) {
                       s_win_fail ? " last=" : "", s_win_fail ? s_win_lasterr : "");
             }
             s_win_ok = s_win_fail = s_win_maxms = s_win_iblk_min = 0; s_win_lasterr[0] = 0;
+            s_win_conn0 = memwatch_connects();
+            netcore_dhcp_report();
             last_sum = t;
             // Every 10 min: each task's stack headroom (bytes never touched) and
             // the internal-heap low-water mark, so a post-flight flog shows which
@@ -589,8 +597,9 @@ static void poller_task(void *arg) {
             if (++s_sum_n % 10 == 1) {
                 static const char *T[] = { "adbp", "poller", "dnsfwd", "display", "httpd",
                                            "inetprobe", "button", "sys_evt", "tiT", "gps", "sup" };
-                char line[180]; int o = snprintf(line, sizeof line, "[mem] imin=%u stack free:",
-                    (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT));
+                char line[200]; int o = snprintf(line, sizeof line, "[mem] imin=%u iall=%u stack free:",
+                    (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DEFAULT),
+                    (unsigned)heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL));
                 for (unsigned i = 0; i < sizeof T / sizeof T[0] && o < (int)sizeof line - 16; i++) {
                     TaskHandle_t h = xTaskGetHandle(T[i]);
                     if (h) o += snprintf(line + o, sizeof line - o, " %s %u", T[i],
