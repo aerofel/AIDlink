@@ -94,9 +94,51 @@ int main(void) {
         assert(strstr(out, "name=\"GPSLONGPF\" validity=\"1\" type=\"0\" value=\"0.000000\""));
         assert(strstr(out, "name=\"HYBLATP\" validity=\"1\" type=\"0\" value=\"48.664612\""));
         assert(strstr(out, "name=\"FMSLONGP\" validity=\"1\" type=\"0\" value=\"13.435761\""));
-        assert(strstr(out, "<parameter name=\"ALTNDEST\" validity=\"2\"/>"));
-        assert(strstr(out, "<parameter name=\"DESTQNH\" validity=\"2\"/>"));
+        assert(strstr(out, "<parameter name=\"ALTNDEST\" validity=\"2\" type=\""));
+        assert(strstr(out, "<parameter name=\"DESTQNH\" validity=\"2\" type=\""));
         assert(!adbp_param_known("ALTNDEST") && !adbp_param_known("DESTQNH"));
+    }
+
+    // --- SystemDate / SystemTime / UTCTIME from the frame's UTC stamp (FliteDeck 5.3) ---
+    {
+        char tn[3][ADBP_MAXNAME] = {"SystemDate", "SystemTime", "UTCTIME"};
+        bool m2;
+        // 2026-11-11 04:08:30.250 UTC, independent of the position state
+        adbp_params_block(out, sizeof out, tn, 3, &p, &cfg, ADBP_POS_NCD, 0, 1794370110250ULL, &m2);
+        assert(!m2);
+        assert(strstr(out, "<parameter name=\"SystemDate\" validity=\"1\" type=\"8\" value=\"2026/11/11\""));
+        assert(strstr(out, "<parameter name=\"SystemTime\" validity=\"1\" type=\"9\" value=\"04:08:30\""));
+        assert(strstr(out, "<parameter name=\"UTCTIME\" validity=\"1\" type=\"9\" value=\"04:08:30\""));
+        // no real clock (0, or adbp.c's synthetic floor): NCD, never a made-up date
+        adbp_params_block(out, sizeof out, tn, 3, &p, &cfg, ADBP_POS_FRESH, 0, 0, &m2);
+        assert(strstr(out, "<parameter name=\"SystemDate\" validity=\"2\" type=\""));
+        adbp_params_block(out, sizeof out, tn, 3, &p, &cfg, ADBP_POS_FRESH, 0, ADBP_SYNTH_STAMP_MS + 500, &m2);
+        assert(strstr(out, "<parameter name=\"SystemTime\" validity=\"2\" type=\""));
+        assert(adbp_param_known("SystemDate") && adbp_param_known("SystemTime"));
+    }
+
+    // --- FliteDeck 5.3 (AIC core 3.0.110) rejects a WHOLE frame with
+    // "Parameter.value is None" if any <parameter> lacks value=. Every element,
+    // NCD included, must carry type, value and time. ---
+    {
+        char an[6][ADBP_MAXNAME] = {"TAT", "ACTYP", "SystemDate", "SystemTime", "DESTQNH", "GPSLATP"};
+        bool m3;
+        adbp_params_block(out, sizeof out, an, 6, &p, &cfg, ADBP_POS_NCD, 0, 0, &m3);
+        int elems = 0;
+        for (const char *e = strstr(out, "<parameter "); e; e = strstr(e + 1, "<parameter ")) {
+            const char *end = strstr(e, "/>");
+            assert(end);
+            char one[256]; size_t L = (size_t)(end - e); assert(L < sizeof one);
+            memcpy(one, e, L); one[L] = 0;
+            assert(strstr(one, " type=\"") && strstr(one, " value=\"") && strstr(one, " time=\""));
+            assert(!strstr(one, "value=\"\""));          // never an empty value either
+            elems++;
+        }
+        assert(elems == 6);
+        assert(strstr(out, "<parameter name=\"TAT\" validity=\"2\" type=\"0\" value=\"0\""));
+        assert(strstr(out, "<parameter name=\"ACTYP\" validity=\"2\" type=\"7\" value=\"-\""));
+        assert(strstr(out, "<parameter name=\"SystemDate\" validity=\"2\" type=\"8\" value=\"1970/01/01\""));
+        assert(strstr(out, "<parameter name=\"SystemTime\" validity=\"2\" type=\"9\" value=\"00:00:00\""));
     }
 
     printf("test_adbp_frame: PASS\n");

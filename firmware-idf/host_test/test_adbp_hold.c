@@ -46,6 +46,18 @@ int main(void) {
     assert(adbp_push_due(false, 42, 42, 20000, 15000, 5000, ADBP_POS_NCD, ADBP_POS_NCD));
     assert(!adbp_push_due(false, 42, 42, 20000, 16000, 5000, ADBP_POS_FRESH, ADBP_POS_FRESH));
 
+    // ---------- adbp_unsub_applies (FliteDeck unsub-old/sub-new race) ----------
+    // FliteDeck re-subscribes and cancels its old subscription on the same
+    // port at the same time; the cancel lands 30-150 ms AFTER the new subscribe.
+    assert(!adbp_unsub_applies(100030, 100000));          // 30 ms old: the race, keep it
+    assert(!adbp_unsub_applies(100149, 100000));          // 149 ms (seen with a push already sent)
+    assert(!adbp_unsub_applies(100000 + ADBP_UNSUB_GRACE_MS - 1, 100000));
+    assert(adbp_unsub_applies(100000 + ADBP_UNSUB_GRACE_MS, 100000));   // a real unsubscribe
+    assert(adbp_unsub_applies(160000, 100000));
+    // millis wrap: subscribed just before the wrap, unsub 50 ms later
+    assert(!adbp_unsub_applies(20u, 0xFFFFFFFFu - 29u));
+    assert(adbp_unsub_applies(5000u, 0xFFFFFFFFu - 29u));
+
     // ---------- frame content per state ----------
     pos_state_t p; memset(&p, 0, sizeof p);
     p.valid = true; p.have_track = true; p.lat = -22.27; p.lon = 166.46;
@@ -84,11 +96,11 @@ int main(void) {
 
     // NCD: today's behavior — bare validity=2, GNSS_AVAIL 0
     adbp_params_block(out, sizeof out, names, 6, &p, &cfg, ADBP_POS_NCD, 400, 0, &miss);
-    assert(strstr(out, "name=\"GPSLATP\" validity=\"2\"/>"));
+    assert(strstr(out, "name=\"GPSLATP\" validity=\"2\" type=\""));
     assert(!strstr(out, "value=\"-22.270000\""));
     assert(strstr(out, "name=\"GNSS_AVAIL\" validity=\"1\" type=\"6\" value=\"0\""));
-    assert(strstr(out, "name=\"FOM\" validity=\"2\"/>"));          // quality follows position
-    assert(strstr(out, "name=\"HDOP\" validity=\"2\"/>"));
+    assert(strstr(out, "name=\"FOM\" validity=\"2\" type=\""));          // quality follows position
+    assert(strstr(out, "name=\"HDOP\" validity=\"2\" type=\""));
 
     // ---------- integrity limit + WOW per state; real GNSS HDOP ----------
     char qn[3][ADBP_MAXNAME]; strcpy(qn[0], "GPSHIL"); strcpy(qn[1], "WOW"); strcpy(qn[2], "HDOP");
@@ -99,8 +111,8 @@ int main(void) {
     adbp_params_block(out, sizeof out, qn, 3, &p, &cfg, ADBP_POS_DR, 120, 0, &miss);
     assert(strstr(out, "name=\"GPSHIL\" validity=\"1\" type=\"0\" value=\"16.10\""));   // 480 kt x 2 min
     adbp_params_block(out, sizeof out, qn, 3, &p, &cfg, ADBP_POS_NCD, 400, 0, &miss);
-    assert(strstr(out, "name=\"GPSHIL\" validity=\"2\"/>"));
-    assert(strstr(out, "name=\"WOW\" validity=\"2\"/>"));
+    assert(strstr(out, "name=\"GPSHIL\" validity=\"2\" type=\""));
+    assert(strstr(out, "name=\"WOW\" validity=\"2\" type=\""));
     p.hdop = 1.7;                                                       // GNSS source
     adbp_params_block(out, sizeof out, qn, 3, &p, &cfg, ADBP_POS_FRESH, 1, 0, &miss);
     assert(strstr(out, "name=\"HDOP\" validity=\"1\" type=\"0\" value=\"1.7\""));

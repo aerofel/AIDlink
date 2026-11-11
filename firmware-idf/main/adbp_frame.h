@@ -33,6 +33,19 @@ bool adbp_push_due(bool on_event, uint32_t cur_fix, uint32_t last_fix_seen,
                    uint32_t now_ms, uint32_t last_push_ms, uint32_t period_ms,
                    adbp_pstate_t st, adbp_pstate_t prev_st);
 
+// Whether an unSubscribe may remove a subscription made at sub_ms. FliteDeck
+// (FOMAX mode) re-subscribes and cancels its previous subscription on the same
+// IP+publishport at the same moment, on separate connections; the cancel lands
+// 30-150 ms AFTER the new subscribe (flight log 2026-11-11). Honouring it
+// killed every new subscription, so FliteDeck never got a stream again after
+// its first one dropped. A subscription younger than the grace period is kept.
+#define ADBP_UNSUB_GRACE_MS 2000u
+
+// adbp.c's stand-in frame stamp when neither SNTP nor the source gives a time
+// (stamp in [base, base+1000)). SystemDate/SystemTime are NCD on it.
+#define ADBP_SYNTH_STAMP_MS 1782000000000ULL
+bool adbp_unsub_applies(uint32_t now_ms, uint32_t sub_ms);
+
 // XML-escape src into dst (bounded). Returns dst.
 char *adbp_xml_esc(char *dst, size_t cap, const char *src);
 

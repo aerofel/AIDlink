@@ -11,6 +11,7 @@
 #include <stdlib.h>
 #include <ctype.h>
 #include <math.h>
+#include <time.h>
 
 #define XMLPROLOG "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
 
@@ -53,6 +54,10 @@ bool adbp_push_due(bool on_event, uint32_t cur_fix, uint32_t last_fix_seen,
     if (!on_event) return period_up;
     if (cur_fix != last_fix_seen) return true;          // new fix event
     return st != ADBP_POS_NCD && period_up;             // fallback cadence while reportable
+}
+
+bool adbp_unsub_applies(uint32_t now_ms, uint32_t sub_ms) {
+    return (uint32_t)(now_ms - sub_ms) >= ADBP_UNSUB_GRACE_MS;
 }
 
 int adbp_parse_params(const char *req, char names[][ADBP_MAXNAME], int maxn) {
@@ -101,7 +106,18 @@ static int param_xml(char *out, size_t cap, const char *name, const pos_state_t 
     // *LATPF / *LONGPF (GPS, HYB) are the FINE half of a coarse+fine pair; the
     // coarse value already carries full precision, so fine is 0. HYBLATPF used
     // to fall into "LAT" and return the whole latitude (coarse+fine = 97 deg).
-    if (has(U, "LATPF") || has(U, "LONGPF") || has(U, "FINE")) { type = 0; strcpy(val, "0.000000"); }
+    // AID clock, from the same UTC as the frame's time= stamps. Valid whatever
+    // the position state; NCD only without a real clock. FliteDeck subscribes
+    // to SystemDate/SystemTime (periodic) and UTCTIME (OnEvent).
+    bool real_clock = stamp_ms > 1735689600000ULL &&
+                      !(stamp_ms >= ADBP_SYNTH_STAMP_MS && stamp_ms < ADBP_SYNTH_STAMP_MS + 1000);
+    if (!strcmp(U, "SYSTEMDATE") || !strcmp(U, "SYSTEMTIME") || !strcmp(U, "UTCTIME")) {
+        ncd = !real_clock;
+        time_t t = (time_t)(stamp_ms / 1000); struct tm g; gmtime_r(&t, &g);
+        if (U[6] == 'D') { type = 8; strftime(val, sizeof val, "%Y/%m/%d", &g); }
+        else             { type = 9; strftime(val, sizeof val, "%H:%M:%S", &g); }
+    }
+    else if (has(U, "LATPF") || has(U, "LONGPF") || has(U, "FINE")) { type = 0; strcpy(val, "0.000000"); }
     // no source has these; ALTNDEST used to read as ALT, DESTQNH as DEST
     else if (has(U, "QNH") || has(U, "ALTN")) { *matched = false; ncd = true; }
     else if (has(U, "LAT")) { type = 0; VALF("%.6f", p->lat); }
@@ -173,8 +189,15 @@ static int param_xml(char *out, size_t cap, const char *name, const pos_state_t 
     }
     else { *matched = false; ncd = true; }   // unknown -> NCD
 
-    if (ncd)
-        return snprintf(out, cap, "<parameter name=\"%s\" validity=\"2\"/>", nm);
+    // NCD still carries type, value and time. FliteDeck 5.3 (AIC core 3.0.110)
+    // drops the WHOLE frame ("Parameter.value is None") if any parameter has
+    // no value=, so a single unsupported parameter blanked the ownship. 2.10.50
+    // accepted the bare form. The placeholder is one each type's parser reads.
+    if (ncd) {
+        const char *ph = type == 7 ? "-" : type == 8 ? "1970/01/01" : type == 9 ? "00:00:00" : "0";
+        return snprintf(out, cap, "<parameter name=\"%s\" validity=\"2\" type=\"%d\" value=\"%s\" time=\"%llu\"/>",
+                        nm, type, ph, (unsigned long long)stamp_ms);
+    }
     return snprintf(out, cap, "<parameter name=\"%s\" validity=\"1\" type=\"%d\" value=\"%s\" time=\"%llu\"/>",
                     nm, type, val, (unsigned long long)stamp_ms);
     #undef VALF

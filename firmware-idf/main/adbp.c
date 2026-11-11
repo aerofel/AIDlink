@@ -6,6 +6,7 @@
 // own outbound push socket to the client's publishport. Wire format lives in
 // adbp_frame.c; ownship state comes from pos.h.
 #include "adbp.h"
+#include "sdkconfig.h"
 #include "adbp_frame.h"
 #include "pos.h"
 #include "log.h"
@@ -34,6 +35,7 @@
 #define PUSH_CONNECT_MS   1000     // an iPad in Wi-Fi power save can take ~300 ms to answer
 #define PUSH_FAILS_SLOW   3        // consecutive failed connects before backing off
 #define PUSH_RETRY_SLOW_MS 5000
+#define PUSH_QUICK_RETRY_MS 200    // retry after a refused connect right after subscribe
 static const char *TAG = "adbp";
 
 typedef struct {
@@ -49,14 +51,26 @@ typedef struct {
     uint32_t push_count;
     uint32_t fails;         // consecutive failed connects (0 = reachable)
     uint32_t last_ok_ms;    // subscribe time, then last successful push
+    uint32_t sub_ms;        // when this subscription was made (diagnostics)
+    uint32_t conn_ms;       // when the current push socket connected
+    uint8_t  nlog;          // connect failures logged for this subscription
+    uint8_t  nrx;           // push-socket reads logged for this subscription
 } sub_t;
 
 // Subscriptions and the XML work buffers (~22 KB) live in PSRAM where there is
 // some, allocated in adbp_start(): internal SRAM is the scarce resource here.
 static sub_t *s_subs;
+// Sized for FliteDeck's 53-parameter OnEvent set with every NCD parameter in
+// the full form (type/value/time): ~5.5 KB of body. ~43 KB in PSRAM.
+#if CONFIG_SPIRAM
+#define ADBP_BODY_CAP 8192
+#else
+#define ADBP_BODY_CAP 4096   // no PSRAM: these buffers would sit in internal SRAM
+#endif
 typedef struct {
-    char req[2048], body[3072], resp[4096];   // handle_request()
-    char pbody[3072], msg[4096];              // push_subs()
+    char req[2048], body[ADBP_BODY_CAP], resp[ADBP_BODY_CAP + 1024];   // handle_request()
+    char pbody[ADBP_BODY_CAP], msg[ADBP_BODY_CAP + 1024];              // push_subs()
+    char dbg[160];                            // raw-request dump (one task: no lock)
 } adbp_bufs_t;
 static adbp_bufs_t *B;
 static const aidlink_cfg_t *CFG;
@@ -68,7 +82,7 @@ static uint64_t stamp_ms(uint64_t utc_ms) {
     time_t t = time(NULL);
     if (t > 1700000000) return (uint64_t)t * 1000;   // SNTP-synced wall clock
     if (utc_ms > 1000000000000ULL) return utc_ms;    // plausible source time
-    return 1782000000000ULL + (now_ms() % 1000);     // synthetic floor
+    return ADBP_SYNTH_STAMP_MS + (now_ms() % 1000);  // synthetic floor
 }
 
 // Current freshness state of the shared position, per spec 2026-08-13.
@@ -178,6 +192,23 @@ static void log_param_names(char names[][ADBP_MAXNAME], int np) {
     logln("[adbp]   %d of %d params unknown (answered NCD)%s%s", unk, np, unk ? ": " : "", unk ? ul : "");
 }
 
+// Log the start of a raw request (CR/LF flattened), up to `lines` log lines.
+// It shows what an EFB actually sends, e.g. whether its unSubscribe names a
+// publishport, without a packet capture.
+static void dump_req(const char *tag, const char *req, int lines) {
+    const int W = 150;
+    int n = strlen(req);
+    for (int l = 0, off = 0; l < lines && off < n; l++, off += W) {
+        int k = 0;
+        for (; k < W && req[off + k]; k++) {
+            char ch = req[off + k];
+            B->dbg[k] = (ch == '\r' || ch == '\n' || ch == '\t') ? ' ' : ch;
+        }
+        B->dbg[k] = 0;
+        logln("[adbp]   %s raw[%d]: %s", tag, l, B->dbg);
+    }
+}
+
 static void handle_request(int cs, uint32_t peer_ip) {
     char *req = B->req, *body = B->body, *resp = B->resp;
     int n = read_request(cs, req, sizeof B->req);
@@ -215,7 +246,7 @@ static void handle_request(int cs, uint32_t peer_ip) {
                 sub_t *su = &s_subs[idx]; memset(su, 0, sizeof *su);
                 su->active = true; su->ip = peer_ip; su->port = (uint16_t)pport;
                 su->on_event = on_event; su->period_ms = per; su->sock = -1;
-                su->last_ok_ms = now_ms();
+                su->last_ok_ms = su->sub_ms = now_ms();
                 // store the space-separated param name list
                 int o = 0;
                 for (int i = 0; i < np && o < (int)sizeof(su->params) - ADBP_MAXNAME - 2; i++)
@@ -227,6 +258,8 @@ static void handle_request(int cs, uint32_t peer_ip) {
                 logln("[adbp] subscribe %s per=%lums pubport=%ld np=%d from %s",
                       on_event ? "OnEvent" : "periodic", (unsigned long)per, pport, np, pip);
                 log_param_names(names, np);
+                static int s_sub_dumps;
+                if (s_sub_dumps < 3) { s_sub_dumps++; dump_req("sub", req, 1); }
             } else logln("[adbp] no free subscription slot: %d EFBs already subscribed", MAX_SUBS);
         }
         build_params(body, sizeof B->body, names, np, &miss);
@@ -234,11 +267,27 @@ static void handle_request(int cs, uint32_t peer_ip) {
         data_sent = true;
     } else if (is_unsub) {
         long pport = adbp_tag_num(req, "publishport", 0);
+        // Diagnostics (2026-11-11): FliteDeck sends unSubscribe right after its
+        // own subscribe; log what it names and what it removes.
+        static int s_unsub_dumps;
+        if (s_unsub_dumps < 6) { s_unsub_dumps++; dump_req("unsub", req, 3); }
+        int removed = 0;
         for (int i = 0; i < MAX_SUBS; i++)
             if (s_subs[i].active && s_subs[i].ip == peer_ip && (pport == 0 || s_subs[i].port == pport)) {
+                if (!adbp_unsub_applies(now_ms(), s_subs[i].sub_ms)) {
+                    logln("[adbp] unSubscribe pport=%ld from %s ignored: :%u subscribed %lums ago (cancel of the previous one)",
+                          pport, pip, s_subs[i].port, (unsigned long)(now_ms() - s_subs[i].sub_ms));
+                    removed++;
+                    continue;
+                }
+                logln("[adbp] unSubscribe pport=%ld from %s removes :%u (age %lums, %lu pushes, sock %s)",
+                      pport, pip, s_subs[i].port, (unsigned long)(now_ms() - s_subs[i].sub_ms),
+                      (unsigned long)s_subs[i].push_count, s_subs[i].sock >= 0 ? "open" : "none");
+                removed++;
                 if (s_subs[i].sock >= 0) close(s_subs[i].sock);
                 memset(&s_subs[i], 0, sizeof s_subs[i]); s_subs[i].sock = -1;
             }
+        if (!removed) logln("[adbp] unSubscribe pport=%ld from %s matched nothing", pport, pip);
         adbp_wrap_resp(resp, sizeof B->resp, rmethod, 0, "<parameters></parameters>");
     } else {
         adbp_wrap_resp(resp, sizeof B->resp, "UnknownMethod", 2, "<parameters></parameters>");
@@ -250,7 +299,8 @@ static void handle_request(int cs, uint32_t peer_ip) {
     close(cs);
 }
 
-static int connect_push(sub_t *su) {
+static int connect_push(sub_t *su, int *err_out) {
+    *err_out = 0;
     int s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) {
         // The smoking gun for the in-flight position dropout: the lwIP socket
@@ -258,6 +308,7 @@ static int connect_push(sub_t *su) {
         // aircraft position silently disappears from Jeppesen. Logged (not
         // inferred) so /log shows it directly if the pool is ever tight again.
         logln("[adbp] socket() FAILED — pool exhausted, cannot push to EFB");
+        *err_out = errno;
         return -1;
     }
     struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
@@ -270,12 +321,14 @@ static int connect_push(sub_t *su) {
     int fl = fcntl(s, F_GETFL, 0);
     fcntl(s, F_SETFL, fl | O_NONBLOCK);
     int rc = connect(s, (struct sockaddr *)&a, sizeof a);
+    if (rc != 0 && errno != EINPROGRESS) *err_out = errno;
     if (rc != 0 && errno == EINPROGRESS) {
         fd_set w; FD_ZERO(&w); FD_SET(s, &w);
         struct timeval ct = { .tv_sec = 0, .tv_usec = PUSH_CONNECT_MS * 1000 };
         int err = 0; socklen_t el = sizeof err;
-        if (select(s + 1, NULL, &w, NULL, &ct) == 1 &&
-            getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0) rc = 0;
+        int sel = select(s + 1, NULL, &w, NULL, &ct);
+        if (sel == 1 && getsockopt(s, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == 0) rc = 0;
+        else *err_out = sel == 0 ? ETIMEDOUT : (err ? err : errno);
     }
     if (rc != 0) { close(s); return -1; }
     fcntl(s, F_SETFL, fl);   // back to blocking; sends stay bounded by SO_SNDTIMEO
@@ -311,13 +364,28 @@ static void push_subs(void) {
         if (su->sock < 0) {
             if (su->fails >= PUSH_FAILS_SLOW && now - su->last_push_ms < PUSH_RETRY_SLOW_MS)
                 continue;
-            su->sock = connect_push(su);
+            int cerr; uint32_t t_c = now_ms();
+            su->sock = connect_push(su, &cerr);
+            uint32_t c_ms = now_ms() - t_c;
             if (su->sock < 0) {
                 if (su->fails++ == 0) {
                     char ip[16]; ip_str(su->ip, ip, sizeof ip);
                     logln("[adbp] EFB %s:%u unreachable, keeping its subscription", ip, su->port);
                 }
+                if (su->nlog < 6) {
+                    su->nlog++;
+                    char ip[16]; ip_str(su->ip, ip, sizeof ip);
+                    logln("[adbp] push connect %s:%u failed #%lu: err %d after %lums (t+%lums from subscribe)",
+                          ip, su->port, (unsigned long)su->fails, cerr, (unsigned long)c_ms,
+                          (unsigned long)(now_ms() - su->sub_ms));
+                }
                 su->last_push_ms = now;
+                // FliteDeck opens its listener a few tens of ms AFTER it subscribes,
+                // so the first connect (t+25 ms) is refused (RST). Retry 200 ms
+                // later instead of a full period: first data at ~t+0.3 s, not t+1.1 s.
+                if ((cerr == ECONNRESET || cerr == ECONNREFUSED) && su->period_ms > PUSH_QUICK_RETRY_MS &&
+                    now - su->sub_ms < 3000)
+                    su->last_push_ms = now - (su->period_ms - PUSH_QUICK_RETRY_MS);
                 continue;
             }
             if (su->fails) {
@@ -326,7 +394,30 @@ static void push_subs(void) {
                       (unsigned long)su->fails);
                 su->fails = 0;
             }
-            su->was_connected = true; su->push_count = 0;
+            su->was_connected = true; su->push_count = 0; su->conn_ms = now_ms();
+            { char ip[16]; ip_str(su->ip, ip, sizeof ip);
+              logln("[adbp] push connected %s:%u in %lums (t+%lums from subscribe)", ip, su->port,
+                    (unsigned long)c_ms, (unsigned long)(now_ms() - su->sub_ms)); }
+        }
+
+        // Does the EFB send anything back on the push socket, or close it?
+        // (FliteDeck 5.3 sends nothing; a close is noticed here at once instead
+        // of at the next failed send.) Data is logged 3 times per subscription.
+        {
+            int r = recv(su->sock, B->dbg, sizeof B->dbg - 1, MSG_DONTWAIT);
+            char ip[16]; ip_str(su->ip, ip, sizeof ip);
+            if (r > 0 && su->nrx < 3) {
+                su->nrx++;
+                B->dbg[r] = 0;
+                for (int k = 0; k < r; k++) if (B->dbg[k] == '\r' || B->dbg[k] == '\n' || !B->dbg[k]) B->dbg[k] = ' ';
+                logln("[adbp] EFB %s:%u sent %d B on the push socket after %lu pushes: %.150s",
+                      ip, su->port, r, (unsigned long)su->push_count, B->dbg);
+            } else if (r == 0) {
+                logln("[adbp] EFB %s:%u closed the push socket after %lu pushes", ip, su->port,
+                      (unsigned long)su->push_count);
+                close(su->sock); su->sock = -1; su->was_connected = false;
+                continue;
+            }
         }
 
         // rebuild the param name array from the stored list
@@ -346,7 +437,13 @@ static void push_subs(void) {
                                     case 2: delim[0]='\n'; dl=1; break; case 3: delim[0]=0; dl=1; break; }
 
         int w = send(su->sock, msg, mlen, 0);
-        if (w <= 0) { close(su->sock); su->sock = -1; su->was_connected = false; }
+        if (w <= 0) {
+            int e = errno; char ip[16]; ip_str(su->ip, ip, sizeof ip);
+            logln("[adbp] push send to %s:%u failed: errno %d after %lu pushes, %lus connected",
+                  ip, su->port, e, (unsigned long)su->push_count,
+                  (unsigned long)((now - su->conn_ms) / 1000));
+            close(su->sock); su->sock = -1; su->was_connected = false;
+        }
         else { if (dl) send(su->sock, delim, dl, 0); su->push_count++; s_push_seq++; su->last_ok_ms = now; }
 
         su->last_push_ms = now; su->last_fix_seen = cur_fix; su->last_state = st;

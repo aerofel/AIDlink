@@ -213,7 +213,15 @@ Discovered by testing against a real EFB and reading its integration log. These 
    full precision). **Never NCD the fine fields.**
 2. **Track/heading must be −180…+180, not 0…360.** Values > 180 are rejected as out-of-range. → Normalize
    (subtract 360 when > 180).
-3. **City pair** (`FROMTO`) is the combined departure+arrival field — there's no separate departure
+3. **Every parameter needs `type`, `value` and `time`, NCD included.** FliteDeck Pro 5.3 (AIC core
+   3.0.110) drops the *whole* frame — `Parameter.value is None.`, then "No data received for 10s" and
+   "no AID found" — if any `<parameter>` lacks `value=`. → Emit NCD as
+   `validity="2" type="0" value="0" time="…"` (a type-appropriate placeholder), never the bare
+   `<parameter name="X" validity="2"/>` that older versions accepted.
+4. **FliteDeck cancels its previous subscription *after* the new one.** Its `unSubscribe` (same
+   publishport) lands 30–150 ms after the new `subscribe`; honouring it kills the fresh stream. → Ignore an
+   `unSubscribe` for a subscription younger than 2 s.
+5. **City pair** (`FROMTO`) is the combined departure+arrival field — there's no separate departure
    parameter; emit it as `<origin><destination>` (e.g. `LFPGVTBS`).
 
 Other observations: unsupported (NCD) parameters log harmlessly as "not supported"; ground speed should be
