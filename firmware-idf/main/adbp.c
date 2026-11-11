@@ -71,6 +71,11 @@ typedef struct {
     char req[2048], body[ADBP_BODY_CAP], resp[ADBP_BODY_CAP + 1024];   // handle_request()
     char pbody[ADBP_BODY_CAP], msg[ADBP_BODY_CAP + 1024];              // push_subs()
     char dbg[160];                            // raw-request dump (one task: no lock)
+    // Parameter-name tables, off the 8 KB task stack (2.5 KB each): with them
+    // there the ADBP stack low-water fell to 1308 B in flight (2026-11-11).
+    char req_names[ADBP_MAXPARAMS][ADBP_MAXNAME];    // handle_request()
+    char push_names[ADBP_MAXPARAMS][ADBP_MAXNAME];   // push_subs()
+    char push_tmp[1400];                             // push_subs(): strtok copy
 } adbp_bufs_t;
 static adbp_bufs_t *B;
 static const aidlink_cfg_t *CFG;
@@ -214,7 +219,7 @@ static void handle_request(int cs, uint32_t peer_ip) {
     int n = read_request(cs, req, sizeof B->req);
     if (n <= 0) { close(cs); return; }
 
-    char names[ADBP_MAXPARAMS][ADBP_MAXNAME];
+    char (*names)[ADBP_MAXNAME] = B->req_names;
     int np = adbp_parse_params(req, names, ADBP_MAXPARAMS);
     bool miss = false;
 
@@ -421,8 +426,8 @@ static void push_subs(void) {
         }
 
         // rebuild the param name array from the stored list
-        char names[ADBP_MAXPARAMS][ADBP_MAXNAME]; int np = 0;
-        char tmp[1400]; strlcpy(tmp, su->params, sizeof tmp);
+        char (*names)[ADBP_MAXNAME] = B->push_names; int np = 0;
+        char *tmp = B->push_tmp; strlcpy(tmp, su->params, sizeof B->push_tmp);
         for (char *tok = strtok(tmp, " "); tok && np < ADBP_MAXPARAMS; tok = strtok(NULL, " "))
             strlcpy(names[np++], tok, ADBP_MAXNAME);
         bool miss;

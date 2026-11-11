@@ -16,6 +16,10 @@
 - **Wi-Fi dynamic TX buffers are internal DMA RAM, not PSRAM:** the 1570 B `caps 0x80c` ALLOC FAILED. 64 of them (~100 KB) exceeded free internal RAM. At 24, failures went 121 in 21 min → 0 in 12 min, the internal minimum went 6.7 → 25.5 KB, and throughput stayed at 35–38 kB/s (the provider's cap). `firmware-idf/sdkconfig` is gitignored and wins over the defaults: edit both, then check `build/config/sdkconfig.h`.
 - First push connect is RST at t+25 ms (the listener isn't up yet). A 200 ms quick retry gets first data at t+0.25 s instead of t+1.1 s.
 - Not fixable here: IDF dhcps cannot restore leases after a reboot (it NAKs the old IP, and there's no API to seed the table), so EFB IPs change with every reboot. Path MTU 1500 passes the cabin link, so no MSS clamp is needed.
+- **Bigger FOMAX frames ate the ADBP stack:** its free low-water fell to 1308 B of 8 KB. The two 2.5 KB name tables (64 × 40) and the 1.4 KB strtok copy moved to the PSRAM work buffers; free stack is now 5–5.5 KB. Check `[mem] stack free` after any change to frame size.
+- DNS hit rate was 9 % (81/828 in 21 min): the 5 s TTL floor let 20–60 s CDN names expire at once. Floor raised to 60 s (dnsmasq min-cache-ttl style) and cache to 256 entries: 17 % after 10 min.
+- After an iPad sleep/wake, FliteDeck 5.3 sent only unSubscribe pairs (every ~30 s, no subscribe) for ~1.5 min, then subscribed by itself. While asleep, push connects time out (`err 116`, not RST). Both are FliteDeck/iOS behaviour, not the box.
+- Egress measured: Inmarsat AS31515, exit in Australia (TCP connect Sydney 603 ms, Singapore 693, Frankfurt 850) with the aircraft over Pakistan. It does not follow the aircraft. The per-device cap counts the whole AID as one device; multiplying it would mean evading the provider's limit (not done).
 - Method: `/log` has no timestamps, so poll it at ~3 Hz and stamp new lines on the host, with a port probe running alongside (scripts kept in the session scratchpad only).
 
 ## 2026-10-28 — Battery gauge on the T-Display-S3: the sense pin is NOT the battery

@@ -41,11 +41,17 @@
 // The previous 256 B cap looked roomy for "a 1-name A reply" but the cabin
 // resolver adds authority/additional records: 28 of 30 popular names measured
 // 262-512 B in flight (2026-10-10) and were NEVER cached — hit rate ~1 %.
-#define DNSFWD_CACHE_N       128   // entries with PSRAM (~85 KB there)
+// 128 -> 256 (2026-11-11): 828 misses vs 81 hits in 21 min of cabin traffic;
+// the table was turning over faster than the TTLs. ~170 KB of PSRAM.
+#define DNSFWD_CACHE_N       256   // entries with PSRAM (~170 KB there)
 #define DNSFWD_CACHE_N_SRAM  12    // without PSRAM: ~8 KB of internal SRAM
 #define DNSFWD_CACHE_QMAX    128   // max question bytes used as the key
 #define DNSFWD_CACHE_RMAX    512   // max reply bytes stored
-#define DNSFWD_CACHE_MIN_S 5     // clamp: never cache for less than this
+// Floor 5 -> 60 s (2026-11-11), like dnsmasq's min-cache-ttl: CDN/Apple names
+// carry 20-60 s TTLs, and every early expiry cost a ~600-700 ms satellite round
+// trip. A CDN address stays usable far longer than its TTL; 60 s also bounds
+// how long a negative answer is held.
+#define DNSFWD_CACHE_MIN_S 60    // clamp: never cache for less than this
 #define DNSFWD_CACHE_MAX_S 300   // clamp: nor longer, so the link's own DNS can move
 
 typedef struct {
