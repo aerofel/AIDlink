@@ -1,5 +1,16 @@
 # AIDlink — Learning Journal
 
+## 2026-11-11 — Boot loop after a power-key wake on battery: TinyUSB init timeout was fatal
+
+- **What happened (in flight, b166, on battery with no USB host):** power key off → deep sleep, then key wake → 9 × `reset=panic` plus 1 × `reset=int_wdt` in 70 s, with Wi-Fi/FOMAX down, until a cold power-on. Earlier deep-sleep wakes with the cable plugged in had been fine.
+- **The core dump said it in one read** (`curl /coredump` raw, then `esp-coredump info_corefile -t raw -c dump.bin build/aidlink.elf`): `abort()` from `ESP_ERROR_CHECK(tinyusb_driver_install())` at `usb_ncm.c:135`, rc 263 = ESP_ERR_TIMEOUT. Another thread was stuck in TinyUSB `dwc2 reset_core()` (`while (!(grstctl & AHBIDL)) {}`).
+- A panic reboot does not reset the wedged USB block, so every boot hit it again. Only a power-on reset cleared it. Why the DWC2 never goes idle after a no-host deep-sleep wake is still unknown (bench work).
+- **esp_tinyusb bug:** on timeout `tinyusb_task_start()` frees its ctx but does NOT delete the "TinyUSB" task (prio 5, core 1, busy-waiting), which starves core 1. That is the likely INT_WDT.
+- Fix (b167, flashed as part of b168): TinyUSB comes up before the USB port joins the bridge. On failure, delete the orphaned task, log `[usb] … failed`, and keep running Wi-Fi only. Rule: an optional peripheral must never `ESP_ERROR_CHECK` the whole AID down.
+- **Uplink "stuck red until restart" (same flight):** three times (10:45, 14:42, 15:30) the STA dropped with reason 7 and never reconnected until a manual restart, which then connected in 5 s. I first blamed the cabin network; the restarts disproved that. The retry chain is driven only by DISCONNECTED events, and `retry_cb` ignored `esp_wifi_connect()`'s return, so an attempt that raises no event (refused, or associated with no DHCP lease) ended the chain silently. Only the 1st and every 10th attempt were logged, so the flog could not tell which happened.
+- Fix (b168): `sta_connect()` reschedules itself when refused. The first 5 failures of a streak and every association are logged. A 10 s watchdog restarts the chain if associated 40 s with no lease, or if there was no attempt and no event for 45 s. After 4 min down (only if the uplink worked this boot) it restarts the unit, at most 2× per power cycle (RTC_NOINIT counter behind a magic + SW reset). The flash verified the normal paths only; the watchdog itself is untested until the next stuck event.
+- Side lesson for the 10-min log check: a power-on boot line has no timestamp, so two such boots look identical. Count boot markers to detect a reboot.
+
 ## 2026-11-11 — In flight (ACI500, b154): FliteDeck stuck in a 40 s subscribe/unSubscribe loop, no push
 
 - Symptom in /flog: `[adbp] subscribe periodic … pubport=51001` from the iPad every ~40 s, each followed by `EFB …:51001 unreachable`, never `reachable again`. FliteDeck only gets the one position carried in each subscribe response.

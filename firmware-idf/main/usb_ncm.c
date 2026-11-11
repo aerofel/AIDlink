@@ -28,6 +28,7 @@
 #include "tinyusb_default_config.h"
 #include "tinyusb_net.h"
 #include "netcore.h"
+#include "log.h"
 
 static const char *TAG = "usbncm";
 static esp_netif_t *s_usb_netif;   // L2-only bridge port (no IP of its own)
@@ -88,6 +89,20 @@ static esp_err_t usb_post_attach(esp_netif_t *netif, void *args) {
     return esp_netif_set_driver_config(netif, &ifcfg);
 }
 
+// A failed TinyUSB bring-up must not take the AID down. esp_tinyusb's
+// tinyusb_task_start() returns ESP_ERR_TIMEOUT without deleting the "TinyUSB"
+// task it created; that task is still spinning in the DWC2 reset_core() wait at
+// priority 5 on core 1 and would starve that core (the INT_WDT reset seen in
+// flight). Delete it. (The install's own error path already deleted the PHY;
+// p_tusb_task_ctx is still NULL, so a later usb_ncm_stop() just returns
+// ESP_ERR_INVALID_STATE.)
+static void usb_init_failed(const char *what, esp_err_t e) {
+    TaskHandle_t h = xTaskGetHandle("TinyUSB");
+    if (h) vTaskDelete(h);
+    logln("[usb] %s failed: %s%s; cable link off until the next power-on (Wi-Fi unaffected)",
+          what, esp_err_to_name(e), h ? ", stuck TinyUSB task removed" : "");
+}
+
 void usb_ncm_start(const aidlink_cfg_t *c) {
     (void)c;
     // The bridge (built by netcore_start) owns the AID IP, DHCP pool and NAPT. The
@@ -95,6 +110,28 @@ void usb_ncm_start(const aidlink_cfg_t *c) {
     // on the same 172.20.1.0/26 subnet and reach the AID at 172.20.1.1.
     esp_netif_t *br = netcore_bridge_netif();
     if (!br) { ESP_LOGE(TAG, "[USB] no bridge netif; USB-NCM not started"); return; }
+
+    // --- TinyUSB + NCM class FIRST, and never fatal. ---
+    // In flight 2026-11-11, after a power-key deep-sleep wake on battery (no USB
+    // host), tinyusb_driver_install() timed out (ESP_ERR_TIMEOUT): the DWC2 core
+    // reset never completed. ESP_ERROR_CHECK turned that into abort(), and since a
+    // panic reboot does not reset the USB block, the unit boot-looped (9 panics +
+    // 1 INT_WDT in 70 s; Wi-Fi/FOMAX down) until a cold power-on. The cable link is
+    // optional: on failure, log it and run Wi-Fi only. TinyUSB comes up before the
+    // USB port joins the bridge, so a failed install leaves no port to send into
+    // (usb_recv_cb ignores frames until s_usb_netif exists).
+    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
+    esp_err_t e = tinyusb_driver_install(&tusb_cfg);
+    if (e != ESP_OK) { usb_init_failed("tinyusb_driver_install", e); return; }
+    tinyusb_net_config_t net_cfg = {
+        .on_recv_callback = usb_recv_cb,
+        .free_tx_buffer = usb_free_tx,
+        .user_context = NULL,
+    };
+    esp_read_mac(net_cfg.mac_addr, ESP_MAC_ETH);   // host-side NCM MAC (distinct from nmac)
+    memcpy(s_host_mac, net_cfg.mac_addr, 6);        // remember it for the clients list
+    e = tinyusb_net_init(&net_cfg);
+    if (e != ESP_OK) { usb_init_failed("tinyusb_net_init", e); return; }
 
     // --- L2-only esp_netif over an ethernet netstack: no IP/ARP/DHCP of its own
     //     (flags=0, ip_info=NULL), it gets bridged below. ---
@@ -129,18 +166,6 @@ void usb_ncm_start(const aidlink_cfg_t *c) {
     esp_netif_action_start(s_usb_netif, NULL, 0, NULL);
     esp_netif_action_connected(s_usb_netif, NULL, 0, NULL);
     ESP_ERROR_CHECK(esp_netif_bridge_add_port(br, s_usb_netif));
-
-    // --- TinyUSB + NCM class ---
-    tinyusb_config_t tusb_cfg = TINYUSB_DEFAULT_CONFIG();
-    ESP_ERROR_CHECK(tinyusb_driver_install(&tusb_cfg));
-    tinyusb_net_config_t net_cfg = {
-        .on_recv_callback = usb_recv_cb,
-        .free_tx_buffer = usb_free_tx,
-        .user_context = NULL,
-    };
-    esp_read_mac(net_cfg.mac_addr, ESP_MAC_ETH);   // host-side NCM MAC (distinct from nmac)
-    memcpy(s_host_mac, net_cfg.mac_addr, 6);        // remember it for the clients list
-    ESP_ERROR_CHECK(tinyusb_net_init(&net_cfg));
 
     ESP_LOGI(TAG, "[USB] NCM bridged onto the AID subnet (DHCP+NAPT via bridge)");
 }

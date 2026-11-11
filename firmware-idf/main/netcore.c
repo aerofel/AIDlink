@@ -15,6 +15,9 @@
 #include "lwip/sockets.h"
 #include "lwip/dhcp.h"
 #include "esp_netif_net_stack.h"
+#include "esp_attr.h"
+#include "esp_system.h"
+#include "power.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -36,6 +39,7 @@ static uint8_t s_sta_ip[4];
 static bool s_have_ssid;          // an uplink SSID is configured
 static volatile bool s_no_reconnect;   // suppress auto-reconnect (during a scan)
 static volatile bool s_scanning;       // a Wi-Fi scan is in progress
+static void sta_connect(const char *why);   // reconnect watchdog section below
 
 esp_netif_t *netcore_sta_netif(void) { return s_sta; }
 esp_netif_t *netcore_ap_netif(void) { return s_ap; }
@@ -163,7 +167,7 @@ int netcore_scan(wifi_ap_record_t *recs, uint16_t max, uint16_t *count) {
     s_scanning = false;
     if (!was_up) {
         s_no_reconnect = false;
-        if (s_have_ssid) esp_wifi_connect();   // resume connecting to the uplink
+        if (s_have_ssid) sta_connect("after scan");   // resume connecting to the uplink
     }
     return e == ESP_OK ? 0 : -1;
 }
@@ -301,16 +305,91 @@ static const uint16_t RETRY_S[] = { 1, 2, 5, 10, 30 };
 static unsigned s_retry_i;
 static esp_timer_handle_t s_retry_tmr;
 
+// Reconnect watchdog (2026-11-11, in flight): three times the uplink dropped
+// (reason 7) and never came back until someone restarted the unit, which then
+// connected within 5 s. The retry chain above is driven only by DISCONNECTED
+// events, so an attempt that raises none (connect() refused, or associated but
+// no DHCP lease) ended it for good. These timestamps let a 10 s watchdog see
+// a dead chain and restart it.
+static volatile uint32_t s_last_try_ms;    // last connect() call or STA event
+static volatile uint32_t s_down_ms;        // when the uplink went down (0 = up)
+static volatile uint32_t s_assoc_ms;       // associated (L2) but no IP yet, since
+static bool s_ever_up;                     // uplink worked at least once this boot
+static esp_timer_handle_t s_wd_tmr;
+#define WD_MAGIC 0x57444f47u               // "WDOG"
+static RTC_NOINIT_ATTR uint32_t s_wd_magic, s_wd_restarts;   // per power cycle
+#define WD_ASSOC_NOIP_S  40   // associated this long without a lease: start over
+#define WD_IDLE_S        45   // no attempt and no event this long: chain is dead
+#define WD_RESTART_S    240   // down this long (after having worked): restart
+#define WD_MAX_RESTARTS   2   // per power cycle, so a cabin Wi-Fi that is really
+                              // off (ground, descent) cannot cause a restart loop
+
+static uint32_t ms_now(void) { return (uint32_t)(esp_timer_get_time() / 1000); }
+
+static void sta_connect(const char *why) {
+    s_last_try_ms = ms_now();
+    esp_err_t e = esp_wifi_connect();
+    if (e != ESP_OK && e != ESP_ERR_WIFI_CONN) {
+        // No DISCONNECTED will follow a refused call: reschedule ourselves, or
+        // the chain dies here.
+        logln("[sta] connect (%s) refused: %s, retrying in 5 s", why, esp_err_to_name(e));
+        if (s_retry_tmr) { esp_timer_stop(s_retry_tmr); esp_timer_start_once(s_retry_tmr, 5000000ULL); }
+    }
+}
+
 static void retry_cb(void *arg) {
-    if (s_have_ssid && !s_no_reconnect && !s_sta_up) esp_wifi_connect();
+    if (s_have_ssid && !s_no_reconnect && !s_sta_up) sta_connect("retry");
+}
+
+static void wd_restart_task(void *arg) {
+    power_restart("uplink stuck");   // detaches USB first, then esp_restart()
+    vTaskDelete(NULL);
+}
+
+static void wd_cb(void *arg) {
+    if (!s_have_ssid || s_no_reconnect || s_scanning || s_sta_up) return;
+    uint32_t now = ms_now();
+    if (!s_down_ms) s_down_ms = now;
+    uint32_t down_s = (now - s_down_ms) / 1000;
+    if (s_assoc_ms && (now - s_assoc_ms) / 1000 >= WD_ASSOC_NOIP_S) {
+        logln("[sta] watchdog: associated %lus without a DHCP lease, starting over",
+              (unsigned long)((now - s_assoc_ms) / 1000));
+        s_assoc_ms = 0;
+        s_last_try_ms = now;
+        esp_wifi_disconnect();            // raises DISCONNECTED: the chain resumes
+    } else if ((now - s_last_try_ms) / 1000 >= WD_IDLE_S) {
+        logln("[sta] watchdog: reconnect chain idle %lus (down %lus, attempt %u), kicking",
+              (unsigned long)((now - s_last_try_ms) / 1000), (unsigned long)down_s, s_retry_i);
+        esp_wifi_disconnect();
+        sta_connect("watchdog");
+    }
+    if (s_ever_up && down_s >= WD_RESTART_S && s_wd_restarts < WD_MAX_RESTARTS) {
+        s_wd_restarts++;
+        s_wd_magic = WD_MAGIC;
+        logln("[sta] watchdog: uplink down %lus after working, restart %lu/%d",
+              (unsigned long)down_s, (unsigned long)s_wd_restarts, WD_MAX_RESTARTS);
+        s_down_ms = now;                  // once per window even if the task is slow
+        xTaskCreate(wd_restart_task, "wd_rst", 3072, NULL, 5, NULL);
+    }
 }
 
 static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_START) {
-        if (s_have_ssid && !s_no_reconnect) esp_wifi_connect();
+        if (s_have_ssid && !s_no_reconnect) sta_connect("start");
+    } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_CONNECTED) {
+        // Associated (L2); DHCP still to come. The watchdog starts over if no
+        // lease follows within WD_ASSOC_NOIP_S.
+        s_assoc_ms = ms_now(); s_last_try_ms = s_assoc_ms;
+        if (s_retry_i) {
+            wifi_event_sta_connected_t *c = data;
+            logln("[sta] associated ch %u (attempt %u), waiting for DHCP", c->channel, s_retry_i);
+        }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_sta_up = false;
         s_inet = false;
+        s_assoc_ms = 0;
+        s_last_try_ms = ms_now();
+        if (!s_down_ms) s_down_ms = s_last_try_ms;
         // Not just s_inet: the self-heal and the display read the STATE, which
         // otherwise kept saying "ok" until the probe's next pass (up to ~72 s).
         if (s_inet_state != INET_NO_UPLINK) logln("internet: no uplink (STA disconnected)");
@@ -320,14 +399,15 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
             unsigned i = s_retry_i < sizeof RETRY_S / sizeof RETRY_S[0]
                        ? s_retry_i : sizeof RETRY_S / sizeof RETRY_S[0] - 1;
             // The reason code tells roaming / beacon loss / auth failure apart in
-            // a post-flight flog; log the first and then every 10th of a streak.
-            if (s_retry_i % 10 == 0)
+            // a post-flight flog; log the first 5 and then every 10th of a streak
+            // (only the 1st was visible in the stuck cases of 2026-11-11).
+            if (s_retry_i < 5 || s_retry_i % 10 == 0)
                 logln("[sta] disconnected: reason %d, rssi %d, retry in %us (attempt %u)",
                       e->reason, e->rssi, RETRY_S[i], s_retry_i + 1);
             s_retry_i++;
             if (s_retry_tmr) { esp_timer_stop(s_retry_tmr);
                                esp_timer_start_once(s_retry_tmr, (uint64_t)RETRY_S[i] * 1000000ULL); }
-            else esp_wifi_connect();
+            else sta_connect("event");
         }
     } else if (base == WIFI_EVENT && id == WIFI_EVENT_AP_STACONNECTED) {
         wifi_event_ap_staconnected_t *e = data;
@@ -359,7 +439,12 @@ static void wifi_evt(void *arg, esp_event_base_t base, int32_t id, void *data) {
         s_sta_ip[2] = esp_ip4_addr3_16(&e->ip_info.ip);
         s_sta_ip[3] = esp_ip4_addr4_16(&e->ip_info.ip);
         s_sta_up = true;
+        s_assoc_ms = 0;
+        s_ever_up = true;
         if (s_retry_i > 1) logln("[sta] connected after %u attempts", s_retry_i);
+        if (s_down_ms && (ms_now() - s_down_ms) > 10000)
+            logln("[sta] uplink back after %lus down", (unsigned long)((ms_now() - s_down_ms) / 1000));
+        s_down_ms = 0;
         // The cabin network drops the STA every ~30.5 min (reason 1, 2026-10-10),
         // which is where a 1 h lease would renew. Log what the server granted so
         // the flash log can confirm or rule that out.
@@ -473,6 +558,10 @@ esp_netif_t *netcore_start(const aidlink_cfg_t *c) {
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_AP_STAIPASSIGNED, wifi_evt, NULL, NULL));
     const esp_timer_create_args_t ta = { .callback = retry_cb, .name = "sta_retry" };
     esp_timer_create(&ta, &s_retry_tmr);
+    // The restart counter survives only a software reset behind its magic.
+    if (esp_reset_reason() != ESP_RST_SW || s_wd_magic != WD_MAGIC) { s_wd_restarts = 0; s_wd_magic = WD_MAGIC; }
+    const esp_timer_create_args_t tw = { .callback = wd_cb, .name = "sta_wd" };
+    if (esp_timer_create(&tw, &s_wd_tmr) == ESP_OK) esp_timer_start_periodic(s_wd_tmr, 10000000ULL);
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
 
     s_sta = esp_netif_create_default_wifi_sta();
